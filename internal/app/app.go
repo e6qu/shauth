@@ -31,6 +31,8 @@ import (
 
 const browserSessionCookie = "shauth_session"
 const githubStateCookie = "shauth_github_state"
+const bootstrapRetryInterval = time.Second
+const bootstrapRetryTimeout = 45 * time.Second
 
 var oidcClientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{2,127}$`)
 
@@ -118,7 +120,11 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
 	}
-	return &Server{config: cfg, store: store, github: client, httpClient: http.DefaultClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}, nil
+	server := &Server{config: cfg, store: store, github: client, httpClient: http.DefaultClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
+	if err := server.bootstrapApps(context.Background()); err != nil {
+		return nil, err
+	}
+	return server, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -654,6 +660,74 @@ func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) e
 		return fmt.Errorf("Hydra create client returned %s", response.Status)
 	}
 	return nil
+}
+
+func (s *Server) bootstrapApps(ctx context.Context) error {
+	if len(s.config.BootstrapApps) == 0 {
+		return nil
+	}
+	deadline := time.Now().Add(bootstrapRetryTimeout)
+	var clients []oidcClient
+	var err error
+	for {
+		clients, err = s.hydraClients(ctx)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("list bootstrap OAuth clients: %w", err)
+		}
+		log.Printf("waiting for OAuth provider before bootstrapping managed apps: %v", err)
+		time.Sleep(bootstrapRetryInterval)
+	}
+	byID := make(map[string]oidcClient, len(clients))
+	for _, client := range clients {
+		byID[client.ID] = client
+	}
+	apps, err := s.store.ListManagedApps(ctx)
+	if err != nil {
+		return fmt.Errorf("list bootstrap managed apps: %w", err)
+	}
+	bySlug := make(map[string]identity.ManagedApp, len(apps))
+	for _, managedApp := range apps {
+		bySlug[managedApp.Slug] = managedApp
+	}
+	for _, bootstrap := range s.config.BootstrapApps {
+		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs}
+		if err := input.validate(); err != nil {
+			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
+		}
+		if existing, ok := byID[input.ID]; ok {
+			if existing.Name != input.Name || !sameStrings(existing.RedirectURIs, input.RedirectURIs) {
+				return fmt.Errorf("bootstrap OAuth client %q conflicts with the registered client", input.ID)
+			}
+		} else if err := s.createHydraClient(ctx, input); err != nil {
+			return fmt.Errorf("create bootstrap OAuth client %q: %w", input.ID, err)
+		}
+		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, ECSServiceName: bootstrap.ECSServiceName, CloudWatchLogGroup: bootstrap.CloudWatchLogGroup}
+		if existing, ok := bySlug[managedApp.Slug]; ok {
+			if existing.Name != managedApp.Name || existing.Description != managedApp.Description || existing.LaunchURL != managedApp.LaunchURL || existing.OIDCClientID != managedApp.OIDCClientID || existing.ECSServiceName != managedApp.ECSServiceName || existing.CloudWatchLogGroup != managedApp.CloudWatchLogGroup {
+				return fmt.Errorf("bootstrap managed app %q conflicts with the registered app", managedApp.Slug)
+			}
+			continue
+		}
+		if _, err := s.store.CreateManagedApp(ctx, managedApp); err != nil {
+			return fmt.Errorf("create bootstrap managed app %q: %w", managedApp.Slug, err)
+		}
+	}
+	return nil
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) adminGitHubMappings(w http.ResponseWriter, r *http.Request) {

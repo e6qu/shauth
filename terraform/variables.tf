@@ -48,3 +48,19 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+variable "bootstrap_apps" {
+  description = "Confidential OIDC clients and managed ECS applications Shauth creates idempotently at startup. This input contains client secrets and must be supplied as a Terraform sensitive value."
+  sensitive   = true
+  type = list(object({
+    slug                 = string
+    name                 = string
+    description          = string
+    launch_url           = string
+    oidc_client_id       = string
+    oidc_client_secret   = string
+    redirect_uris        = list(string)
+    ecs_service_name     = string
+    cloudwatch_log_group = string
+  }))
+  default = []
+}

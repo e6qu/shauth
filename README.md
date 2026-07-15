@@ -26,6 +26,11 @@ register an app only after its Shauth OIDC client, Amazon Elastic Container
 Service service, and Amazon CloudWatch Logs group exist. Developers can start
 registered apps; administrators can also stop them and read their real logs.
 
+Terraform can supply `bootstrap_apps` as a sensitive input to register clients
+and catalog records idempotently during Shauth startup. The input is stored only
+in the Shauth runtime secret and contains each confidential client secret,
+redirect URI, Amazon ECS service name, and Amazon CloudWatch Logs group.
+
 ## Deployment model
 
 The Terraform module deploys Shauth and Hydra in private Amazon ECS
