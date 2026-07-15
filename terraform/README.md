@@ -6,6 +6,9 @@ single-AZ Amazon RDS for PostgreSQL instance, with isolated `shauth` and
 `hydra` databases. The task's migration containers create and migrate those
 databases before either application starts.
 
+Automated Amazon RDS backups default to seven days and can be tailored with
+`db_backup_retention_period` when an account plan imposes a lower limit.
+
 The only public entry point is an Amazon API Gateway HTTP API with a private
 VPC link to Amazon Cloud Map service discovery; no Application Load Balancer
 is provisioned. The module creates the regional AWS Certificate Manager
