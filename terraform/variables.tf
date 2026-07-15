@@ -9,7 +9,10 @@ variable "ecs_cluster_arn" { type = string }
 variable "hosted_zone_id" { type = string }
 variable "domain_name" { type = string }
 variable "container_image" { type = string }
-variable "github_oauth_secret_arn" { type = string }
+variable "github_oauth_secret_arn" {
+  type        = string
+  description = "AWS Secrets Manager ARN for a JSON secret containing a client_secret key."
+}
 variable "github_client_id" { type = string }
 variable "bootstrap_admin_email" { type = string }
 variable "invitation_email_from" {
