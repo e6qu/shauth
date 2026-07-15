@@ -6,10 +6,12 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth ./cmd/shauth
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-migrate ./cmd/shauth-migrate
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-healthcheck ./cmd/shauth-healthcheck
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/shauth /shauth
 COPY --from=build /out/shauth-migrate /shauth-migrate
+COPY --from=build /out/shauth-healthcheck /shauth-healthcheck
 COPY migrations /migrations
 USER nonroot:nonroot
 EXPOSE 8080

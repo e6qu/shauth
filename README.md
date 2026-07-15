@@ -6,8 +6,11 @@ session, invitation, and audit state in PostgreSQL. GitHub OAuth is the current
 federated source; Azure Entra federation is configured as a future connector.
 
 The Shauth application provides the server-rendered HTMX admin and monitoring
-user interface. It manages local accounts, GitHub role mappings, invitations,
-sessions, and connector health.
+user interface. It manages local accounts, GitHub role mappings, confidential
+OpenID Connect clients, invitations, sessions, and connector health. Client
+secrets are write-only: an administrator supplies the secret when registering
+the client and stores the same value in the relying service's AWS Secrets
+Manager secret. Shauth never renders or returns it afterward.
 
 ## Deployment model
 

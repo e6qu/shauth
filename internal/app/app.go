@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -29,6 +30,54 @@ import (
 
 const browserSessionCookie = "shauth_session"
 const githubStateCookie = "shauth_github_state"
+
+var oidcClientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{2,127}$`)
+
+type oidcClient struct {
+	ID           string   `json:"client_id"`
+	Name         string   `json:"client_name"`
+	RedirectURIs []string `json:"redirect_uris"`
+}
+
+type oidcClientInput struct {
+	ID           string
+	Name         string
+	Secret       string
+	RedirectURIs []string
+}
+
+func (input oidcClientInput) validate() error {
+	if !oidcClientIDPattern.MatchString(input.ID) {
+		return fmt.Errorf("client ID must contain 3–128 lowercase letters, digits, or hyphens and start with a letter")
+	}
+	if strings.TrimSpace(input.Name) == "" {
+		return fmt.Errorf("client name is required")
+	}
+	if len(input.Secret) < 32 {
+		return fmt.Errorf("client secret must contain at least 32 characters")
+	}
+	if len(input.RedirectURIs) == 0 {
+		return fmt.Errorf("at least one redirect URI is required")
+	}
+	for _, rawURI := range input.RedirectURIs {
+		uri, err := url.Parse(rawURI)
+		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.Fragment != "" {
+			return fmt.Errorf("redirect URI %q must be an absolute URI without a fragment", rawURI)
+		}
+		if uri.Scheme != "https" && !isLoopbackRedirect(uri) {
+			return fmt.Errorf("redirect URI %q must use HTTPS unless it targets loopback", rawURI)
+		}
+	}
+	return nil
+}
+
+func isLoopbackRedirect(uri *url.URL) bool {
+	host := strings.Trim(strings.ToLower(uri.Hostname()), "[]")
+	if host == "localhost" || host == "::1" {
+		return true
+	}
+	return net.ParseIP(host).IsLoopback()
+}
 
 type Server struct {
 	config      config.Config
@@ -78,6 +127,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/consent", s.hydraConsent)
 	mux.HandleFunc("POST /oauth/consent", s.hydraConsentAccept)
 	mux.HandleFunc("GET /admin", s.admin)
+	mux.HandleFunc("GET /admin/clients", s.adminOIDCClients)
+	mux.HandleFunc("POST /admin/clients", s.adminCreateOIDCClient)
+	mux.HandleFunc("POST /admin/clients/{id}/delete", s.adminDeleteOIDCClient)
 	mux.HandleFunc("GET /admin/github", s.adminGitHubMappings)
 	mux.HandleFunc("POST /admin/github", s.adminCreateGitHubMapping)
 	mux.HandleFunc("POST /admin/github/{id}/delete", s.adminDeleteGitHubMapping)
@@ -124,6 +176,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := s.store.Ping(ctx); err != nil {
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.hydraReady(ctx) {
+		http.Error(w, "OAuth provider unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -267,6 +323,129 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "admin", nil)
 }
+
+func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	clients, err := s.hydraClients(r.Context())
+	if err != nil {
+		http.Error(w, "could not query OAuth clients", http.StatusBadGateway)
+		return
+	}
+	s.render(w, "oidc-clients", map[string]any{"Clients": clients, "Error": r.URL.Query().Get("error")})
+}
+
+func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	input := oidcClientInput{
+		ID:     strings.TrimSpace(r.Form.Get("client_id")),
+		Name:   strings.TrimSpace(r.Form.Get("client_name")),
+		Secret: r.Form.Get("client_secret"),
+	}
+	for _, rawURI := range strings.Split(r.Form.Get("redirect_uris"), "\n") {
+		if uri := strings.TrimSpace(rawURI); uri != "" {
+			input.RedirectURIs = append(input.RedirectURIs, uri)
+		}
+	}
+	if err := input.validate(); err != nil {
+		http.Redirect(w, r, "/admin/clients?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	if err := s.createHydraClient(r.Context(), input); err != nil {
+		http.Error(w, "could not create OAuth client", http.StatusBadGateway)
+		return
+	}
+	http.Redirect(w, r, "/admin/clients", http.StatusSeeOther)
+}
+
+func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	clientID := r.PathValue("id")
+	if !oidcClientIDPattern.MatchString(clientID) {
+		http.Error(w, "invalid client ID", http.StatusBadRequest)
+		return
+	}
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + url.PathEscape(clientID)})
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, endpoint.String(), nil)
+	if err != nil {
+		http.Error(w, "could not build OAuth client request", http.StatusInternalServerError)
+		return
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		http.Error(w, "could not delete OAuth client", http.StatusBadGateway)
+		return
+	}
+	http.Redirect(w, r, "/admin/clients", http.StatusSeeOther)
+}
+
+func (s *Server) hydraClients(ctx context.Context) ([]oidcClient, error) {
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients"})
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Hydra list clients returned %s", response.Status)
+	}
+	var clients []oidcClient
+	if err := json.NewDecoder(response.Body).Decode(&clients); err != nil {
+		return nil, fmt.Errorf("decode Hydra clients: %w", err)
+	}
+	return clients, nil
+}
+
+func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) error {
+	payload := map[string]any{
+		"client_id":                  input.ID,
+		"client_name":                input.Name,
+		"client_secret":              input.Secret,
+		"redirect_uris":              input.RedirectURIs,
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"scope":                      "openid offline_access profile email",
+		"token_endpoint_auth_method": "client_secret_post",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients"})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("Hydra create client returned %s", response.Status)
+	}
+	return nil
+}
+
 func (s *Server) adminGitHubMappings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -485,12 +664,16 @@ func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hydraReady(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	endpoint := s.config.HydraPublicURL.ResolveReference(&url.URL{Path: "/health/ready"})
+	return hydraEndpointReady(ctx, s.httpClient, s.config.HydraPublicURL) && hydraEndpointReady(ctx, s.httpClient, s.config.HydraAdminURL)
+}
+
+func hydraEndpointReady(ctx context.Context, client *http.Client, base *url.URL) bool {
+	endpoint := base.ResolveReference(&url.URL{Path: "/health/ready"})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return false
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return false
 	}
