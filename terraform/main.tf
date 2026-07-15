@@ -236,7 +236,11 @@ resource "aws_ecs_service" "this" {
     security_groups  = [aws_security_group.task.id]
     assign_public_ip = false
   }
-  service_registries { registry_arn = aws_service_discovery_service.this.arn }
+  service_registries {
+    registry_arn   = aws_service_discovery_service.this.arn
+    container_name = "shauth"
+    container_port = 8080
+  }
   lifecycle { ignore_changes = [desired_count] }
   tags = local.tags
 }
