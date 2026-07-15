@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -59,6 +60,17 @@ type GitHubRoleMapping struct {
 	Target    string
 	Role      Role
 	CreatedAt time.Time
+}
+type ManagedApp struct {
+	ID                 string
+	Slug               string
+	Name               string
+	Description        string
+	LaunchURL          string
+	OIDCClientID       string
+	ECSServiceName     string
+	CloudWatchLogGroup string
+	CreatedAt          time.Time
 }
 
 type Store struct{ pool *pgxpool.Pool }
@@ -161,6 +173,61 @@ func (s *Store) DeleteGitHubRoleMapping(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedApp, error) {
+	app.Slug = strings.TrimSpace(app.Slug)
+	app.Name = strings.TrimSpace(app.Name)
+	app.Description = strings.TrimSpace(app.Description)
+	app.LaunchURL = strings.TrimSpace(app.LaunchURL)
+	app.OIDCClientID = strings.TrimSpace(app.OIDCClientID)
+	app.ECSServiceName = strings.TrimSpace(app.ECSServiceName)
+	app.CloudWatchLogGroup = strings.TrimSpace(app.CloudWatchLogGroup)
+	if err := validateManagedApp(app); err != nil {
+		return ManagedApp{}, err
+	}
+	err := s.pool.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.ECSServiceName, app.CloudWatchLogGroup).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.ECSServiceName, &app.CloudWatchLogGroup, &app.CreatedAt)
+	if err != nil {
+		return ManagedApp{}, fmt.Errorf("create managed app: %w", err)
+	}
+	return app, nil
+}
+
+func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at FROM managed_apps ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list managed apps: %w", err)
+	}
+	defer rows.Close()
+	var apps []ManagedApp
+	for rows.Next() {
+		var app ManagedApp
+		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.ECSServiceName, &app.CloudWatchLogGroup, &app.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan managed app: %w", err)
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
+	var app ManagedApp
+	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.ECSServiceName, &app.CloudWatchLogGroup, &app.CreatedAt)
+	if err != nil {
+		return ManagedApp{}, fmt.Errorf("get managed app: %w", err)
+	}
+	return app, nil
+}
+
+func (s *Store) DeleteManagedApp(ctx context.Context, id string) error {
+	result, err := s.pool.Exec(ctx, `DELETE FROM managed_apps WHERE id=$1::uuid`, id)
+	if err != nil {
+		return fmt.Errorf("delete managed app: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("managed app not found")
+	}
+	return nil
+}
+
 func validateGitHubRoleMapping(kind, target string, role Role) error {
 	if kind != "user" && kind != "organization" && kind != "team" {
 		return fmt.Errorf("GitHub mapping kind must be user, organization, or team")
@@ -170,6 +237,28 @@ func validateGitHubRoleMapping(kind, target string, role Role) error {
 	}
 	if role != RoleDeveloper && role != RoleAdmin {
 		return fmt.Errorf("GitHub mapping role is invalid")
+	}
+	return nil
+}
+
+func validateManagedApp(app ManagedApp) error {
+	if len(app.Slug) < 3 || len(app.Slug) > 63 {
+		return fmt.Errorf("app slug must be between 3 and 63 characters")
+	}
+	for index, character := range app.Slug {
+		if !(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') && character != '-' || (character == '-' && (index == 0 || index == len(app.Slug)-1)) {
+			return fmt.Errorf("app slug must use lowercase letters, digits, and interior hyphens")
+		}
+	}
+	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" || strings.TrimSpace(app.ECSServiceName) == "" {
+		return fmt.Errorf("app name, description, OIDC client ID, and Amazon Elastic Container Service service are required")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(app.CloudWatchLogGroup), "/e6qu/") {
+		return fmt.Errorf("Amazon CloudWatch Logs group must begin with /e6qu/")
+	}
+	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
+	if err != nil || launchURL.Scheme != "https" || launchURL.Host == "" || launchURL.Fragment != "" {
+		return fmt.Errorf("app launch URL must use HTTPS")
 	}
 	return nil
 }

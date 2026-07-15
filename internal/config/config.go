@@ -25,6 +25,7 @@ type Config struct {
 	BootstrapAdminPassword string
 	AllowInsecureCookies   bool
 	SESRegion              string
+	ECSCluster             string
 	InvitationEmailFrom    string
 }
 
@@ -57,6 +58,7 @@ func Load(getenv func(string) string) (Config, error) {
 		BootstrapAdminPassword: getenv("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"),
 		AllowInsecureCookies:   getenv("SHAUTH_ALLOW_INSECURE_COOKIES") == "true",
 		SESRegion:              getenv("SHAUTH_SES_REGION"),
+		ECSCluster:             getenv("SHAUTH_ECS_CLUSTER"),
 		InvitationEmailFrom:    getenv("SHAUTH_INVITATION_EMAIL_FROM"),
 	}
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {

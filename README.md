@@ -12,6 +12,20 @@ secrets are write-only: an administrator supplies the secret when registering
 the client and stores the same value in the relying service's AWS Secrets
 Manager secret. Shauth never renders or returns it afterward.
 
+## Brokered application login
+
+GitHub permits one callback URL per OAuth application. Shauth is therefore the
+sole GitHub OAuth callback at
+`https://auth.dev.e6qu.dev/oauth/github/callback`; it completes GitHub login
+and issues OpenID Connect tokens to registered e6qu applications. Each relying
+application has its own Shauth OIDC client and redirect URI, rather than being
+added to the GitHub OAuth application.
+
+The signed-in Apps page is a catalog of real deployed services. Administrators
+register an app only after its Shauth OIDC client, Amazon Elastic Container
+Service service, and Amazon CloudWatch Logs group exist. Developers can start
+registered apps; administrators can also stop them and read their real logs.
+
 ## Deployment model
 
 The Terraform module deploys Shauth and Hydra in private Amazon ECS
