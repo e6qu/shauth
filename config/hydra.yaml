@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+serve: {}
+strategies:
+  access_token: jwt
+
+ttl:
+  access_token: 15m
+  refresh_token: 720h
+  id_token: 15m
+  auth_code: 10m
