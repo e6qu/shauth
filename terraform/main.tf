@@ -193,7 +193,7 @@ resource "aws_service_discovery_private_dns_namespace" "this" {
   tags = local.tags
 }
 resource "aws_service_discovery_service" "this" {
-  name = var.name
+  name = "${var.name}-srv"
   dns_config {
     namespace_id = aws_service_discovery_private_dns_namespace.this.id
     dns_records {
@@ -201,6 +201,10 @@ resource "aws_service_discovery_service" "this" {
       type = "SRV"
     }
     routing_policy = "MULTIVALUE"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 

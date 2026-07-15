@@ -16,6 +16,10 @@ The module creates the regional AWS Certificate Manager
 certificate and Route 53 alias for `domain_name` and applies conservative
 default-route throttling.
 
+The Cloud Map service name is suffixed with `-srv` so an older A-record
+service can be replaced safely: Terraform creates the SRV service, moves the
+Amazon ECS and API Gateway registrations, then removes the retired service.
+
 Pass a pinned multi-architecture image manifest such as
 `ghcr.io/e6qu/shauth:0123456789ab`, and the ARN of the GitHub OAuth client
 secret stored in AWS Secrets Manager. The module creates a separate runtime
