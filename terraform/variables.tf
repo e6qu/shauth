@@ -31,6 +31,16 @@ variable "db_instance_class" {
   type    = string
   default = "db.t4g.micro"
 }
+variable "db_backup_retention_period" {
+  type        = number
+  default     = 7
+  description = "Number of days to retain automated Amazon RDS backups."
+
+  validation {
+    condition     = var.db_backup_retention_period >= 0 && var.db_backup_retention_period <= 35
+    error_message = "db_backup_retention_period must be between 0 and 35 days."
+  }
+}
 variable "tags" {
   type    = map(string)
   default = {}
