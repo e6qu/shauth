@@ -423,7 +423,7 @@ func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) e
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"scope":                      "openid offline_access profile email",
-		"token_endpoint_auth_method": "client_secret_basic",
+		"token_endpoint_auth_method": "client_secret_post",
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

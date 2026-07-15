@@ -22,8 +22,13 @@ cookie_jar=$(mktemp)
 consent_page=$(mktemp)
 
 cleanup() {
-  docker compose down --volumes --remove-orphans
-  rm -f "$cookie_jar" "$consent_page"
+	status=$?
+	if [ "$status" -ne 0 ]; then
+		docker compose logs --no-color >&2 || true
+	fi
+	 docker compose down --volumes --remove-orphans
+	 rm -f "$cookie_jar" "$consent_page"
+	return "$status"
 }
 trap cleanup EXIT INT TERM
 
@@ -74,17 +79,23 @@ callback_location=$(curl --fail --silent --show-error --dump-header - --output /
 final_callback_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$callback_location" |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 authorization_code=$(printf '%s' "$final_callback_location" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
-token_response=$(curl --fail --silent --show-error --user "shauth-integration-client:${SHAUTH_OIDC_CLIENT_SECRET}" \
-  --data-urlencode 'grant_type=authorization_code' \
-  --data-urlencode "code=${authorization_code}" \
-  --data-urlencode 'redirect_uri=http://localhost:5555/callback' \
-  http://localhost:4444/oauth2/token)
+printf '%s\n' 'exchanging authorization code'
+token_response=$(curl --fail --silent --show-error \
+	--data-urlencode 'grant_type=authorization_code' \
+	--data-urlencode "code=${authorization_code}" \
+	--data-urlencode 'redirect_uri=http://localhost:5555/callback' \
+	--data-urlencode 'client_id=shauth-integration-client' \
+	--data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
+	http://localhost:4444/oauth2/token)
 refresh_token=$(printf '%s' "$token_response" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
 [ -n "$refresh_token" ]
-curl --fail --silent --show-error --user "shauth-integration-client:${SHAUTH_OIDC_CLIENT_SECRET}" \
-  --data-urlencode 'grant_type=refresh_token' \
-  --data-urlencode "refresh_token=${refresh_token}" \
-  http://localhost:4444/oauth2/token | grep -q '"access_token"'
+printf '%s\n' 'refreshing access token'
+curl --fail --silent --show-error \
+	--data-urlencode 'grant_type=refresh_token' \
+	--data-urlencode "refresh_token=${refresh_token}" \
+	--data-urlencode 'client_id=shauth-integration-client' \
+	--data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
+	http://localhost:4444/oauth2/token | grep -q '"access_token"'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'admin@localhost.test'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin | grep -q 'Private administration'
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
