@@ -24,6 +24,7 @@ import (
 	githubapi "github.com/e6qu/shauth/internal/github"
 	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/mailer"
+	"github.com/e6qu/shauth/internal/managedapps"
 	"golang.org/x/oauth2"
 	oauthgithub "golang.org/x/oauth2/github"
 )
@@ -88,6 +89,7 @@ type Server struct {
 	templates   *template.Template
 	hydraPublic *httputil.ReverseProxy
 	mailer      mailer.Invitations
+	managedApps *managedapps.Controller
 }
 
 func New(cfg config.Config, store *identity.Store) (*Server, error) {
@@ -104,20 +106,30 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	var appController *managedapps.Controller
+	if cfg.ECSCluster != "" {
+		appController, err = managedapps.New(context.Background(), cfg.SESRegion, cfg.ECSCluster)
+		if err != nil {
+			return nil, err
+		}
+	}
 	proxy := httputil.NewSingleHostReverseProxy(cfg.HydraPublicURL)
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
 	}
-	return &Server{config: cfg, store: store, github: client, httpClient: http.DefaultClient, templates: templates, hydraPublic: proxy, mailer: inviter, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}, nil
+	return &Server{config: cfg, store: store, github: client, httpClient: http.DefaultClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /assets/theme.js", serveThemeScript)
 	mux.Handle("/.well-known/{path...}", s.hydraPublic)
 	mux.Handle("/oauth2/{path...}", s.hydraPublic)
 	mux.HandleFunc("GET /{$}", s.home)
+	mux.HandleFunc("GET /apps", s.apps)
+	mux.HandleFunc("POST /apps/{id}/start", s.startApp)
 	mux.HandleFunc("GET /login", s.login)
 	mux.HandleFunc("POST /login", s.passwordLogin)
 	mux.HandleFunc("POST /logout", s.logout)
@@ -127,6 +139,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/consent", s.hydraConsent)
 	mux.HandleFunc("POST /oauth/consent", s.hydraConsentAccept)
 	mux.HandleFunc("GET /admin", s.admin)
+	mux.HandleFunc("GET /admin/apps", s.adminApps)
+	mux.HandleFunc("POST /admin/apps", s.adminCreateApp)
+	mux.HandleFunc("POST /admin/apps/{id}/start", s.adminStartApp)
+	mux.HandleFunc("POST /admin/apps/{id}/stop", s.adminStopApp)
+	mux.HandleFunc("POST /admin/apps/{id}/delete", s.adminDeleteApp)
+	mux.HandleFunc("GET /admin/apps/{id}/logs", s.adminAppLogs)
 	mux.HandleFunc("GET /admin/clients", s.adminOIDCClients)
 	mux.HandleFunc("POST /admin/clients", s.adminCreateOIDCClient)
 	mux.HandleFunc("POST /admin/clients/{id}/delete", s.adminDeleteOIDCClient)
@@ -153,6 +171,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func serveThemeScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write([]byte(`!function(){try{var root=document.documentElement,theme=localStorage.getItem("shauth-theme");if(theme){root.dataset.theme=theme}function setup(){var button=document.getElementById("theme-toggle");if(!button)return;function label(){var current=root.dataset.theme||"system";button.setAttribute("aria-pressed",String(current==="dark"));button.textContent=current==="dark"?"Light theme":current==="light"?"System theme":"Dark theme"}button.addEventListener("click",function(){var current=root.dataset.theme||"system";root.dataset.theme=current==="system"?"dark":current==="dark"?"light":"system";localStorage.setItem("shauth-theme",root.dataset.theme);label()});label()}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",setup)}else{setup()}}catch(error){}}();`))
 }
 func sameOriginPosts(publicURL *url.URL, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -321,7 +345,193 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "admin", nil)
+	s.render(w, "admin", map[string]any{"SignedIn": true})
+}
+
+type managedAppView struct {
+	identity.ManagedApp
+	DesiredCount int32
+	RunningCount int32
+	PendingCount int32
+	StatusError  string
+}
+
+func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
+	apps, err := s.store.ListManagedApps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]managedAppView, 0, len(apps))
+	for _, app := range apps {
+		view := managedAppView{ManagedApp: app}
+		if s.managedApps == nil {
+			view.StatusError = "Amazon Elastic Container Service controls are not configured"
+		} else if status, err := s.managedApps.Status(ctx, app); err != nil {
+			view.StatusError = err.Error()
+		} else {
+			view.DesiredCount, view.RunningCount, view.PendingCount = status.DesiredCount, status.RunningCount, status.PendingCount
+		}
+		views = append(views, view)
+	}
+	return views, nil
+}
+
+func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
+	user, _, err := s.current(r)
+	if err != nil {
+		http.Redirect(w, r, "/login?next=/apps", http.StatusSeeOther)
+		return
+	}
+	apps, err := s.appViews(r.Context())
+	if err != nil {
+		http.Error(w, "could not query apps", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "apps", map[string]any{"SignedIn": true, "User": user, "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin})
+}
+
+func (s *Server) appByID(ctx context.Context, id string) (identity.ManagedApp, error) {
+	if id == "" {
+		return identity.ManagedApp{}, fmt.Errorf("app ID is required")
+	}
+	return s.store.ManagedApp(ctx, id)
+}
+
+func (s *Server) startAppForUser(w http.ResponseWriter, r *http.Request, adminOnly bool) {
+	user, _, err := s.current(r)
+	if err != nil {
+		http.Redirect(w, r, "/login?next=/apps", http.StatusSeeOther)
+		return
+	}
+	if adminOnly && user.Role != identity.RoleAdmin {
+		http.Error(w, "administrator access required", http.StatusForbidden)
+		return
+	}
+	if s.managedApps == nil {
+		http.Error(w, "Amazon Elastic Container Service controls are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	app, err := s.appByID(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "app not found", http.StatusNotFound)
+		return
+	}
+	if err := s.managedApps.Start(r.Context(), app); err != nil {
+		log.Printf("start app %s: %v", app.Slug, err)
+		http.Error(w, "could not start app", http.StatusBadGateway)
+		return
+	}
+	location := "/apps"
+	if adminOnly {
+		location = "/admin/apps"
+	}
+	http.Redirect(w, r, location, http.StatusSeeOther)
+}
+
+func (s *Server) startApp(w http.ResponseWriter, r *http.Request)      { s.startAppForUser(w, r, false) }
+func (s *Server) adminStartApp(w http.ResponseWriter, r *http.Request) { s.startAppForUser(w, r, true) }
+
+func (s *Server) adminApps(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	apps, err := s.appViews(r.Context())
+	if err != nil {
+		http.Error(w, "could not query apps", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "admin-apps", map[string]any{"SignedIn": true, "Apps": apps, "Error": r.URL.Query().Get("error")})
+}
+
+func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	app := identity.ManagedApp{
+		Slug:               strings.TrimSpace(r.Form.Get("slug")),
+		Name:               strings.TrimSpace(r.Form.Get("name")),
+		Description:        strings.TrimSpace(r.Form.Get("description")),
+		LaunchURL:          strings.TrimSpace(r.Form.Get("launch_url")),
+		OIDCClientID:       strings.TrimSpace(r.Form.Get("oidc_client_id")),
+		ECSServiceName:     strings.TrimSpace(r.Form.Get("ecs_service_name")),
+		CloudWatchLogGroup: strings.TrimSpace(r.Form.Get("cloudwatch_log_group")),
+	}
+	clients, err := s.hydraClients(r.Context())
+	if err != nil {
+		http.Error(w, "could not verify OAuth client", http.StatusBadGateway)
+		return
+	}
+	clientFound := false
+	for _, client := range clients {
+		clientFound = clientFound || client.ID == app.OIDCClientID
+	}
+	if !clientFound {
+		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape("register the OIDC client before adding its app"), http.StatusSeeOther)
+		return
+	}
+	if _, err := s.store.CreateManagedApp(r.Context(), app); err != nil {
+		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
+}
+
+func (s *Server) adminStopApp(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.managedApps == nil {
+		http.Error(w, "Amazon Elastic Container Service controls are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	app, err := s.appByID(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "app not found", http.StatusNotFound)
+		return
+	}
+	if err := s.managedApps.Stop(r.Context(), app); err != nil {
+		log.Printf("stop app %s: %v", app.Slug, err)
+		http.Error(w, "could not stop app", http.StatusBadGateway)
+		return
+	}
+	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
+}
+
+func (s *Server) adminDeleteApp(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := s.store.DeleteManagedApp(r.Context(), r.PathValue("id")); err != nil {
+		http.Error(w, "app not found", http.StatusNotFound)
+		return
+	}
+	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
+}
+
+func (s *Server) adminAppLogs(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.managedApps == nil {
+		http.Error(w, "Amazon Elastic Container Service controls are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	app, err := s.appByID(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "app not found", http.StatusNotFound)
+		return
+	}
+	events, err := s.managedApps.Logs(r.Context(), app)
+	if err != nil {
+		log.Printf("read logs for %s: %v", app.Slug, err)
+		http.Error(w, "could not read logs", http.StatusBadGateway)
+		return
+	}
+	s.render(w, "app-logs", map[string]any{"SignedIn": true, "App": app, "Events": events})
 }
 
 func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
@@ -333,7 +543,7 @@ func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query OAuth clients", http.StatusBadGateway)
 		return
 	}
-	s.render(w, "oidc-clients", map[string]any{"Clients": clients, "Error": r.URL.Query().Get("error")})
+	s.render(w, "oidc-clients", map[string]any{"SignedIn": true, "Clients": clients, "Error": r.URL.Query().Get("error")})
 }
 
 func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
@@ -455,7 +665,7 @@ func (s *Server) adminGitHubMappings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query GitHub role mappings", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "github-mappings", map[string]any{"Mappings": mappings})
+	s.render(w, "github-mappings", map[string]any{"SignedIn": true, "Mappings": mappings})
 }
 func (s *Server) adminCreateGitHubMapping(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -491,7 +701,7 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query users", 500)
 		return
 	}
-	s.render(w, "users", map[string]any{"Users": users, "Query": r.URL.Query().Get("q")})
+	s.render(w, "users", map[string]any{"SignedIn": true, "Users": users, "Query": r.URL.Query().Get("q")})
 }
 func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -541,7 +751,7 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "invitations", nil)
+	s.render(w, "invitations", map[string]any{"SignedIn": true})
 }
 func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "accept-invitation", map[string]any{"Token": r.URL.Query().Get("token")})
@@ -570,7 +780,7 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query sessions", 500)
 		return
 	}
-	s.render(w, "sessions", map[string]any{"Sessions": sessions, "UserID": r.PathValue("id")})
+	s.render(w, "sessions", map[string]any{"SignedIn": true, "Sessions": sessions, "UserID": r.PathValue("id")})
 }
 func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -659,7 +869,7 @@ func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not inspect sessions", 500)
 		return
 	}
-	s.render(w, "monitoring", map[string]any{"ActiveSessions": active, "HydraHealthy": s.hydraReady(r.Context()), "Now": time.Now().UTC()})
+	s.render(w, "monitoring", map[string]any{"SignedIn": true, "ActiveSessions": active, "HydraHealthy": s.hydraReady(r.Context()), "Now": time.Now().UTC()})
 }
 func (s *Server) hydraReady(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)

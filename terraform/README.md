@@ -29,3 +29,10 @@ secret containing the generated database, Hydra, and bootstrap-admin secrets.
 
 The caller supplies the shared VPC, private subnet IDs, Amazon ECS cluster,
 and Route 53 hosted zone so Shauth can coexist with the other `dev` services.
+
+Shauth's task role can describe and change desired counts only for services in
+the supplied Amazon ECS cluster, and can read Amazon CloudWatch Logs groups
+under `/e6qu/`. Administrators register each managed app in the Shauth UI only
+after its OIDC client, Amazon ECS service, and `/e6qu/` log group exist. Users
+can start a registered app; administrators can also stop it and inspect its
+real CloudWatch Logs events.
