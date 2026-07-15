@@ -19,6 +19,8 @@ default-route throttling.
 The Cloud Map service name is suffixed with `-srv` so an older A-record
 service can be replaced safely: Terraform creates the SRV service, moves the
 Amazon ECS and API Gateway registrations, then removes the retired service.
+The module waits for the Amazon ECS service to reach steady state before
+Terraform retires the previous Cloud Map service.
 
 Pass a pinned multi-architecture image manifest such as
 `ghcr.io/e6qu/shauth:0123456789ab`, and the ARN of the GitHub OAuth client

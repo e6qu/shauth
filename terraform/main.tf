@@ -245,6 +245,7 @@ resource "aws_ecs_service" "this" {
     container_name = "shauth"
     container_port = 8080
   }
+  wait_for_steady_state = true
   lifecycle { ignore_changes = [desired_count] }
   tags = local.tags
 }
