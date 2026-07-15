@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    environment:
+      POSTGRES_DB: shauth
+      POSTGRES_USER: shauth
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shauth -d shauth"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres-init.sql:/docker-entrypoint-initdb.d/001-databases.sql:ro
+
+  hydra-migrate:
+    image: oryd/hydra:v26.2.0
+    command: migrate sql up --read-from-env --yes
+    environment: &hydra-environment
+      DSN: ${HYDRA_DSN:?set HYDRA_DSN}
+      HYDRA_DSN: ${HYDRA_DSN:?set HYDRA_DSN}
+      HYDRA_PUBLIC_URL: ${HYDRA_PUBLIC_URL:-http://localhost:4444}
+      SHAUTH_PUBLIC_URL: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}
+      HYDRA_SYSTEM_SECRET: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET}
+      URLS_SELF_ISSUER: ${HYDRA_PUBLIC_URL:-http://localhost:4444}
+      URLS_LOGIN: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/login
+      URLS_CONSENT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/consent
+      URLS_LOGOUT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/logout
+      SECRETS_SYSTEM_0: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  hydra:
+    image: oryd/hydra:v26.2.0
+    command: serve all --dev --config /etc/config/hydra.yaml
+    environment: *hydra-environment
+    depends_on:
+      hydra-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "4444:4444"
+      - "127.0.0.1:4445:4445"
+    volumes:
+      - ./config/hydra.yaml:/etc/config/hydra.yaml:ro
+
+  shauth:
+    build: .
+    environment:
+      SHAUTH_LISTEN_ADDRESS: :8080
+      SHAUTH_PUBLIC_URL: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}
+      SHAUTH_ALLOW_INSECURE_COOKIES: "true"
+      DATABASE_URL: ${SHAUTH_DATABASE_URL:?set SHAUTH_DATABASE_URL}
+      HYDRA_ADMIN_URL: http://hydra:4445
+      HYDRA_PUBLIC_INTERNAL_URL: http://hydra:4444
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET}
+      GITHUB_DEVELOPER_TEAM: e6qu-org/e6qu-org-members
+      GITHUB_ADMIN_TEAM: e6qu-org/e6qu-org-admins
+
+      SHAUTH_BOOTSTRAP_ADMIN_EMAIL: ${SHAUTH_BOOTSTRAP_ADMIN_EMAIL:-admin@localhost.test}
+      SHAUTH_BOOTSTRAP_ADMIN_PASSWORD: ${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD:?set SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}
+      SHAUTH_SES_REGION: eu-west-1
+      SHAUTH_INVITATION_EMAIL_FROM: no-reply@localhost.test
+    depends_on:
+      shauth-migrate:
+        condition: service_completed_successfully
+      hydra:
+        condition: service_started
+    ports:
+      - "8080:8080"
+
+  shauth-migrate:
+    build: .
+    entrypoint: ["/shauth-migrate"]
+    environment:
+      DATABASE_URL: ${SHAUTH_DATABASE_URL:?set SHAUTH_DATABASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
