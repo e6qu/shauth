@@ -30,19 +30,13 @@ variable "github_developer_team" {
   type    = string
   default = "e6qu-org/e6qu-org-members"
 }
-variable "db_instance_class" {
-  type    = string
-  default = "db.t4g.micro"
+variable "database_url_secret_arn" {
+  type        = string
+  description = "AWS Secrets Manager ARN containing Shauth's dedicated PostgreSQL URL from fck-rds."
 }
-variable "db_backup_retention_period" {
-  type        = number
-  default     = 7
-  description = "Number of days to retain automated Amazon RDS backups."
-
-  validation {
-    condition     = var.db_backup_retention_period >= 0 && var.db_backup_retention_period <= 35
-    error_message = "db_backup_retention_period must be between 0 and 35 days."
-  }
+variable "hydra_database_url_secret_arn" {
+  type        = string
+  description = "AWS Secrets Manager ARN containing Ory Hydra's dedicated PostgreSQL URL from fck-rds."
 }
 variable "tags" {
   type    = map(string)

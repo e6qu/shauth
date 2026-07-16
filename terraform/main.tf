@@ -4,8 +4,6 @@ locals {
   invitation_email_domain = split("@", var.invitation_email_from)[1]
 }
 
-data "aws_availability_zones" "available" { state = "available" }
-
 resource "aws_cloudwatch_log_group" "this" {
   name              = "/e6qu/${var.name}"
   retention_in_days = 30
@@ -42,28 +40,6 @@ resource "aws_security_group" "api_link" {
   tags = local.tags
 }
 
-resource "aws_security_group" "database" {
-  name_prefix = "${var.name}-database-"
-  vpc_id      = var.vpc_id
-  ingress {
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.task.id]
-  }
-  tags = local.tags
-}
-
-resource "aws_db_subnet_group" "this" {
-  name       = var.name
-  subnet_ids = var.private_subnet_ids
-  tags       = local.tags
-}
-
-resource "random_password" "database" {
-  length  = 40
-  special = false
-}
 resource "random_password" "hydra" {
   length  = 48
   special = false
@@ -71,32 +47,6 @@ resource "random_password" "hydra" {
 resource "random_password" "bootstrap" {
   length  = 40
   special = false
-}
-
-resource "aws_db_instance" "this" {
-  identifier                 = var.name
-  engine                     = "postgres"
-  engine_version             = "17"
-  instance_class             = var.db_instance_class
-  allocated_storage          = 20
-  max_allocated_storage      = 50
-  storage_type               = "gp3"
-  storage_encrypted          = true
-  db_name                    = "shauth"
-  username                   = "shauth"
-  password                   = random_password.database.result
-  port                       = 5432
-  db_subnet_group_name       = aws_db_subnet_group.this.name
-  vpc_security_group_ids     = [aws_security_group.database.id]
-  publicly_accessible        = false
-  multi_az                   = false
-  backup_retention_period    = var.db_backup_retention_period
-  deletion_protection        = true
-  skip_final_snapshot        = false
-  final_snapshot_identifier  = "${var.name}-final"
-  auto_minor_version_upgrade = true
-  copy_tags_to_snapshot      = true
-  tags                       = local.tags
 }
 
 resource "aws_secretsmanager_secret" "runtime" {
@@ -108,9 +58,6 @@ resource "aws_secretsmanager_secret" "runtime" {
 resource "aws_secretsmanager_secret_version" "runtime" {
   secret_id = aws_secretsmanager_secret.runtime.id
   secret_string = jsonencode({
-    DATABASE_URL                    = "postgresql://shauth:${random_password.database.result}@${aws_db_instance.this.address}:5432/shauth?sslmode=require"
-    DATABASE_ADMIN_URL              = "postgresql://shauth:${random_password.database.result}@${aws_db_instance.this.address}:5432/postgres?sslmode=require"
-    HYDRA_DSN                       = "postgresql://shauth:${random_password.database.result}@${aws_db_instance.this.address}:5432/hydra?sslmode=require"
     HYDRA_SYSTEM_SECRET             = random_password.hydra.result
     SHAUTH_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap.result
     SHAUTH_BOOTSTRAP_APPS_JSON      = jsonencode(var.bootstrap_apps)
@@ -162,8 +109,13 @@ resource "aws_iam_role_policy_attachment" "execution" {
 }
 data "aws_iam_policy_document" "secrets" {
   statement {
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [aws_secretsmanager_secret.runtime.arn, var.github_oauth_secret_arn]
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      aws_secretsmanager_secret.runtime.arn,
+      var.github_oauth_secret_arn,
+      var.database_url_secret_arn,
+      var.hydra_database_url_secret_arn,
+    ]
   }
 }
 data "aws_iam_policy_document" "task" {
@@ -235,10 +187,10 @@ resource "aws_ecs_task_definition" "this" {
     operating_system_family = "LINUX"
   }
   container_definitions = jsonencode([
-    { name = "shauth-migrate", image = var.container_image, essential = false, entryPoint = ["/shauth-migrate"], environment = [{ name = "SHAUTH_MIGRATIONS_DIR", value = "/migrations" }], secrets = [{ name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:DATABASE_URL::" }, { name = "DATABASE_ADMIN_URL", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:DATABASE_ADMIN_URL::" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "migrate" } } },
-    { name = "hydra-migrate", image = "oryd/hydra:v26.2.0", essential = false, command = ["migrate", "sql", "up", "--read-from-env", "--yes"], dependsOn = [{ containerName = "shauth-migrate", condition = "SUCCESS" }], secrets = [{ name = "DSN", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_DSN::" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra-migrate" } } },
-    { name = "hydra", image = "oryd/hydra:v26.2.0", essential = true, command = ["serve", "all"], dependsOn = [{ containerName = "hydra-migrate", condition = "SUCCESS" }], environment = [{ name = "URLS_SELF_ISSUER", value = local.public_url }, { name = "URLS_LOGIN", value = "${local.public_url}/oauth/login" }, { name = "URLS_CONSENT", value = "${local.public_url}/oauth/consent" }, { name = "URLS_LOGOUT", value = "${local.public_url}/oauth/logout" }, { name = "URLS_ERROR", value = "${local.public_url}/oauth/error" }, { name = "TTL_ACCESS_TOKEN", value = "15m" }, { name = "TTL_REFRESH_TOKEN", value = "720h" }, { name = "TTL_ID_TOKEN", value = "15m" }, { name = "TTL_AUTH_CODE", value = "10m" }], secrets = [{ name = "DSN", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_DSN::" }, { name = "SECRETS_SYSTEM_0", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_SYSTEM_SECRET::" }], portMappings = [{ containerPort = 4444, protocol = "tcp" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra" } } },
-    { name = "shauth", image = var.container_image, essential = true, dependsOn = [{ containerName = "hydra", condition = "START" }], portMappings = [{ containerPort = 8080, protocol = "tcp" }], healthCheck = { command = ["CMD", "/shauth-healthcheck"], interval = 30, timeout = 5, retries = 3, startPeriod = 30 }, environment = [{ name = "SHAUTH_LISTEN_ADDRESS", value = ":8080" }, { name = "SHAUTH_PUBLIC_URL", value = local.public_url }, { name = "HYDRA_ADMIN_URL", value = "http://127.0.0.1:4445" }, { name = "HYDRA_PUBLIC_INTERNAL_URL", value = "http://127.0.0.1:4444" }, { name = "GITHUB_CLIENT_ID", value = var.github_client_id }, { name = "GITHUB_DEVELOPER_TEAM", value = var.github_developer_team }, { name = "GITHUB_ADMIN_TEAM", value = var.github_admin_team }, { name = "SHAUTH_BOOTSTRAP_ADMIN_EMAIL", value = var.bootstrap_admin_email }, { name = "SHAUTH_SES_REGION", value = var.region }, { name = "SHAUTH_ECS_CLUSTER", value = var.ecs_cluster_arn }, { name = "SHAUTH_INVITATION_EMAIL_FROM", value = var.invitation_email_from }], secrets = [{ name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:DATABASE_URL::" }, { name = "GITHUB_CLIENT_SECRET", valueFrom = "${var.github_oauth_secret_arn}:client_secret::" }, { name = "SHAUTH_BOOTSTRAP_ADMIN_PASSWORD", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_ADMIN_PASSWORD::" }, { name = "SHAUTH_BOOTSTRAP_APPS_JSON", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_APPS_JSON::" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "shauth" } } }
+    { name = "shauth-migrate", image = var.container_image, essential = false, entryPoint = ["/shauth-migrate"], environment = [{ name = "SHAUTH_MIGRATIONS_DIR", value = "/migrations" }], secrets = [{ name = "DATABASE_URL", valueFrom = var.database_url_secret_arn }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "migrate" } } },
+    { name = "hydra-migrate", image = "oryd/hydra:v26.2.0", essential = false, command = ["migrate", "sql", "up", "--read-from-env", "--yes"], dependsOn = [{ containerName = "shauth-migrate", condition = "SUCCESS" }], secrets = [{ name = "DSN", valueFrom = var.hydra_database_url_secret_arn }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra-migrate" } } },
+    { name = "hydra", image = "oryd/hydra:v26.2.0", essential = true, command = ["serve", "all"], dependsOn = [{ containerName = "hydra-migrate", condition = "SUCCESS" }], environment = [{ name = "URLS_SELF_ISSUER", value = local.public_url }, { name = "URLS_LOGIN", value = "${local.public_url}/oauth/login" }, { name = "URLS_CONSENT", value = "${local.public_url}/oauth/consent" }, { name = "URLS_LOGOUT", value = "${local.public_url}/oauth/logout" }, { name = "URLS_ERROR", value = "${local.public_url}/oauth/error" }, { name = "TTL_ACCESS_TOKEN", value = "15m" }, { name = "TTL_REFRESH_TOKEN", value = "720h" }, { name = "TTL_ID_TOKEN", value = "15m" }, { name = "TTL_AUTH_CODE", value = "10m" }], secrets = [{ name = "DSN", valueFrom = var.hydra_database_url_secret_arn }, { name = "SECRETS_SYSTEM_0", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_SYSTEM_SECRET::" }], portMappings = [{ containerPort = 4444, protocol = "tcp" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra" } } },
+    { name = "shauth", image = var.container_image, essential = true, dependsOn = [{ containerName = "hydra", condition = "START" }], portMappings = [{ containerPort = 8080, protocol = "tcp" }], healthCheck = { command = ["CMD", "/shauth-healthcheck"], interval = 30, timeout = 5, retries = 3, startPeriod = 30 }, environment = [{ name = "SHAUTH_LISTEN_ADDRESS", value = ":8080" }, { name = "SHAUTH_PUBLIC_URL", value = local.public_url }, { name = "HYDRA_ADMIN_URL", value = "http://127.0.0.1:4445" }, { name = "HYDRA_PUBLIC_INTERNAL_URL", value = "http://127.0.0.1:4444" }, { name = "GITHUB_CLIENT_ID", value = var.github_client_id }, { name = "GITHUB_DEVELOPER_TEAM", value = var.github_developer_team }, { name = "GITHUB_ADMIN_TEAM", value = var.github_admin_team }, { name = "SHAUTH_BOOTSTRAP_ADMIN_EMAIL", value = var.bootstrap_admin_email }, { name = "SHAUTH_SES_REGION", value = var.region }, { name = "SHAUTH_ECS_CLUSTER", value = var.ecs_cluster_arn }, { name = "SHAUTH_INVITATION_EMAIL_FROM", value = var.invitation_email_from }], secrets = [{ name = "DATABASE_URL", valueFrom = var.database_url_secret_arn }, { name = "GITHUB_CLIENT_SECRET", valueFrom = "${var.github_oauth_secret_arn}:client_secret::" }, { name = "SHAUTH_BOOTSTRAP_ADMIN_PASSWORD", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_ADMIN_PASSWORD::" }, { name = "SHAUTH_BOOTSTRAP_APPS_JSON", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_APPS_JSON::" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "shauth" } } }
   ])
   tags = local.tags
 }
