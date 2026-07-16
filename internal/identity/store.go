@@ -181,7 +181,7 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 	app.OIDCClientID = strings.TrimSpace(app.OIDCClientID)
 	app.ECSServiceName = strings.TrimSpace(app.ECSServiceName)
 	app.CloudWatchLogGroup = strings.TrimSpace(app.CloudWatchLogGroup)
-	if err := validateManagedApp(app); err != nil {
+	if err := ValidateManagedApp(app); err != nil {
 		return ManagedApp{}, err
 	}
 	err := s.pool.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.ECSServiceName, app.CloudWatchLogGroup).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.ECSServiceName, &app.CloudWatchLogGroup, &app.CreatedAt)
@@ -241,7 +241,9 @@ func validateGitHubRoleMapping(kind, target string, role Role) error {
 	return nil
 }
 
-func validateManagedApp(app ManagedApp) error {
+// ValidateManagedApp checks that an application can be safely registered for
+// Amazon Elastic Container Service operations and Amazon CloudWatch Logs reads.
+func ValidateManagedApp(app ManagedApp) error {
 	if len(app.Slug) < 3 || len(app.Slug) > 63 {
 		return fmt.Errorf("app slug must be between 3 and 63 characters")
 	}
@@ -253,8 +255,14 @@ func validateManagedApp(app ManagedApp) error {
 	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" || strings.TrimSpace(app.ECSServiceName) == "" {
 		return fmt.Errorf("app name, description, OIDC client ID, and Amazon Elastic Container Service service are required")
 	}
-	if !strings.HasPrefix(strings.TrimSpace(app.CloudWatchLogGroup), "/e6qu/") {
-		return fmt.Errorf("Amazon CloudWatch Logs group must begin with /e6qu/")
+	logGroup := strings.TrimSpace(app.CloudWatchLogGroup)
+	if len(logGroup) == 0 || len(logGroup) > 512 {
+		return fmt.Errorf("Amazon CloudWatch Logs group must be between 1 and 512 characters")
+	}
+	for _, character := range logGroup {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune(".-_/#", character)) {
+			return fmt.Errorf("Amazon CloudWatch Logs group contains an invalid character")
+		}
 	}
 	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
 	if err != nil || launchURL.Scheme != "https" || launchURL.Host == "" || launchURL.Fragment != "" {
