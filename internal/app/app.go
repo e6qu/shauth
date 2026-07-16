@@ -143,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/github/callback", s.githubCallback)
 	mux.HandleFunc("GET /oauth/login", s.hydraLogin)
 	mux.HandleFunc("GET /oauth/consent", s.hydraConsent)
+	mux.HandleFunc("GET /oauth/error", s.hydraError)
 	mux.HandleFunc("POST /oauth/consent", s.hydraConsentAccept)
 	mux.HandleFunc("GET /admin", s.admin)
 	mux.HandleFunc("GET /admin/apps", s.adminApps)
@@ -329,6 +330,21 @@ func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "consent", map[string]any{"Challenge": challenge, "Scopes": scopes})
+}
+
+func (s *Server) hydraError(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.URL.Query().Get("error"))
+	message := "The authorization request could not be completed. Return to the connected application and try again."
+	switch code {
+	case "access_denied":
+		message = "Authorization was not granted. You can return to the connected application and try again."
+	case "invalid_client", "invalid_request", "invalid_scope", "unsupported_response_type", "unauthorized_client":
+		message = "The connected application sent an invalid authorization request. Contact its administrator if the problem continues."
+	case "server_error", "temporarily_unavailable":
+		message = "The authorization service is temporarily unavailable. Please try again shortly."
+	}
+	w.WriteHeader(http.StatusBadRequest)
+	s.render(w, "oauth-error", map[string]any{"Code": code, "Message": message})
 }
 func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
