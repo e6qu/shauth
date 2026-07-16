@@ -697,6 +697,10 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		if err := input.validate(); err != nil {
 			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
 		}
+		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, ECSServiceName: bootstrap.ECSServiceName, CloudWatchLogGroup: bootstrap.CloudWatchLogGroup}
+		if err := identity.ValidateManagedApp(managedApp); err != nil {
+			return fmt.Errorf("bootstrap managed app %q: %w", bootstrap.Slug, err)
+		}
 		if existing, ok := byID[input.ID]; ok {
 			if existing.Name != input.Name || !sameStrings(existing.RedirectURIs, input.RedirectURIs) {
 				return fmt.Errorf("bootstrap OAuth client %q conflicts with the registered client", input.ID)
@@ -704,7 +708,6 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		} else if err := s.createHydraClient(ctx, input); err != nil {
 			return fmt.Errorf("create bootstrap OAuth client %q: %w", input.ID, err)
 		}
-		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, ECSServiceName: bootstrap.ECSServiceName, CloudWatchLogGroup: bootstrap.CloudWatchLogGroup}
 		if existing, ok := bySlug[managedApp.Slug]; ok {
 			if existing.Name != managedApp.Name || existing.Description != managedApp.Description || existing.LaunchURL != managedApp.LaunchURL || existing.OIDCClientID != managedApp.OIDCClientID || existing.ECSServiceName != managedApp.ECSServiceName || existing.CloudWatchLogGroup != managedApp.CloudWatchLogGroup {
 				return fmt.Errorf("bootstrap managed app %q conflicts with the registered app", managedApp.Slug)
