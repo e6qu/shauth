@@ -28,11 +28,6 @@ func main() {
 	}
 
 	context := context.Background()
-	if adminURL := os.Getenv("DATABASE_ADMIN_URL"); adminURL != "" {
-		if err := createDatabases(context, adminURL); err != nil {
-			log.Fatal(err)
-		}
-	}
 	pool, err := pgxpool.New(context, databaseURL)
 	if err != nil {
 		log.Fatalf("connect PostgreSQL: %v", err)
@@ -41,27 +36,6 @@ func main() {
 	if err := apply(context, pool, directory); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func createDatabases(ctx context.Context, adminURL string) error {
-	pool, err := pgxpool.New(ctx, adminURL)
-	if err != nil {
-		return fmt.Errorf("connect PostgreSQL administrator: %w", err)
-	}
-	defer pool.Close()
-	for _, database := range []string{"hydra"} {
-		var exists bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)`, database).Scan(&exists); err != nil {
-			return fmt.Errorf("check database %s: %w", database, err)
-		}
-		if exists {
-			continue
-		}
-		if _, err := pool.Exec(ctx, "CREATE DATABASE "+database); err != nil {
-			return fmt.Errorf("create database %s: %w", database, err)
-		}
-	}
-	return nil
 }
 
 func apply(ctx context.Context, pool *pgxpool.Pool, directory string) error {
