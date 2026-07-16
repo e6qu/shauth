@@ -3,6 +3,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -27,6 +28,22 @@ type Config struct {
 	SESRegion              string
 	ECSCluster             string
 	InvitationEmailFrom    string
+	BootstrapApps          []BootstrapApp
+}
+
+// BootstrapApp is a confidential OpenID Connect client and its corresponding
+// deployed service. Deployment supplies this only through a Secrets Manager
+// backed environment variable because it includes the client secret.
+type BootstrapApp struct {
+	Slug               string   `json:"slug"`
+	Name               string   `json:"name"`
+	Description        string   `json:"description"`
+	LaunchURL          string   `json:"launch_url"`
+	OIDCClientID       string   `json:"oidc_client_id"`
+	OIDCClientSecret   string   `json:"oidc_client_secret"`
+	RedirectURIs       []string `json:"redirect_uris"`
+	ECSServiceName     string   `json:"ecs_service_name"`
+	CloudWatchLogGroup string   `json:"cloudwatch_log_group"`
 }
 
 // Load reads and validates the complete production configuration.
@@ -72,6 +89,11 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if config.Address == "" {
 		config.Address = ":8080"
+	}
+	if raw := getenv("SHAUTH_BOOTSTRAP_APPS_JSON"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &config.BootstrapApps); err != nil {
+			return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_APPS_JSON must be valid JSON: %w", err)
+		}
 	}
 	for name, value := range map[string]string{
 		"DATABASE_URL":                 config.DatabaseURL,

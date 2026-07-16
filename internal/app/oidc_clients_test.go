@@ -46,3 +46,15 @@ func TestOIDCClientInputAllowsLoopbackHTTP(t *testing.T) {
 		t.Fatalf("validate loopback client: %v", err)
 	}
 }
+
+func TestSameStrings(t *testing.T) {
+	if !sameStrings([]string{"a", "b"}, []string{"a", "b"}) {
+		t.Fatal("sameStrings rejected identical values")
+	}
+	if sameStrings([]string{"a", "b"}, []string{"b", "a"}) {
+		t.Fatal("sameStrings accepted reordered values")
+	}
+	if sameStrings([]string{"a"}, []string{"a", "b"}) {
+		t.Fatal("sameStrings accepted differently sized values")
+	}
+}
