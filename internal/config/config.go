@@ -26,7 +26,6 @@ type Config struct {
 	BootstrapAdminPassword string
 	AllowInsecureCookies   bool
 	SESRegion              string
-	ECSCluster             string
 	InvitationEmailFrom    string
 	BootstrapApps          []BootstrapApp
 }
@@ -35,15 +34,15 @@ type Config struct {
 // deployed service. Deployment supplies this only through a Secrets Manager
 // backed environment variable because it includes the client secret.
 type BootstrapApp struct {
-	Slug               string   `json:"slug"`
-	Name               string   `json:"name"`
-	Description        string   `json:"description"`
-	LaunchURL          string   `json:"launch_url"`
-	OIDCClientID       string   `json:"oidc_client_id"`
-	OIDCClientSecret   string   `json:"oidc_client_secret"`
-	RedirectURIs       []string `json:"redirect_uris"`
-	ECSServiceName     string   `json:"ecs_service_name"`
-	CloudWatchLogGroup string   `json:"cloudwatch_log_group"`
+	Slug             string   `json:"slug"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	LaunchURL        string   `json:"launch_url"`
+	OIDCClientID     string   `json:"oidc_client_id"`
+	OIDCClientSecret string   `json:"oidc_client_secret"`
+	RedirectURIs     []string `json:"redirect_uris"`
+	HealthURL        string   `json:"health_url"`
+	MonitoringURL    string   `json:"monitoring_url"`
 }
 
 // Load reads and validates the complete production configuration.
@@ -75,7 +74,6 @@ func Load(getenv func(string) string) (Config, error) {
 		BootstrapAdminPassword: getenv("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"),
 		AllowInsecureCookies:   getenv("SHAUTH_ALLOW_INSECURE_COOKIES") == "true",
 		SESRegion:              getenv("SHAUTH_SES_REGION"),
-		ECSCluster:             getenv("SHAUTH_ECS_CLUSTER"),
 		InvitationEmailFrom:    getenv("SHAUTH_INVITATION_EMAIL_FROM"),
 	}
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {

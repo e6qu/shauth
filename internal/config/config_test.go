@@ -18,7 +18,7 @@ func TestLoadReadsBootstrapApps(t *testing.T) {
 		"SHAUTH_PUBLIC_URL": "https://auth.dev.e6qu.dev", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.dev.e6qu.dev",
-		"SHAUTH_BOOTSTRAP_APPS_JSON": `[{"slug":"intraktible","name":"Intraktible","description":"Decision platform","launch_url":"https://intraktible.dev.e6qu.dev","oidc_client_id":"intraktible-dev","oidc_client_secret":"0123456789abcdef0123456789abcdef","redirect_uris":["https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/callback"],"ecs_service_name":"intraktible-dev","cloudwatch_log_group":"/e6qu/dev/intraktible"}]`,
+		"SHAUTH_BOOTSTRAP_APPS_JSON": `[{"slug":"intraktible","name":"Intraktible","description":"Decision platform","launch_url":"https://intraktible.dev.e6qu.dev","health_url":"https://intraktible.dev.e6qu.dev/health","oidc_client_id":"intraktible-dev","oidc_client_secret":"0123456789abcdef0123456789abcdef","redirect_uris":["https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/callback"]}]`,
 	}
 	config, err := Load(func(key string) string { return values[key] })
 	if err != nil {

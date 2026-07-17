@@ -62,15 +62,15 @@ type GitHubRoleMapping struct {
 	CreatedAt time.Time
 }
 type ManagedApp struct {
-	ID                 string
-	Slug               string
-	Name               string
-	Description        string
-	LaunchURL          string
-	OIDCClientID       string
-	ECSServiceName     string
-	CloudWatchLogGroup string
-	CreatedAt          time.Time
+	ID            string
+	Slug          string
+	Name          string
+	Description   string
+	LaunchURL     string
+	OIDCClientID  string
+	HealthURL     string
+	MonitoringURL string
+	CreatedAt     time.Time
 }
 
 type Store struct{ pool *pgxpool.Pool }
@@ -179,12 +179,12 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 	app.Description = strings.TrimSpace(app.Description)
 	app.LaunchURL = strings.TrimSpace(app.LaunchURL)
 	app.OIDCClientID = strings.TrimSpace(app.OIDCClientID)
-	app.ECSServiceName = strings.TrimSpace(app.ECSServiceName)
-	app.CloudWatchLogGroup = strings.TrimSpace(app.CloudWatchLogGroup)
+	app.HealthURL = strings.TrimSpace(app.HealthURL)
+	app.MonitoringURL = strings.TrimSpace(app.MonitoringURL)
 	if err := ValidateManagedApp(app); err != nil {
 		return ManagedApp{}, err
 	}
-	err := s.pool.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.ECSServiceName, app.CloudWatchLogGroup).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.ECSServiceName, &app.CloudWatchLogGroup, &app.CreatedAt)
+	err := s.pool.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("create managed app: %w", err)
 	}
@@ -192,7 +192,7 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 }
 
 func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at FROM managed_apps ORDER BY name`)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at FROM managed_apps ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list managed apps: %w", err)
 	}
@@ -200,7 +200,7 @@ func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
 	var apps []ManagedApp
 	for rows.Next() {
 		var app ManagedApp
-		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.ECSServiceName, &app.CloudWatchLogGroup, &app.CreatedAt); err != nil {
+		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan managed app: %w", err)
 		}
 		apps = append(apps, app)
@@ -210,7 +210,7 @@ func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
 
 func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 	var app ManagedApp
-	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,ecs_service_name,cloudwatch_log_group,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.ECSServiceName, &app.CloudWatchLogGroup, &app.CreatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("get managed app: %w", err)
 	}
@@ -241,8 +241,7 @@ func validateGitHubRoleMapping(kind, target string, role Role) error {
 	return nil
 }
 
-// ValidateManagedApp checks that an application can be safely registered for
-// Amazon Elastic Container Service operations and Amazon CloudWatch Logs reads.
+// ValidateManagedApp checks app-owned endpoint coordinates.
 func ValidateManagedApp(app ManagedApp) error {
 	if len(app.Slug) < 3 || len(app.Slug) > 63 {
 		return fmt.Errorf("app slug must be between 3 and 63 characters")
@@ -252,21 +251,22 @@ func ValidateManagedApp(app ManagedApp) error {
 			return fmt.Errorf("app slug must use lowercase letters, digits, and interior hyphens")
 		}
 	}
-	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" || strings.TrimSpace(app.ECSServiceName) == "" {
-		return fmt.Errorf("app name, description, OIDC client ID, and Amazon Elastic Container Service service are required")
-	}
-	logGroup := strings.TrimSpace(app.CloudWatchLogGroup)
-	if len(logGroup) == 0 || len(logGroup) > 512 {
-		return fmt.Errorf("Amazon CloudWatch Logs group must be between 1 and 512 characters")
-	}
-	for _, character := range logGroup {
-		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune(".-_/#", character)) {
-			return fmt.Errorf("Amazon CloudWatch Logs group contains an invalid character")
-		}
+	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" {
+		return fmt.Errorf("app name, description, and OIDC client ID are required")
 	}
 	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
 	if err != nil || launchURL.Scheme != "https" || launchURL.Host == "" || launchURL.Fragment != "" {
 		return fmt.Errorf("app launch URL must use HTTPS")
+	}
+	healthURL, err := url.ParseRequestURI(strings.TrimSpace(app.HealthURL))
+	if err != nil || healthURL.Scheme != "https" || healthURL.Host == "" || healthURL.Fragment != "" {
+		return fmt.Errorf("app health URL must use HTTPS")
+	}
+	if app.MonitoringURL != "" {
+		monitoringURL, err := url.ParseRequestURI(app.MonitoringURL)
+		if err != nil || monitoringURL.Scheme != "https" || monitoringURL.Host == "" || monitoringURL.Fragment != "" {
+			return fmt.Errorf("app monitoring URL must use HTTPS")
+		}
 	}
 	return nil
 }
