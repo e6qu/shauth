@@ -108,13 +108,7 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	var appController *managedapps.Controller
-	if cfg.ECSCluster != "" {
-		appController, err = managedapps.New(context.Background(), cfg.SESRegion, cfg.ECSCluster)
-		if err != nil {
-			return nil, err
-		}
-	}
+	appController := managedapps.New()
 	proxy := httputil.NewSingleHostReverseProxy(cfg.HydraPublicURL)
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
@@ -135,7 +129,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/oauth2/{path...}", s.hydraPublic)
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /apps", s.apps)
-	mux.HandleFunc("POST /apps/{id}/start", s.startApp)
 	mux.HandleFunc("GET /login", s.login)
 	mux.HandleFunc("POST /login", s.passwordLogin)
 	mux.HandleFunc("POST /logout", s.logout)
@@ -148,10 +141,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin", s.admin)
 	mux.HandleFunc("GET /admin/apps", s.adminApps)
 	mux.HandleFunc("POST /admin/apps", s.adminCreateApp)
-	mux.HandleFunc("POST /admin/apps/{id}/start", s.adminStartApp)
-	mux.HandleFunc("POST /admin/apps/{id}/stop", s.adminStopApp)
 	mux.HandleFunc("POST /admin/apps/{id}/delete", s.adminDeleteApp)
-	mux.HandleFunc("GET /admin/apps/{id}/logs", s.adminAppLogs)
 	mux.HandleFunc("GET /admin/clients", s.adminOIDCClients)
 	mux.HandleFunc("POST /admin/clients", s.adminCreateOIDCClient)
 	mux.HandleFunc("POST /admin/clients/{id}/delete", s.adminDeleteOIDCClient)
@@ -375,10 +365,9 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 
 type managedAppView struct {
 	identity.ManagedApp
-	DesiredCount int32
-	RunningCount int32
-	PendingCount int32
-	StatusError  string
+	Healthy     bool
+	StatusCode  int
+	StatusError string
 }
 
 func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
@@ -389,12 +378,10 @@ func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
 	views := make([]managedAppView, 0, len(apps))
 	for _, app := range apps {
 		view := managedAppView{ManagedApp: app}
-		if s.managedApps == nil {
-			view.StatusError = "Amazon Elastic Container Service controls are not configured"
-		} else if status, err := s.managedApps.Status(ctx, app); err != nil {
+		if status, err := s.managedApps.Status(ctx, app); err != nil {
 			view.StatusError = err.Error()
 		} else {
-			view.DesiredCount, view.RunningCount, view.PendingCount = status.DesiredCount, status.RunningCount, status.PendingCount
+			view.Healthy, view.StatusCode = status.Healthy, status.StatusCode
 		}
 		views = append(views, view)
 	}
@@ -414,47 +401,6 @@ func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "apps", map[string]any{"SignedIn": true, "User": user, "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin})
 }
-
-func (s *Server) appByID(ctx context.Context, id string) (identity.ManagedApp, error) {
-	if id == "" {
-		return identity.ManagedApp{}, fmt.Errorf("app ID is required")
-	}
-	return s.store.ManagedApp(ctx, id)
-}
-
-func (s *Server) startAppForUser(w http.ResponseWriter, r *http.Request, adminOnly bool) {
-	user, _, err := s.current(r)
-	if err != nil {
-		http.Redirect(w, r, "/login?next=/apps", http.StatusSeeOther)
-		return
-	}
-	if adminOnly && user.Role != identity.RoleAdmin {
-		http.Error(w, "administrator access required", http.StatusForbidden)
-		return
-	}
-	if s.managedApps == nil {
-		http.Error(w, "Amazon Elastic Container Service controls are not configured", http.StatusServiceUnavailable)
-		return
-	}
-	app, err := s.appByID(r.Context(), r.PathValue("id"))
-	if err != nil {
-		http.Error(w, "app not found", http.StatusNotFound)
-		return
-	}
-	if err := s.managedApps.Start(r.Context(), app); err != nil {
-		log.Printf("start app %s: %v", app.Slug, err)
-		http.Error(w, "could not start app", http.StatusBadGateway)
-		return
-	}
-	location := "/apps"
-	if adminOnly {
-		location = "/admin/apps"
-	}
-	http.Redirect(w, r, location, http.StatusSeeOther)
-}
-
-func (s *Server) startApp(w http.ResponseWriter, r *http.Request)      { s.startAppForUser(w, r, false) }
-func (s *Server) adminStartApp(w http.ResponseWriter, r *http.Request) { s.startAppForUser(w, r, true) }
 
 func (s *Server) adminApps(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -477,13 +423,13 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app := identity.ManagedApp{
-		Slug:               strings.TrimSpace(r.Form.Get("slug")),
-		Name:               strings.TrimSpace(r.Form.Get("name")),
-		Description:        strings.TrimSpace(r.Form.Get("description")),
-		LaunchURL:          strings.TrimSpace(r.Form.Get("launch_url")),
-		OIDCClientID:       strings.TrimSpace(r.Form.Get("oidc_client_id")),
-		ECSServiceName:     strings.TrimSpace(r.Form.Get("ecs_service_name")),
-		CloudWatchLogGroup: strings.TrimSpace(r.Form.Get("cloudwatch_log_group")),
+		Slug:          strings.TrimSpace(r.Form.Get("slug")),
+		Name:          strings.TrimSpace(r.Form.Get("name")),
+		Description:   strings.TrimSpace(r.Form.Get("description")),
+		LaunchURL:     strings.TrimSpace(r.Form.Get("launch_url")),
+		OIDCClientID:  strings.TrimSpace(r.Form.Get("oidc_client_id")),
+		HealthURL:     strings.TrimSpace(r.Form.Get("health_url")),
+		MonitoringURL: strings.TrimSpace(r.Form.Get("monitoring_url")),
 	}
 	clients, err := s.hydraClients(r.Context())
 	if err != nil {
@@ -505,27 +451,6 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
 }
 
-func (s *Server) adminStopApp(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	if s.managedApps == nil {
-		http.Error(w, "Amazon Elastic Container Service controls are not configured", http.StatusServiceUnavailable)
-		return
-	}
-	app, err := s.appByID(r.Context(), r.PathValue("id"))
-	if err != nil {
-		http.Error(w, "app not found", http.StatusNotFound)
-		return
-	}
-	if err := s.managedApps.Stop(r.Context(), app); err != nil {
-		log.Printf("stop app %s: %v", app.Slug, err)
-		http.Error(w, "could not stop app", http.StatusBadGateway)
-		return
-	}
-	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
-}
-
 func (s *Server) adminDeleteApp(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -535,28 +460,6 @@ func (s *Server) adminDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
-}
-
-func (s *Server) adminAppLogs(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	if s.managedApps == nil {
-		http.Error(w, "Amazon Elastic Container Service controls are not configured", http.StatusServiceUnavailable)
-		return
-	}
-	app, err := s.appByID(r.Context(), r.PathValue("id"))
-	if err != nil {
-		http.Error(w, "app not found", http.StatusNotFound)
-		return
-	}
-	events, err := s.managedApps.Logs(r.Context(), app)
-	if err != nil {
-		log.Printf("read logs for %s: %v", app.Slug, err)
-		http.Error(w, "could not read logs", http.StatusBadGateway)
-		return
-	}
-	s.render(w, "app-logs", map[string]any{"SignedIn": true, "App": app, "Events": events})
 }
 
 func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
@@ -742,7 +645,7 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		if err := input.validate(); err != nil {
 			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
 		}
-		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, ECSServiceName: bootstrap.ECSServiceName, CloudWatchLogGroup: bootstrap.CloudWatchLogGroup}
+		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, HealthURL: bootstrap.HealthURL, MonitoringURL: bootstrap.MonitoringURL}
 		if err := identity.ValidateManagedApp(managedApp); err != nil {
 			return fmt.Errorf("bootstrap managed app %q: %w", bootstrap.Slug, err)
 		}
@@ -757,7 +660,7 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 			return fmt.Errorf("create bootstrap OAuth client %q: %w", input.ID, err)
 		}
 		if existing, ok := bySlug[managedApp.Slug]; ok {
-			if existing.Name != managedApp.Name || existing.Description != managedApp.Description || existing.LaunchURL != managedApp.LaunchURL || existing.OIDCClientID != managedApp.OIDCClientID || existing.ECSServiceName != managedApp.ECSServiceName || existing.CloudWatchLogGroup != managedApp.CloudWatchLogGroup {
+			if existing.Name != managedApp.Name || existing.Description != managedApp.Description || existing.LaunchURL != managedApp.LaunchURL || existing.OIDCClientID != managedApp.OIDCClientID || existing.HealthURL != managedApp.HealthURL || existing.MonitoringURL != managedApp.MonitoringURL {
 				return fmt.Errorf("bootstrap managed app %q conflicts with the registered app", managedApp.Slug)
 			}
 			continue

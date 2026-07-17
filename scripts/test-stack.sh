@@ -72,8 +72,8 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'description=End-to-end managed app catalog coverage.' \
   --data-urlencode 'launch_url=https://integration.dev.e6qu.dev' \
   --data-urlencode 'oidc_client_id=shauth-integration-client' \
-  --data-urlencode 'ecs_service_name=integration-app' \
-  --data-urlencode 'cloudwatch_log_group=/e6qu/integration-app' \
+  --data-urlencode 'health_url=https://integration.example.test/health' \
+  --data-urlencode 'monitoring_url=https://integration.example.test/monitoring' \
   http://localhost:8080/admin/apps | grep -q 'Integration app'
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
   'http://localhost:4444/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |

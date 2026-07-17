@@ -22,14 +22,14 @@ application has its own Shauth OIDC client and redirect URI, rather than being
 added to the GitHub OAuth application.
 
 The signed-in Apps page is a catalog of real deployed services. Administrators
-register an app only after its Shauth OIDC client, Amazon Elastic Container
-Service service, and Amazon CloudWatch Logs group exist. Developers can start
-registered apps; administrators can also stop them and read their real logs.
+register an app only after its Shauth OIDC client, launch URL, and published
+health endpoint exist. Users open services through their own startup paths;
+Shauth monitors standard HTTPS health endpoints without deployment control.
 
 Terraform can supply `bootstrap_apps` as a sensitive input to register clients
 and catalog records idempotently during Shauth startup. The input is stored only
 in the Shauth runtime secret and contains each confidential client secret,
-redirect URI, Amazon ECS service name, and Amazon CloudWatch Logs group.
+redirect URI, launch URL, health URL, and optional monitoring URL.
 
 ## Deployment model
 

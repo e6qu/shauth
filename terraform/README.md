@@ -29,9 +29,7 @@ bootstrap-admin secrets.
 The caller supplies the shared VPC, private subnet IDs, Amazon ECS cluster,
 and Route 53 hosted zone so Shauth can coexist with the other `dev` services.
 
-Shauth's task role can describe and change desired counts only for services in
-the supplied Amazon ECS cluster, and can read Amazon CloudWatch Logs groups
-under `/e6qu/`. Administrators register each managed app in the Shauth UI only
-after its OIDC client, Amazon ECS service, and `/e6qu/` log group exist. Users
-can start a registered app; administrators can also stop it and inspect its
-real CloudWatch Logs events.
+Shauth's task role has only the permissions required for identity delivery.
+Administrators register each managed app with its OIDC client, launch URL,
+published health URL, and optional monitoring URL. Shauth checks health through
+standard HTTP and remains independent of deployment platforms and log systems.
