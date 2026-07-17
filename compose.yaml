@@ -28,6 +28,7 @@ services:
       URLS_LOGIN: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/login
       URLS_CONSENT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/consent
       URLS_LOGOUT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/logout
+      URLS_POST_LOGOUT_REDIRECT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/
       SECRETS_SYSTEM_0: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET}
     depends_on:
       postgres:

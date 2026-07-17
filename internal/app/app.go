@@ -31,6 +31,7 @@ import (
 
 const browserSessionCookie = "shauth_session"
 const githubStateCookie = "shauth_github_state"
+const logoutIntentCookie = "shauth_logout_intent"
 const bootstrapRetryInterval = time.Second
 const bootstrapRetryTimeout = 45 * time.Second
 
@@ -131,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /apps", s.apps)
 	mux.HandleFunc("GET /login", s.login)
 	mux.HandleFunc("POST /login", s.passwordLogin)
+	mux.HandleFunc("GET /logout", s.logoutConfirm)
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /oauth/github", s.githubStart)
 	mux.HandleFunc("GET /oauth/github/callback", s.githubCallback)
@@ -138,6 +140,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/consent", s.hydraConsent)
 	mux.HandleFunc("GET /oauth/error", s.hydraError)
 	mux.HandleFunc("POST /oauth/consent", s.hydraConsentAccept)
+	mux.HandleFunc("GET /oauth/logout", s.hydraLogout)
+	mux.HandleFunc("POST /oauth/logout", s.hydraLogoutAccept)
 	mux.HandleFunc("GET /admin", s.admin)
 	mux.HandleFunc("GET /admin/apps", s.adminApps)
 	mux.HandleFunc("POST /admin/apps", s.adminCreateApp)
@@ -187,7 +191,7 @@ func sameOriginPosts(publicURL *url.URL, next http.Handler) http.Handler {
 				return
 			}
 			parsed, err := url.Parse(origin)
-			if err != nil || parsed.Scheme != publicURL.Scheme || parsed.Host != publicURL.Host {
+			if err != nil || parsed.Scheme != publicURL.Scheme || parsed.Host != publicURL.Host || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
 				http.Error(w, "cross-origin request denied", http.StatusForbidden)
 				return
 			}
@@ -211,7 +215,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
-	s.render(w, "home", map[string]any{"User": user, "SignedIn": err == nil})
+	s.render(w, "home", map[string]any{"User": user, "SignedIn": err == nil, "IsAdmin": err == nil && user.Role == identity.RoleAdmin})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := s.current(r); err == nil {
@@ -235,15 +239,22 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, relativeNext(r.Form.Get("next")), http.StatusSeeOther)
 }
+func (s *Server) logoutConfirm(w http.ResponseWriter, r *http.Request) {
+	user, _, err := s.current(r)
+	s.render(w, "logout", map[string]any{"SignedIn": err == nil, "User": user, "IsAdmin": err == nil && user.Role == identity.RoleAdmin})
+}
+
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(browserSessionCookie); err == nil {
-		_, session, err := s.store.CurrentUser(r.Context(), cookie.Value, time.Now())
-		if err == nil {
-			_ = s.store.RevokeSession(r.Context(), session.ID, time.Now())
-		}
+	if _, _, err := s.current(r); err != nil {
+		s.expireCookie(w, browserSessionCookie)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
 	}
-	s.expireCookie(w, browserSessionCookie)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	// The browser must visit Hydra so it can remove its own authentication cookie.
+	// This short-lived marker binds the resulting front-channel callback to this
+	// same-origin, user-confirmed sign-out action.
+	s.setCookie(w, &http.Cookie{Name: logoutIntentCookie, Value: "1", Path: "/oauth/logout", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: 300})
+	http.Redirect(w, r, "/oauth2/sessions/logout", http.StatusSeeOther)
 }
 func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 	state, err := newState()
@@ -356,11 +367,84 @@ func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, redirect, 302)
 }
+
+type hydraLogoutRequest struct {
+	Subject string `json:"subject"`
+}
+
+// hydraLogout obtains the trusted subject for an OIDC logout challenge. The
+// challenge comes from Hydra; it is never accepted as a user identifier.
+func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
+	challenge := r.URL.Query().Get("logout_challenge")
+	request, err := s.hydraLogoutRequest(r.Context(), challenge)
+	if err != nil {
+		http.Error(w, "could not load OAuth logout request", http.StatusBadGateway)
+		return
+	}
+	user, session, currentErr := s.current(r)
+	if currentErr == nil && user.ID != request.Subject {
+		http.Error(w, "OAuth logout request belongs to a different account", http.StatusForbidden)
+		return
+	}
+	if _, err := r.Cookie(logoutIntentCookie); err == nil && currentErr == nil {
+		s.completeLogout(w, r, session, challenge)
+		return
+	}
+	s.render(w, "oauth-logout", map[string]any{"SignedIn": currentErr == nil, "User": user, "IsAdmin": currentErr == nil && user.Role == identity.RoleAdmin, "Challenge": challenge})
+}
+
+func (s *Server) hydraLogoutAccept(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	challenge := r.Form.Get("challenge")
+	request, err := s.hydraLogoutRequest(r.Context(), challenge)
+	if err != nil {
+		http.Error(w, "could not load OAuth logout request", http.StatusBadGateway)
+		return
+	}
+	user, session, currentErr := s.current(r)
+	if currentErr == nil {
+		if user.ID != request.Subject {
+			http.Error(w, "OAuth logout request belongs to a different account", http.StatusForbidden)
+			return
+		}
+		s.completeLogout(w, r, session, challenge)
+		return
+	}
+	redirect, err := s.hydraAcceptLogout(r.Context(), challenge)
+	if err != nil {
+		http.Error(w, "could not complete OAuth logout", http.StatusBadGateway)
+		return
+	}
+	s.expireCookie(w, browserSessionCookie)
+	s.expireCookieAtPath(w, logoutIntentCookie, "/oauth/logout")
+	http.Redirect(w, r, redirect, http.StatusSeeOther)
+}
+
+// completeLogout ends the local browser session before accepting Hydra's
+// front-channel logout. A failure therefore never leaves the local account
+// authenticated after the user has confirmed sign-out.
+func (s *Server) completeLogout(w http.ResponseWriter, r *http.Request, session identity.Session, challenge string) {
+	if err := s.store.RevokeSession(r.Context(), session.ID, time.Now()); err != nil {
+		http.Error(w, "could not end local session", http.StatusInternalServerError)
+		return
+	}
+	s.expireCookie(w, browserSessionCookie)
+	s.expireCookieAtPath(w, logoutIntentCookie, "/oauth/logout")
+	redirect, err := s.hydraAcceptLogout(r.Context(), challenge)
+	if err != nil {
+		http.Error(w, "could not complete OAuth logout", http.StatusBadGateway)
+		return
+	}
+	http.Redirect(w, r, redirect, http.StatusSeeOther)
+}
 func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "admin", map[string]any{"SignedIn": true})
+	s.render(w, "admin", map[string]any{"SignedIn": true, "IsAdmin": true})
 }
 
 type managedAppView struct {
@@ -411,7 +495,7 @@ func (s *Server) adminApps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query apps", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "admin-apps", map[string]any{"SignedIn": true, "Apps": apps, "Error": r.URL.Query().Get("error")})
+	s.render(w, "admin-apps", map[string]any{"SignedIn": true, "IsAdmin": true, "Apps": apps, "Error": r.URL.Query().Get("error")})
 }
 
 func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
@@ -471,7 +555,7 @@ func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query OAuth clients", http.StatusBadGateway)
 		return
 	}
-	s.render(w, "oidc-clients", map[string]any{"SignedIn": true, "Clients": clients, "Error": r.URL.Query().Get("error")})
+	s.render(w, "oidc-clients", map[string]any{"SignedIn": true, "IsAdmin": true, "Clients": clients, "Error": r.URL.Query().Get("error")})
 }
 
 func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
@@ -693,7 +777,7 @@ func (s *Server) adminGitHubMappings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query GitHub role mappings", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "github-mappings", map[string]any{"SignedIn": true, "Mappings": mappings})
+	s.render(w, "github-mappings", map[string]any{"SignedIn": true, "IsAdmin": true, "Mappings": mappings})
 }
 func (s *Server) adminCreateGitHubMapping(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -729,7 +813,7 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query users", 500)
 		return
 	}
-	s.render(w, "users", map[string]any{"SignedIn": true, "Users": users, "Query": r.URL.Query().Get("q")})
+	s.render(w, "users", map[string]any{"SignedIn": true, "IsAdmin": true, "Users": users, "Query": r.URL.Query().Get("q")})
 }
 func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -779,7 +863,7 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "invitations", map[string]any{"SignedIn": true})
+	s.render(w, "invitations", map[string]any{"SignedIn": true, "IsAdmin": true})
 }
 func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "accept-invitation", map[string]any{"Token": r.URL.Query().Get("token")})
@@ -808,7 +892,7 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query sessions", 500)
 		return
 	}
-	s.render(w, "sessions", map[string]any{"SignedIn": true, "Sessions": sessions, "UserID": r.PathValue("id")})
+	s.render(w, "sessions", map[string]any{"SignedIn": true, "IsAdmin": true, "Sessions": sessions, "UserID": r.PathValue("id")})
 }
 func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -830,15 +914,6 @@ func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("id")
-	userID, err := s.store.SessionUserID(r.Context(), sessionID)
-	if err != nil {
-		http.Error(w, "could not inspect session", http.StatusNotFound)
-		return
-	}
-	if err := s.revokeHydraSessions(r.Context(), userID); err != nil {
-		http.Error(w, "could not revoke OAuth sessions", http.StatusBadGateway)
-		return
-	}
 	if err := s.store.RevokeSession(r.Context(), sessionID, time.Now()); err != nil {
 		http.Error(w, "could not revoke session", 500)
 		return
@@ -847,7 +922,13 @@ func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) revokeHydraSessions(ctx context.Context, subject string) error {
 	for _, kind := range []string{"login", "consent"} {
-		endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/sessions/" + kind + "/" + url.PathEscape(subject)})
+		endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/sessions/" + kind})
+		query := endpoint.Query()
+		query.Set("subject", subject)
+		if kind == "consent" {
+			query.Set("all", "true")
+		}
+		endpoint.RawQuery = query.Encode()
 		request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
 		if err != nil {
 			return err
@@ -857,7 +938,7 @@ func (s *Server) revokeHydraSessions(ctx context.Context, subject string) error 
 			return err
 		}
 		response.Body.Close()
-		if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
+		if response.StatusCode != http.StatusNoContent {
 			return fmt.Errorf("Hydra %s session deletion returned HTTP %d", kind, response.StatusCode)
 		}
 	}
@@ -897,7 +978,7 @@ func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not inspect sessions", 500)
 		return
 	}
-	s.render(w, "monitoring", map[string]any{"SignedIn": true, "ActiveSessions": active, "HydraHealthy": s.hydraReady(r.Context()), "Now": time.Now().UTC()})
+	s.render(w, "monitoring", map[string]any{"SignedIn": true, "IsAdmin": true, "ActiveSessions": active, "HydraHealthy": s.hydraReady(r.Context()), "Now": time.Now().UTC()})
 }
 func (s *Server) hydraReady(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -1001,7 +1082,10 @@ func jsonBody(value any) (*bytes.Reader, error) {
 }
 func (s *Server) setCookie(w http.ResponseWriter, cookie *http.Cookie) { http.SetCookie(w, cookie) }
 func (s *Server) expireCookie(w http.ResponseWriter, name string) {
-	s.setCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, MaxAge: -1, Expires: time.Unix(0, 0)})
+	s.expireCookieAtPath(w, name, "/")
+}
+func (s *Server) expireCookieAtPath(w http.ResponseWriter, name, path string) {
+	s.setCookie(w, &http.Cookie{Name: name, Value: "", Path: path, HttpOnly: true, Secure: !s.config.AllowInsecureCookies, MaxAge: -1, Expires: time.Unix(0, 0)})
 }
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1047,6 +1131,68 @@ func (s *Server) hydraAccept(ctx context.Context, path, challenge string, payloa
 	}
 	if result.RedirectTo == "" {
 		return "", fmt.Errorf("Hydra did not return redirect_to")
+	}
+	return result.RedirectTo, nil
+}
+
+func (s *Server) hydraLogoutRequest(ctx context.Context, challenge string) (hydraLogoutRequest, error) {
+	if challenge == "" {
+		return hydraLogoutRequest{}, fmt.Errorf("missing OAuth logout challenge")
+	}
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/requests/logout"})
+	query := endpoint.Query()
+	query.Set("logout_challenge", challenge)
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return hydraLogoutRequest{}, err
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return hydraLogoutRequest{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return hydraLogoutRequest{}, fmt.Errorf("Hydra logout request returned HTTP %d", response.StatusCode)
+	}
+	var result hydraLogoutRequest
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return hydraLogoutRequest{}, fmt.Errorf("decode Hydra logout request: %w", err)
+	}
+	if result.Subject == "" {
+		return hydraLogoutRequest{}, fmt.Errorf("Hydra logout request has no subject")
+	}
+	return result, nil
+}
+
+func (s *Server) hydraAcceptLogout(ctx context.Context, challenge string) (string, error) {
+	if challenge == "" {
+		return "", fmt.Errorf("missing OAuth logout challenge")
+	}
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/requests/logout/accept"})
+	query := endpoint.Query()
+	query.Set("logout_challenge", challenge)
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Hydra logout acceptance returned HTTP %d", response.StatusCode)
+	}
+	var result struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode Hydra logout acceptance: %w", err)
+	}
+	if result.RedirectTo == "" {
+		return "", fmt.Errorf("Hydra logout acceptance did not return redirect_to")
 	}
 	return result.RedirectTo, nil
 }
