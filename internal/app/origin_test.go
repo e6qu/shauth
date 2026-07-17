@@ -42,3 +42,60 @@ func TestSameOriginPostsStillRequiresOriginForBrowserPost(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 }
+
+func TestSameOriginPostsRejectsCrossOriginBrowserPost(t *testing.T) {
+	publicURL, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/logout", nil)
+	request.Header.Set("Origin", "https://attacker.example.test")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+func TestSameOriginPostsAllowsSameOriginBrowserPost(t *testing.T) {
+	publicURL, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/logout", nil)
+	request.Header.Set("Origin", "https://auth.example.test")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestSameOriginPostsRejectsOriginWithPath(t *testing.T) {
+	publicURL, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/logout", nil)
+	request.Header.Set("Origin", "https://auth.example.test/not-an-origin")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}

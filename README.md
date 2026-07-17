@@ -21,6 +21,24 @@ and issues OpenID Connect tokens to registered e6qu applications. Each relying
 application has its own Shauth OIDC client and redirect URI, rather than being
 added to the GitHub OAuth application.
 
+## Access and session lifecycle
+
+Shauth keeps browser sessions in PostgreSQL and Ory Hydra keeps OpenID Connect
+login and consent sessions. A normal sign-out is an explicit, same-origin
+browser action: Shauth starts Hydra's front-channel logout, verifies the
+challenge subject against the signed-in local user, revokes the local browser
+session, and accepts the Hydra logout request. Relying applications clear their
+own session and navigate the browser to Shauth's published
+`/oauth2/sessions/logout` endpoint; they do not POST cross-origin to Shauth.
+
+Administrators can invalidate one Shauth browser session or invalidate every
+session for a user. Subject-wide invalidation deletes the user's Hydra login
+and consent sessions as well, revoking associated access and refresh tokens.
+GitHub mappings are evaluated on every GitHub sign-in; a matching administrator
+mapping overrides a matching developer mapping. Administration and monitoring
+navigation are shown only to administrators, and the corresponding handlers
+enforce that role server-side.
+
 The signed-in Apps page is a catalog of real deployed services. Administrators
 register an app only after its Shauth OIDC client, launch URL, and published
 health endpoint exist. Users open services through their own startup paths;
