@@ -2,7 +2,10 @@
 
 package app
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestOIDCClientInputValidate(t *testing.T) {
 	valid := oidcClientInput{
@@ -56,5 +59,35 @@ func TestSameStrings(t *testing.T) {
 	}
 	if sameStrings([]string{"a"}, []string{"a", "b"}) {
 		t.Fatal("sameStrings accepted differently sized values")
+	}
+}
+
+func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
+	body, err := marshalHydraClient(oidcClientInput{
+		ID:           "intraktible-dev",
+		Name:         "Intraktible",
+		Secret:       "a-very-long-client-secret-that-is-safe-for-a-test",
+		RedirectURIs: []string{"https://intraktible.example.test/v1/auth/oidc/shauth/callback"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		ClientID                string   `json:"client_id"`
+		ClientSecret            string   `json:"client_secret"`
+		GrantTypes              []string `json:"grant_types"`
+		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ClientID != "intraktible-dev" || payload.ClientSecret == "" {
+		t.Fatalf("client payload = %#v, want client ID and secret", payload)
+	}
+	if !sameStrings(payload.GrantTypes, []string{"authorization_code", "refresh_token"}) {
+		t.Fatalf("grant types = %#v", payload.GrantTypes)
+	}
+	if payload.TokenEndpointAuthMethod != "client_secret_post" {
+		t.Fatalf("token endpoint auth method = %q", payload.TokenEndpointAuthMethod)
 	}
 }
