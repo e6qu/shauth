@@ -187,7 +187,10 @@ func serveThemeScript(w http.ResponseWriter, _ *http.Request) {
 }
 func sameOriginPosts(publicURL *url.URL, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
+		// OAuth 2.0 token exchange is a back-channel protocol endpoint.  It is
+		// authenticated by the registered client rather than a browser session, so
+		// compliant application servers do not send an Origin header.
+		if r.Method == http.MethodPost && r.URL.Path != "/oauth2/token" {
 			origin := r.Header.Get("Origin")
 			if origin == "" {
 				http.Error(w, "origin header is required for state-changing requests", http.StatusForbidden)
@@ -647,17 +650,7 @@ func (s *Server) hydraClients(ctx context.Context) ([]oidcClient, error) {
 }
 
 func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) error {
-	payload := map[string]any{
-		"client_id":                  input.ID,
-		"client_name":                input.Name,
-		"client_secret":              input.Secret,
-		"redirect_uris":              input.RedirectURIs,
-		"grant_types":                []string{"authorization_code", "refresh_token"},
-		"response_types":             []string{"code"},
-		"scope":                      "openid offline_access profile email",
-		"token_endpoint_auth_method": "client_secret_post",
-	}
-	body, err := json.Marshal(payload)
+	body, err := marshalHydraClient(input)
 	if err != nil {
 		return err
 	}
@@ -674,6 +667,42 @@ func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) e
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated {
 		return fmt.Errorf("Hydra create client returned %s", response.Status)
+	}
+	return nil
+}
+
+func marshalHydraClient(input oidcClientInput) ([]byte, error) {
+	payload := map[string]any{
+		"client_id":                  input.ID,
+		"client_name":                input.Name,
+		"client_secret":              input.Secret,
+		"redirect_uris":              input.RedirectURIs,
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"scope":                      "openid offline_access profile email",
+		"token_endpoint_auth_method": "client_secret_post",
+	}
+	return json.Marshal(payload)
+}
+
+func (s *Server) updateHydraClient(ctx context.Context, input oidcClientInput) error {
+	body, err := marshalHydraClient(input)
+	if err != nil {
+		return err
+	}
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + input.ID})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("Hydra update client returned %s", response.Status)
 	}
 	return nil
 }
@@ -720,6 +749,9 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		if existing, ok := byID[input.ID]; ok {
 			if existing.Name != input.Name || !sameStrings(existing.RedirectURIs, input.RedirectURIs) {
 				return fmt.Errorf("bootstrap OAuth client %q conflicts with the registered client", input.ID)
+			}
+			if err := s.updateHydraClient(ctx, input); err != nil {
+				return fmt.Errorf("update bootstrap OAuth client %q: %w", input.ID, err)
 			}
 		} else if err := s.createHydraClient(ctx, input); err != nil {
 			return fmt.Errorf("create bootstrap OAuth client %q: %w", input.ID, err)
