@@ -319,7 +319,8 @@ func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := s.current(r); err != nil {
+	user, _, err := s.current(r)
+	if err != nil {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 		return
 	}
@@ -328,12 +329,26 @@ func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing consent_challenge", http.StatusBadRequest)
 		return
 	}
-	scopes, err := s.hydraConsentScopes(r.Context(), challenge)
+	consent, err := s.hydraConsentRequest(r.Context(), challenge)
 	if err != nil {
 		http.Error(w, "could not load OAuth consent request", http.StatusBadGateway)
 		return
 	}
-	s.render(w, "consent", map[string]any{"Challenge": challenge, "Scopes": scopes})
+	managed, err := s.store.IsManagedOIDCClient(r.Context(), consent.ClientID)
+	if err != nil {
+		http.Error(w, "could not identify the connected application", http.StatusInternalServerError)
+		return
+	}
+	if managed {
+		redirect, err := s.acceptHydraConsent(r.Context(), challenge, consent.Scopes, user)
+		if err != nil {
+			http.Error(w, "could not complete OAuth consent", http.StatusBadGateway)
+			return
+		}
+		http.Redirect(w, r, redirect, http.StatusFound)
+		return
+	}
+	s.render(w, "consent", map[string]any{"Challenge": challenge, "Scopes": consent.Scopes})
 }
 
 func (s *Server) hydraError(w http.ResponseWriter, r *http.Request) {
@@ -360,12 +375,16 @@ func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form", 400)
 		return
 	}
-	redirect, err := s.hydraAccept(r.Context(), "/admin/oauth2/auth/requests/consent/accept", r.Form.Get("challenge"), map[string]any{"grant_scope": r.Form["scope"], "remember": true, "remember_for": 2592000, "session": map[string]any{"id_token": map[string]any{"sub": user.ID, "email": user.Email, "preferred_username": user.Username, "role": user.Role}, "access_token": map[string]any{"role": user.Role}}})
+	redirect, err := s.acceptHydraConsent(r.Context(), r.Form.Get("challenge"), r.Form["scope"], user)
 	if err != nil {
 		http.Error(w, "could not complete OAuth consent", 502)
 		return
 	}
 	http.Redirect(w, r, redirect, 302)
+}
+
+func (s *Server) acceptHydraConsent(ctx context.Context, challenge string, scopes []string, user identity.User) (string, error) {
+	return s.hydraAccept(ctx, "/admin/oauth2/auth/requests/consent/accept", challenge, map[string]any{"grant_scope": scopes, "remember": true, "remember_for": 2592000, "session": map[string]any{"id_token": map[string]any{"sub": user.ID, "email": user.Email, "preferred_username": user.Username, "role": user.Role}, "access_token": map[string]any{"role": user.Role}}})
 }
 
 type hydraLogoutRequest struct {
@@ -929,30 +948,41 @@ func (s *Server) revokeHydraSessions(ctx context.Context, subject string) error 
 	}
 	return nil
 }
-func (s *Server) hydraConsentScopes(ctx context.Context, challenge string) ([]string, error) {
+
+type hydraConsent struct {
+	RequestedScope []string `json:"requested_scope"`
+	Client         struct {
+		ID string `json:"client_id"`
+	} `json:"client"`
+}
+
+type hydraConsentRequest struct {
+	ClientID string
+	Scopes   []string
+}
+
+func (s *Server) hydraConsentRequest(ctx context.Context, challenge string) (hydraConsentRequest, error) {
 	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/requests/consent", RawQuery: "consent_challenge=" + url.QueryEscape(challenge)})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return nil, err
+		return hydraConsentRequest{}, err
 	}
 	response, err := s.httpClient.Do(request)
 	if err != nil {
-		return nil, err
+		return hydraConsentRequest{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Hydra consent request returned HTTP %d", response.StatusCode)
+		return hydraConsentRequest{}, fmt.Errorf("Hydra consent request returned HTTP %d", response.StatusCode)
 	}
-	var consent struct {
-		RequestedScope []string `json:"requested_scope"`
-	}
+	var consent hydraConsent
 	if err := json.NewDecoder(response.Body).Decode(&consent); err != nil {
-		return nil, fmt.Errorf("decode Hydra consent request: %w", err)
+		return hydraConsentRequest{}, fmt.Errorf("decode Hydra consent request: %w", err)
 	}
-	if len(consent.RequestedScope) == 0 {
-		return nil, fmt.Errorf("Hydra consent request has no scopes")
+	if consent.Client.ID == "" || len(consent.RequestedScope) == 0 {
+		return hydraConsentRequest{}, fmt.Errorf("Hydra consent request is missing a client or scopes")
 	}
-	return consent.RequestedScope, nil
+	return hydraConsentRequest{ClientID: consent.Client.ID, Scopes: consent.RequestedScope}, nil
 }
 func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
