@@ -12,7 +12,7 @@ func TestSameOriginPostsAllowsOAuthTokenExchangeWithoutOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -30,7 +30,7 @@ func TestSameOriginPostsStillRequiresOriginForBrowserPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -48,7 +48,7 @@ func TestSameOriginPostsRejectsCrossOriginBrowserPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -67,12 +67,14 @@ func TestSameOriginPostsAllowsSameOriginBrowserPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
 	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/logout", nil)
 	request.Header.Set("Origin", "https://auth.example.test")
+	request.AddCookie(&http.Cookie{Name: csrfCookie, Value: "token"})
+	request.Form = url.Values{"_csrf": {"token"}}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
@@ -86,7 +88,7 @@ func TestSameOriginPostsRejectsOriginWithPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
