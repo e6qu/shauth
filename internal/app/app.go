@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -113,6 +114,16 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 	}
 	appController := managedapps.New()
 	proxy := httputil.NewSingleHostReverseProxy(cfg.HydraPublicURL)
+	proxy.ModifyResponse = func(response *http.Response) error {
+		if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest && response.ContentLength == 0 && response.Header.Get("Location") != "" {
+			response.Body.Close()
+			response.Body = io.NopCloser(strings.NewReader("\n"))
+			response.ContentLength = 1
+			response.Header.Set("Content-Length", "1")
+			response.Header.Set("Content-Type", "text/html; charset=utf-8")
+		}
+		return nil
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
@@ -403,7 +414,8 @@ func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) acceptHydraConsent(ctx context.Context, challenge string, scopes []string, user identity.User) (string, error) {
-	return s.hydraAccept(ctx, "/admin/oauth2/auth/requests/consent/accept", challenge, map[string]any{"grant_scope": scopes, "remember": true, "remember_for": 2592000, "session": map[string]any{"id_token": map[string]any{"sub": user.ID, "email": user.Email, "preferred_username": user.Username, "role": user.Role}, "access_token": map[string]any{"role": user.Role}}})
+	claims := map[string]any{"sub": user.ID, "email": user.Email, "preferred_username": user.Username, "role": user.Role}
+	return s.hydraAccept(ctx, "/admin/oauth2/auth/requests/consent/accept", challenge, map[string]any{"grant_scope": scopes, "remember": true, "remember_for": 2592000, "session": map[string]any{"id_token": claims, "access_token": claims}})
 }
 
 type hydraLogoutRequest struct {
