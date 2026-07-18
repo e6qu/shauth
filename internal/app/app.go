@@ -733,10 +733,7 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		if err := identity.ValidateManagedApp(managedApp); err != nil {
 			return fmt.Errorf("bootstrap managed app %q: %w", bootstrap.Slug, err)
 		}
-		if existing, ok := byID[input.ID]; ok {
-			if existing.Name != input.Name || !sameStrings(existing.RedirectURIs, input.RedirectURIs) {
-				return fmt.Errorf("bootstrap OAuth client %q conflicts with the registered client", input.ID)
-			}
+		if _, ok := byID[input.ID]; ok {
 			if err := s.updateHydraClient(ctx, input); err != nil {
 				return fmt.Errorf("update bootstrap OAuth client %q: %w", input.ID, err)
 			}
@@ -754,18 +751,6 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func sameStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *Server) adminGitHubMappings(w http.ResponseWriter, r *http.Request) {
