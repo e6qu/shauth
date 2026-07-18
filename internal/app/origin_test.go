@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-func TestSameOriginPostsAllowsOAuthTokenExchangeWithoutOrigin(t *testing.T) {
+func TestCSRFPostsAllowsOAuthTokenExchangeWithoutOrigin(t *testing.T) {
 	publicURL, err := url.Parse("https://auth.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -25,12 +25,12 @@ func TestSameOriginPostsAllowsOAuthTokenExchangeWithoutOrigin(t *testing.T) {
 	}
 }
 
-func TestSameOriginPostsStillRequiresOriginForBrowserPost(t *testing.T) {
+func TestCSRFPostsRejectsBrowserPostWithoutToken(t *testing.T) {
 	publicURL, err := url.Parse("https://auth.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -43,12 +43,12 @@ func TestSameOriginPostsStillRequiresOriginForBrowserPost(t *testing.T) {
 	}
 }
 
-func TestSameOriginPostsRejectsCrossOriginBrowserPost(t *testing.T) {
+func TestCSRFPostsRejectsCrossOriginBrowserPost(t *testing.T) {
 	publicURL, err := url.Parse("https://auth.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -62,17 +62,19 @@ func TestSameOriginPostsRejectsCrossOriginBrowserPost(t *testing.T) {
 	}
 }
 
-func TestSameOriginPostsAllowsSameOriginBrowserPost(t *testing.T) {
+func TestCSRFPostsAllowsSameOriginBrowserPost(t *testing.T) {
 	publicURL, err := url.Parse("https://auth.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
 	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/logout", nil)
 	request.Header.Set("Origin", "https://auth.example.test")
+	request.AddCookie(&http.Cookie{Name: csrfCookie, Value: "token"})
+	request.Form = url.Values{"_csrf": {"token"}}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
@@ -81,12 +83,33 @@ func TestSameOriginPostsAllowsSameOriginBrowserPost(t *testing.T) {
 	}
 }
 
-func TestSameOriginPostsRejectsOriginWithPath(t *testing.T) {
+func TestCSRFPostsAllowsNullOriginBrowserPost(t *testing.T) {
 	publicURL, err := url.Parse("https://auth.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := sameOriginPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/login", nil)
+	request.Header.Set("Origin", "null")
+	request.AddCookie(&http.Cookie{Name: csrfCookie, Value: "token"})
+	request.Form = url.Values{"_csrf": {"token"}}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestCSRFPostsRejectsOriginWithPath(t *testing.T) {
+	publicURL, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 

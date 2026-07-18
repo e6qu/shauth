@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 )
 
 const browserSessionCookie = "shauth_session"
+const csrfCookie = "shauth_csrf"
 const githubStateCookie = "shauth_github_state"
 const logoutIntentCookie = "shauth_logout_intent"
 const bootstrapRetryInterval = time.Second
@@ -162,7 +164,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/users/{id}/sessions/revoke", s.adminRevokeSessions)
 	mux.HandleFunc("POST /admin/sessions/{id}/revoke", s.adminRevokeSession)
 	mux.HandleFunc("GET /monitoring", s.monitoring)
-	return securityHeaders(sameOriginPosts(s.config.PublicURL, mux))
+	return securityHeaders(csrfPosts(s.config.PublicURL, mux))
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -179,19 +181,35 @@ func serveThemeScript(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write([]byte(`!function(){try{var root=document.documentElement,theme=localStorage.getItem("shauth-theme");if(theme){root.dataset.theme=theme}function setup(){var button=document.getElementById("theme-toggle");if(!button)return;function label(){var dark=root.dataset.theme==="dark";button.setAttribute("aria-pressed",String(dark));button.setAttribute("aria-label",dark?"Switch to light mode":"Switch to dark mode");button.innerHTML="<span aria-hidden=\"true\">"+(dark?"☀":"☾")+"</span>"}button.addEventListener("click",function(){root.dataset.theme=root.dataset.theme==="dark"?"light":"dark";localStorage.setItem("shauth-theme",root.dataset.theme);label()});label()}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",setup)}else{setup()}}catch(error){}}();`))
 }
-func sameOriginPosts(publicURL *url.URL, next http.Handler) http.Handler {
+func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// OAuth 2.0 token exchange is a back-channel protocol endpoint.  It is
-		// authenticated by the registered client rather than a browser session, so
-		// compliant application servers do not send an Origin header.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if _, err := r.Cookie(csrfCookie); err != nil {
+				token, tokenErr := newState()
+				if tokenErr != nil {
+					http.Error(w, "could not create CSRF token", http.StatusInternalServerError)
+					return
+				}
+				http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: token, Path: "/", Secure: publicURL.Scheme == "https", SameSite: http.SameSiteLaxMode})
+			}
+		}
 		if r.Method == http.MethodPost && r.URL.Path != "/oauth2/token" {
-			origin := r.Header.Get("Origin")
-			if origin == "" {
-				http.Error(w, "origin header is required for state-changing requests", http.StatusForbidden)
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "invalid form", http.StatusBadRequest)
 				return
 			}
-			parsed, err := url.Parse(origin)
-			if err != nil || parsed.Scheme != publicURL.Scheme || parsed.Host != publicURL.Host || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			cookie, err := r.Cookie(csrfCookie)
+			if err != nil || cookie.Value == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(r.Form.Get("_csrf"))) != 1 {
+				http.Error(w, "CSRF token is invalid", http.StatusForbidden)
+				return
+			}
+			origin := r.Header.Get("Origin")
+			if origin != "" && origin != "null" {
+				parsed, err := url.Parse(origin)
+				if err == nil && parsed.Scheme == publicURL.Scheme && parsed.Host == publicURL.Host && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.User == nil {
+					next.ServeHTTP(w, r)
+					return
+				}
 				http.Error(w, "cross-origin request denied", http.StatusForbidden)
 				return
 			}
