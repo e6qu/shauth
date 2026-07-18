@@ -11,7 +11,7 @@ const pageTemplates = `
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#6d28d9">
   <title>Shauth · e6qu identity</title>
-  <script src="/assets/theme.js" defer></script><script>document.addEventListener('submit',function(e){var f=e.target;if(!(f instanceof HTMLFormElement)||f.method.toLowerCase()!=='post')return;var t=f.querySelector('input[name="_csrf"]');if(!t){t=document.createElement('input');t.type='hidden';t.name='_csrf';f.appendChild(t)}var m=document.cookie.match(/(?:^|; )shauth_csrf=([^;]*)/);t.value=m?decodeURIComponent(m[1]):''},true)</script>
+  <script src="/assets/theme.js" defer></script>
   <script src="https://unpkg.com/htmx.org@2.0.8" defer></script>
   <style>
     :root{color-scheme:light;--bg:#f6f7ff;--surface:#fff;--surface-strong:#f0edff;--text:#1f1833;--muted:#625d72;--border:#d7d2e5;--brand:#6d28d9;--brand-strong:#531caf;--brand-soft:#e9ddff;--accent:#007f89;--accent-soft:#c8f5ef;--danger:#bc1746;--danger-soft:#ffe0ea;--success:#08764d;--success-soft:#cff7df;--focus:#f59e0b;--shadow:0 18px 42px rgba(51,27,104,.12);--radius:18px}
