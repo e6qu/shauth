@@ -50,18 +50,6 @@ func TestOIDCClientInputAllowsLoopbackHTTP(t *testing.T) {
 	}
 }
 
-func TestSameStrings(t *testing.T) {
-	if !sameStrings([]string{"a", "b"}, []string{"a", "b"}) {
-		t.Fatal("sameStrings rejected identical values")
-	}
-	if sameStrings([]string{"a", "b"}, []string{"b", "a"}) {
-		t.Fatal("sameStrings accepted reordered values")
-	}
-	if sameStrings([]string{"a"}, []string{"a", "b"}) {
-		t.Fatal("sameStrings accepted differently sized values")
-	}
-}
-
 func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 	body, err := marshalHydraClient(oidcClientInput{
 		ID:           "intraktible-dev",
@@ -84,7 +72,7 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 	if payload.ClientID != "intraktible-dev" || payload.ClientSecret == "" {
 		t.Fatalf("client payload = %#v, want client ID and secret", payload)
 	}
-	if !sameStrings(payload.GrantTypes, []string{"authorization_code", "refresh_token"}) {
+	if len(payload.GrantTypes) != 2 || payload.GrantTypes[0] != "authorization_code" || payload.GrantTypes[1] != "refresh_token" {
 		t.Fatalf("grant types = %#v", payload.GrantTypes)
 	}
 	if payload.TokenEndpointAuthMethod != "client_secret_post" {

@@ -3,21 +3,29 @@
 set -eu
 
 unset CDPATH
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
 }
 
-export POSTGRES_PASSWORD=$(openssl rand -hex 32)
-export HYDRA_SYSTEM_SECRET=$(random_secret)
+POSTGRES_PASSWORD=$(openssl rand -hex 32)
+export POSTGRES_PASSWORD
+HYDRA_SYSTEM_SECRET=$(random_secret)
+export HYDRA_SYSTEM_SECRET
 export HYDRA_DSN="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/hydra?sslmode=disable"
 export SHAUTH_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/shauth?sslmode=disable"
 export GITHUB_CLIENT_ID=local-integration-client
 export GITHUB_CLIENT_SECRET=local-integration-secret
-export SHAUTH_BOOTSTRAP_ADMIN_PASSWORD=$(random_secret)
-export SHAUTH_OIDC_CLIENT_SECRET=$(random_secret)
+SHAUTH_BOOTSTRAP_ADMIN_PASSWORD=$(random_secret)
+export SHAUTH_BOOTSTRAP_ADMIN_PASSWORD
+SHAUTH_OIDC_CLIENT_SECRET=$(random_secret)
+export SHAUTH_OIDC_CLIENT_SECRET
+SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET=$(random_secret)
+export SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+export SHAUTH_BOOTSTRAP_APPS_JSON
 cookie_jar=$(mktemp)
 consent_page=$(mktemp)
 
@@ -54,6 +62,21 @@ curl --fail --silent --show-error http://localhost:8080/login | grep -q 'id="mai
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-label="Primary navigation"'
 curl --fail --silent --show-error http://localhost:8080/assets/theme.js | grep -q 'theme-toggle'
 curl --fail --silent --show-error --dump-header - --output /dev/null http://localhost:8080/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self' https://unpkg.com"
+curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/initial'
+
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+export SHAUTH_BOOTSTRAP_APPS_JSON
+docker compose up --force-recreate --no-deps --detach shauth
+attempt=0
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ "$attempt" -eq 30 ]; then
+  docker compose logs --no-color
+  exit 1
+fi
+curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/updated'
 
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode 'username=admin' \
@@ -185,7 +208,7 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
   --data-urlencode 'next=/' \
   http://localhost:8080/login >/dev/null
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users/${admin_id}/sessions | grep -q 'Revoked'
+curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_id}/sessions" | grep -q 'Revoked'
 
 # Subject-wide invalidation must revoke Hydra's refresh grants as well as each
 # Shauth browser session. A successful refresh here would leave a revoked user
