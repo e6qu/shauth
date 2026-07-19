@@ -6,10 +6,75 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"testing"
 )
+
+func TestGatewaySecurityHeadersDoNotOverrideUpstreamFramingPolicy(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'self'")
+		response.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		response.Header().Set("Referrer-Policy", "strict-origin")
+		response.Header().Set("X-Content-Type-Options", "nosniff")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(upstreamURL)
+	server := &Server{config: Config{Issuer: issuer}}
+	request := httptest.NewRequest(http.MethodGet, "https://console.example.test/terminal/", nil)
+	response := httptest.NewRecorder()
+	server.securityHeaders(proxy).ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	want := map[string]string{
+		"Content-Security-Policy": "default-src 'self'; frame-ancestors 'self'",
+		"X-Frame-Options":         "SAMEORIGIN",
+		"Referrer-Policy":         "strict-origin",
+		"X-Content-Type-Options":  "nosniff",
+	}
+	for name, expected := range want {
+		if actual := response.Header().Get(name); actual != expected {
+			t.Errorf("%s = %q, want upstream value %q", name, actual, expected)
+		}
+	}
+}
+
+func TestGatewayAuthHandlersRetainGatewaySecurityPolicy(t *testing.T) {
+	t.Parallel()
+	issuer, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: Config{Issuer: issuer}}
+	request := httptest.NewRequest(http.MethodGet, "https://console.example.test/auth/healthz", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	wantCSP := "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://auth.example.test"
+	if actual := response.Header().Get("Content-Security-Policy"); actual != wantCSP {
+		t.Fatalf("Content-Security-Policy = %q, want %q", actual, wantCSP)
+	}
+	if actual := response.Header().Get("X-Frame-Options"); actual != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want DENY", actual)
+	}
+}
 
 func TestValidLogoutEvent(t *testing.T) {
 	t.Parallel()

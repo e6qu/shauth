@@ -88,6 +88,11 @@ removes the inbound `Authorization` header. Its `/auth/session` endpoint exposes
 the verified user to the first-party UI, and `POST /auth/logout` performs an OIDC
 relying-party-initiated logout using the stored ID token. Signed back-channel
 logout and correlated front-channel logout revoke every matching local session.
+Security headers on gateway-owned `/auth/` responses deny framing except for
+the issuer-only front-channel logout document. Proxied application responses
+retain the upstream application's own Content Security Policy and
+`X-Frame-Options`, so same-origin application frames keep working without the
+identity gateway weakening or replacing their policy.
 
 The gateway requires `OIDC_GATEWAY_ISSUER`, `OIDC_GATEWAY_CLIENT_ID`,
 `OIDC_GATEWAY_CLIENT_SECRET`, `OIDC_GATEWAY_PUBLIC_URL`,

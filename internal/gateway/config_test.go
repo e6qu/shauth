@@ -55,7 +55,7 @@ func TestSecurityHeadersAllowOnlyApplicationAndIssuerForms(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{config: Config{Issuer: issuer}}
-	request := httptest.NewRequest(http.MethodGet, "https://console.example.test/", nil)
+	request := httptest.NewRequest(http.MethodGet, "https://console.example.test/auth/session", nil)
 	response := httptest.NewRecorder()
 	server.securityHeaders(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(response, request)
 	want := "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://auth.example.test"

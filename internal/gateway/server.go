@@ -513,6 +513,10 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 
 func (server *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if !strings.HasPrefix(request.URL.Path, "/auth/") {
+			next.ServeHTTP(response, request)
+			return
+		}
 		if request.URL.Path == "/auth/frontchannel-logout" {
 			response.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'none'; frame-ancestors %s://%s; base-uri 'none'; form-action 'none'", server.config.Issuer.Scheme, server.config.Issuer.Host))
 		} else {

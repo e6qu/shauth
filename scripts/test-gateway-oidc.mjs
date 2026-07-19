@@ -18,7 +18,11 @@ const upstream = http.createServer((request, response) => {
     role: request.headers["x-forwarded-role"],
     authorization: request.headers.authorization,
   });
-  response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy": "default-src 'self'; frame-ancestors 'self'",
+    "x-frame-options": "SAMEORIGIN",
+  });
   response.end("<!doctype html><html lang=en><title>Protected application</title><h1>Protected application</h1><form method=post action=/auth/logout><button>Sign out</button></form></html>");
 });
 await new Promise((resolve, reject) => {
@@ -54,7 +58,11 @@ try {
   const sessionResponse = await context.request.get("http://localhost:5556/auth/session");
   const session = await sessionResponse.json();
   const protectedResponse = await context.request.get("http://localhost:5556/");
-  assert.match(protectedResponse.headers()["content-security-policy"], /form-action 'self' http:\/\/localhost:8080/);
+  assert.equal(protectedResponse.headers()["content-security-policy"], "default-src 'self'; frame-ancestors 'self'");
+  assert.equal(protectedResponse.headers()["x-frame-options"], "SAMEORIGIN");
+  const gatewayResponse = await context.request.get("http://localhost:5556/auth/session");
+  assert.match(gatewayResponse.headers()["content-security-policy"], /form-action 'self' http:\/\/localhost:8080/);
+  assert.equal(gatewayResponse.headers()["x-frame-options"], "DENY");
   assert.deepEqual(await identity, {
     subject: session.subject,
     username: "admin",
