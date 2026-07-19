@@ -95,21 +95,8 @@ func (input oidcClientInput) validate() error {
 	if err := validateClientURIs("front-channel logout URI", []string{input.FrontChannelLogoutURI}); err != nil {
 		return err
 	}
-	return validateClientURIs("back-channel logout URI", []string{input.BackChannelLogoutURI})
-}
-
-func validateClientURIs(label string, uris []string) error {
-	for _, rawURI := range uris {
-		if rawURI == "" {
-			continue
-		}
-		uri, err := url.Parse(rawURI)
-		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.User != nil || uri.Fragment != "" {
-			return fmt.Errorf("%s %q must be an absolute URI without a fragment", label, rawURI)
-		}
-		if uri.Scheme != "https" && !isLoopbackRedirect(uri) {
-			return fmt.Errorf("%s %q must use HTTPS unless it targets loopback", label, rawURI)
-		}
+	if err := validateClientURIs("back-channel logout URI", []string{input.BackChannelLogoutURI}); err != nil {
+		return err
 	}
 	if input.FrontChannelLogoutURI != "" {
 		frontchannel, _ := url.Parse(input.FrontChannelLogoutURI)
@@ -123,6 +110,22 @@ func validateClientURIs(label string, uris []string) error {
 		}
 		if !matchedRedirectOrigin {
 			return fmt.Errorf("front-channel logout URI must use the scheme, host, and port of a redirect URI")
+		}
+	}
+	return nil
+}
+
+func validateClientURIs(label string, uris []string) error {
+	for _, rawURI := range uris {
+		if rawURI == "" {
+			continue
+		}
+		uri, err := url.Parse(rawURI)
+		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.User != nil || uri.Fragment != "" {
+			return fmt.Errorf("%s %q must be an absolute URI without user information or a fragment", label, rawURI)
+		}
+		if uri.Scheme != "https" && !isLoopbackRedirect(uri) {
+			return fmt.Errorf("%s %q must use HTTPS unless it targets loopback", label, rawURI)
 		}
 	}
 	return nil
@@ -1153,7 +1156,6 @@ func marshalHydraClient(input oidcClientInput, policy identity.SessionPolicy) ([
 		"response_types":                       []string{"code"},
 		"scope":                                "openid offline_access profile email",
 		"token_endpoint_auth_method":           "client_secret_post",
-		"post_logout_redirect_uris":            input.PostLogoutRedirectURIs,
 		"frontchannel_logout_uri":              input.FrontChannelLogoutURI,
 		"backchannel_logout_uri":               input.BackChannelLogoutURI,
 		"frontchannel_logout_session_required": input.FrontChannelLogoutURI != "",
