@@ -26,6 +26,12 @@ Manager ARNs for the Shauth and Ory Hydra database URLs created by `fck-rds`.
 The module creates a separate runtime secret containing generated Hydra and
 bootstrap-admin secrets.
 
+Set `entra_tenant_id`, `entra_client_id`, and `entra_oauth_secret_arn` together
+to enable Microsoft Entra ID as an additional upstream identity source. The
+tenant is a specific tenant UUID and the secret ARN names a JSON secret with a
+`client_secret` key. Omitting all three leaves the connector disabled; partial
+configuration is rejected during Terraform validation.
+
 The caller supplies the shared VPC, private subnet IDs, Amazon ECS cluster,
 and Route 53 hosted zone so Shauth can coexist with the other `dev` services.
 
@@ -33,3 +39,7 @@ Shauth's task role has only the permissions required for identity delivery.
 Administrators register each managed app with its OIDC client, launch URL,
 published health URL, and optional monitoring URL. Shauth checks health through
 standard HTTP and remains independent of deployment platforms and log systems.
+Each `bootstrap_apps` client also supplies its sign-in redirect URIs, allowed
+post-logout redirect URIs, and at least one front-channel or back-channel
+logout URI. These coordinates let Ory Hydra propagate one Shauth logout to
+every correlated relying-application session.

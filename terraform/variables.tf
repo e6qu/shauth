@@ -14,6 +14,20 @@ variable "github_oauth_secret_arn" {
   description = "AWS Secrets Manager ARN for a JSON secret containing a client_secret key."
 }
 variable "github_client_id" { type = string }
+variable "entra_tenant_id" {
+  type        = string
+  default     = null
+  description = "Specific Microsoft Entra ID tenant UUID. Set together with entra_client_id and entra_oauth_secret_arn."
+}
+variable "entra_client_id" {
+  type    = string
+  default = null
+}
+variable "entra_oauth_secret_arn" {
+  type        = string
+  default     = null
+  description = "AWS Secrets Manager ARN for a JSON secret containing the Microsoft Entra ID client_secret key."
+}
 variable "bootstrap_admin_email" { type = string }
 variable "invitation_email_from" {
   type = string
@@ -46,19 +60,26 @@ variable "bootstrap_apps" {
   description = "Confidential OIDC clients and endpoint-monitored applications Shauth creates idempotently at startup."
   sensitive   = true
   type = list(object({
-    slug               = string
-    name               = string
-    description        = string
-    launch_url         = string
-    oidc_client_id     = string
-    oidc_client_secret = string
-    redirect_uris      = list(string)
-    # Optional allowlist of post-logout redirect URIs. When set, a relying
-    # app's RP-initiated logout can return the browser to the app; when
-    # omitted, Hydra falls back to Shauth's default post-logout page.
-    post_logout_redirect_uris = optional(list(string), [])
+    slug                      = string
+    name                      = string
+    description               = string
+    launch_url                = string
+    oidc_client_id            = string
+    oidc_client_secret        = string
+    redirect_uris             = list(string)
+    post_logout_redirect_uris = list(string)
+    frontchannel_logout_uri   = optional(string, "")
+    backchannel_logout_uri    = optional(string, "")
     health_url                = string
     monitoring_url            = string
   }))
   default = []
+  validation {
+    condition = alltrue([
+      for app in var.bootstrap_apps :
+      length(app.post_logout_redirect_uris) > 0 &&
+      (trimspace(app.frontchannel_logout_uri) != "" || trimspace(app.backchannel_logout_uri) != "")
+    ])
+    error_message = "Each bootstrap app must set at least one post_logout_redirect_uris entry and frontchannel_logout_uri, backchannel_logout_uri, or both."
+  }
 }

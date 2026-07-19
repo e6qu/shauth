@@ -7,11 +7,13 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth ./cmd/shauth
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-migrate ./cmd/shauth-migrate
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-healthcheck ./cmd/shauth-healthcheck
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-gateway ./cmd/shauth-gateway
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/shauth /shauth
 COPY --from=build /out/shauth-migrate /shauth-migrate
 COPY --from=build /out/shauth-healthcheck /shauth-healthcheck
+COPY --from=build /out/shauth-gateway /shauth-gateway
 COPY migrations /migrations
 USER nonroot:nonroot
 EXPOSE 8080

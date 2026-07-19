@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,9 +20,11 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/e6qu/shauth/internal/config"
 	githubapi "github.com/e6qu/shauth/internal/github"
 	"github.com/e6qu/shauth/internal/identity"
@@ -34,19 +37,24 @@ import (
 const browserSessionCookie = "shauth_session"
 const csrfCookie = "shauth_csrf"
 const githubStateCookiePrefix = "shauth_github_state_"
-const logoutIntentCookie = "shauth_logout_intent"
+const entraStateCookiePrefix = "shauth_entra_state_"
 const bootstrapRetryInterval = time.Second
 const bootstrapRetryTimeout = 45 * time.Second
+const outboundRequestTimeout = 15 * time.Second
 
 const baseContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 const oidcContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"
+const oidcLogoutContentSecurityPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
 var oidcClientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{2,127}$`)
 
 type oidcClient struct {
-	ID           string   `json:"client_id"`
-	Name         string   `json:"client_name"`
-	RedirectURIs []string `json:"redirect_uris"`
+	ID                     string   `json:"client_id"`
+	Name                   string   `json:"client_name"`
+	RedirectURIs           []string `json:"redirect_uris"`
+	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
+	FrontChannelLogoutURI  string   `json:"frontchannel_logout_uri"`
+	BackChannelLogoutURI   string   `json:"backchannel_logout_uri"`
 }
 
 type oidcClientInput struct {
@@ -55,6 +63,8 @@ type oidcClientInput struct {
 	Secret                 string
 	RedirectURIs           []string
 	PostLogoutRedirectURIs []string
+	FrontChannelLogoutURI  string
+	BackChannelLogoutURI   string
 }
 
 func (input oidcClientInput) validate() error {
@@ -70,20 +80,49 @@ func (input oidcClientInput) validate() error {
 	if len(input.RedirectURIs) == 0 {
 		return fmt.Errorf("at least one redirect URI is required")
 	}
+	if len(input.PostLogoutRedirectURIs) == 0 {
+		return fmt.Errorf("at least one post-logout redirect URI is required")
+	}
+	if input.FrontChannelLogoutURI == "" && input.BackChannelLogoutURI == "" {
+		return fmt.Errorf("a front-channel or back-channel logout URI is required")
+	}
 	if err := validateClientURIs("redirect URI", input.RedirectURIs); err != nil {
 		return err
 	}
-	// Post-logout redirect URIs are optional (a client may omit them), but
-	// each supplied one must satisfy the same absolute-HTTPS rules so an
-	// RP-initiated logout can be returned to a trusted origin.
-	return validateClientURIs("post-logout redirect URI", input.PostLogoutRedirectURIs)
+	if err := validateClientURIs("post-logout redirect URI", input.PostLogoutRedirectURIs); err != nil {
+		return err
+	}
+	if err := validateClientURIs("front-channel logout URI", []string{input.FrontChannelLogoutURI}); err != nil {
+		return err
+	}
+	if err := validateClientURIs("back-channel logout URI", []string{input.BackChannelLogoutURI}); err != nil {
+		return err
+	}
+	if input.FrontChannelLogoutURI != "" {
+		frontchannel, _ := url.Parse(input.FrontChannelLogoutURI)
+		matchedRedirectOrigin := false
+		for _, rawRedirect := range input.RedirectURIs {
+			redirect, _ := url.Parse(rawRedirect)
+			if strings.EqualFold(frontchannel.Scheme, redirect.Scheme) && strings.EqualFold(frontchannel.Host, redirect.Host) {
+				matchedRedirectOrigin = true
+				break
+			}
+		}
+		if !matchedRedirectOrigin {
+			return fmt.Errorf("front-channel logout URI must use the scheme, host, and port of a redirect URI")
+		}
+	}
+	return nil
 }
 
 func validateClientURIs(label string, uris []string) error {
 	for _, rawURI := range uris {
+		if rawURI == "" {
+			continue
+		}
 		uri, err := url.Parse(rawURI)
-		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.Fragment != "" {
-			return fmt.Errorf("%s %q must be an absolute URI without a fragment", label, rawURI)
+		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.User != nil || uri.Fragment != "" {
+			return fmt.Errorf("%s %q must be an absolute URI without user information or a fragment", label, rawURI)
 		}
 		if uri.Scheme != "https" && !isLoopbackRedirect(uri) {
 			return fmt.Errorf("%s %q must use HTTPS unless it targets loopback", label, rawURI)
@@ -105,6 +144,8 @@ type Server struct {
 	store       *identity.Store
 	github      *githubapi.Client
 	oauth       *oauth2.Config
+	entraOAuth  *oauth2.Config
+	entraVerify *oidc.IDTokenVerifier
 	httpClient  *http.Client
 	templates   *template.Template
 	hydraPublic *httputil.ReverseProxy
@@ -113,7 +154,8 @@ type Server struct {
 }
 
 func New(cfg config.Config, store *identity.Store) (*Server, error) {
-	client, err := githubapi.NewClient(http.DefaultClient)
+	outboundClient := &http.Client{Timeout: outboundRequestTimeout}
+	client, err := githubapi.NewClient(outboundClient)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +175,18 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
 	}
-	server := &Server{config: cfg, store: store, github: client, httpClient: http.DefaultClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
+	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
+	if cfg.EntraTenantID != "" {
+		issuer := "https://login.microsoftonline.com/" + cfg.EntraTenantID + "/v2.0"
+		discoveryContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		provider, err := oidc.NewProvider(discoveryContext, issuer)
+		if err != nil {
+			return nil, fmt.Errorf("discover Microsoft Entra ID OpenID Connect provider: %w", err)
+		}
+		server.entraOAuth = &oauth2.Config{ClientID: cfg.EntraClientID, ClientSecret: cfg.EntraClientSecret, Endpoint: provider.Endpoint(), RedirectURL: cfg.PublicURL.ResolveReference(&url.URL{Path: "/oauth/entra/callback"}).String(), Scopes: []string{oidc.ScopeOpenID, "profile", "email"}}
+		server.entraVerify = provider.Verifier(&oidc.Config{ClientID: cfg.EntraClientID})
+	}
 	if err := server.bootstrapApps(context.Background()); err != nil {
 		return nil, err
 	}
@@ -185,12 +238,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /oauth/github", s.githubStart)
 	mux.HandleFunc("GET /oauth/github/callback", s.githubCallback)
+	mux.HandleFunc("GET /oauth/entra", s.entraStart)
+	mux.HandleFunc("GET /oauth/entra/callback", s.entraCallback)
 	mux.HandleFunc("GET /oauth/login", s.hydraLogin)
 	mux.HandleFunc("GET /oauth/consent", s.hydraConsent)
 	mux.HandleFunc("GET /oauth/error", s.hydraError)
 	mux.HandleFunc("POST /oauth/consent", s.hydraConsentAccept)
 	mux.HandleFunc("GET /oauth/logout", s.hydraLogout)
-	mux.HandleFunc("POST /oauth/logout", s.hydraLogoutAccept)
 	mux.HandleFunc("GET /admin", s.admin)
 	mux.HandleFunc("GET /admin/apps", s.adminApps)
 	mux.HandleFunc("POST /admin/apps", s.adminCreateApp)
@@ -198,9 +252,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/clients", s.adminOIDCClients)
 	mux.HandleFunc("POST /admin/clients", s.adminCreateOIDCClient)
 	mux.HandleFunc("POST /admin/clients/{id}/delete", s.adminDeleteOIDCClient)
+	mux.HandleFunc("GET /admin/session-policy", s.adminSessionPolicy)
+	mux.HandleFunc("POST /admin/session-policy", s.adminUpdateSessionPolicy)
 	mux.HandleFunc("GET /admin/github", s.adminGitHubMappings)
 	mux.HandleFunc("POST /admin/github", s.adminCreateGitHubMapping)
 	mux.HandleFunc("POST /admin/github/{id}/delete", s.adminDeleteGitHubMapping)
+	mux.HandleFunc("GET /admin/connectors", s.adminConnectors)
 	mux.HandleFunc("GET /admin/users", s.adminUsers)
 	mux.HandleFunc("POST /admin/users", s.adminCreateUser)
 	mux.HandleFunc("POST /admin/invitations", s.adminInvite)
@@ -216,7 +273,11 @@ func (s *Server) Handler() http.Handler {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", baseContentSecurityPolicy)
+		policy := baseContentSecurityPolicy
+		if r.URL.Path == "/oauth2/sessions/logout" {
+			policy = oidcLogoutContentSecurityPolicy
+		}
+		w.Header().Set("Content-Security-Policy", policy)
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
@@ -292,7 +353,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if isOIDCNext(next) {
 		allowOIDCFormAction(w)
 	}
-	s.render(w, "login", map[string]any{"Next": next, "Error": r.URL.Query().Get("error")})
+	s.render(w, "login", map[string]any{"Next": next, "Error": r.URL.Query().Get("error"), "EntraEnabled": s.entraOAuth != nil})
 }
 func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -301,7 +362,7 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.store.AuthenticatePassword(r.Context(), r.Form.Get("username"), r.Form.Get("password"))
 	if err != nil {
-		s.render(w, "login", map[string]any{"Error": "Invalid username or password.", "Next": relativeNext(r.Form.Get("next"))})
+		s.render(w, "login", map[string]any{"Error": "Invalid username or password.", "Next": relativeNext(r.Form.Get("next")), "EntraEnabled": s.entraOAuth != nil})
 		return
 	}
 	if !s.startSession(w, r, user) {
@@ -320,10 +381,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	// The browser must visit Hydra so it can remove its own authentication cookie.
-	// This short-lived marker binds the resulting front-channel callback to this
-	// same-origin, user-confirmed sign-out action.
-	s.setCookie(w, &http.Cookie{Name: logoutIntentCookie, Value: "1", Path: "/oauth/logout", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: 300})
+	// The browser must visit Ory Hydra so it can remove its own authentication
+	// cookie and propagate logout to every correlated relying application.
 	http.Redirect(w, r, "/oauth2/sessions/logout", http.StatusSeeOther)
 }
 func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
@@ -373,17 +432,141 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, relativeNext(cookie.Value), http.StatusSeeOther)
 }
+
+func (s *Server) entraStart(w http.ResponseWriter, r *http.Request) {
+	if s.entraOAuth == nil {
+		http.NotFound(w, r)
+		return
+	}
+	state, err := newState()
+	if err != nil {
+		http.Error(w, "could not begin Microsoft Entra ID login", http.StatusInternalServerError)
+		return
+	}
+	nonce, err := newState()
+	if err != nil {
+		http.Error(w, "could not begin Microsoft Entra ID login", http.StatusInternalServerError)
+		return
+	}
+	cookieValue, err := json.Marshal(map[string]string{"next": relativeNext(r.URL.Query().Get("next")), "nonce": nonce})
+	if err != nil {
+		http.Error(w, "could not begin Microsoft Entra ID login", http.StatusInternalServerError)
+		return
+	}
+	s.setCookie(w, &http.Cookie{Name: entraStateCookieName(state), Value: base64.RawURLEncoding.EncodeToString(cookieValue), Path: "/oauth/entra/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+	http.Redirect(w, r, s.entraOAuth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce)), http.StatusFound)
+}
+
+type entraClaims struct {
+	Subject           string `json:"sub"`
+	ObjectID          string `json:"oid"`
+	TenantID          string `json:"tid"`
+	Email             string `json:"email"`
+	PreferredUsername string `json:"preferred_username"`
+	Nonce             string `json:"nonce"`
+}
+
+func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
+	if s.entraOAuth == nil || s.entraVerify == nil {
+		http.NotFound(w, r)
+		return
+	}
+	state := r.URL.Query().Get("state")
+	cookieName, validState := validEntraStateCookieName(state)
+	cookie, err := r.Cookie(cookieName)
+	if !validState || err != nil {
+		http.Error(w, "Microsoft Entra ID login state did not match", http.StatusBadRequest)
+		return
+	}
+	s.expireCookieAtPath(w, cookieName, "/oauth/entra/callback")
+	var transaction map[string]string
+	transactionJSON, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil || json.Unmarshal(transactionJSON, &transaction) != nil || transaction["nonce"] == "" {
+		http.Error(w, "Microsoft Entra ID login state was invalid", http.StatusBadRequest)
+		return
+	}
+	token, err := s.entraOAuth.Exchange(r.Context(), r.URL.Query().Get("code"))
+	if err != nil {
+		http.Error(w, "Microsoft Entra ID authorization failed", http.StatusBadGateway)
+		return
+	}
+	rawIDToken, ok := token.Extra("id_token").(string)
+	if !ok || rawIDToken == "" {
+		http.Error(w, "Microsoft Entra ID authorization omitted the ID token", http.StatusBadGateway)
+		return
+	}
+	idToken, err := s.entraVerify.Verify(r.Context(), rawIDToken)
+	if err != nil {
+		http.Error(w, "Microsoft Entra ID token verification failed", http.StatusBadGateway)
+		return
+	}
+	var claims entraClaims
+	if err := idToken.Claims(&claims); err != nil {
+		http.Error(w, "Microsoft Entra ID identity claims were invalid", http.StatusBadGateway)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(transaction["nonce"])) != 1 || !strings.EqualFold(claims.TenantID, s.config.EntraTenantID) || claims.ObjectID == "" || claims.Subject == "" {
+		http.Error(w, "Microsoft Entra ID identity did not match this Shauth tenant", http.StatusForbidden)
+		return
+	}
+	email := strings.TrimSpace(claims.Email)
+	if email == "" {
+		email = strings.TrimSpace(claims.PreferredUsername)
+	}
+	user, err := s.store.FindOrCreateEntraUser(r.Context(), claims.TenantID, claims.ObjectID, entraUsername(claims.PreferredUsername, email, claims.ObjectID), email)
+	if err != nil {
+		http.Error(w, "could not establish local account", http.StatusInternalServerError)
+		return
+	}
+	if !s.startSession(w, r, user) {
+		return
+	}
+	http.Redirect(w, r, relativeNext(transaction["next"]), http.StatusSeeOther)
+}
+
+func entraUsername(preferred, email, objectID string) string {
+	base := strings.TrimSpace(preferred)
+	if index := strings.IndexByte(base, '@'); index >= 0 {
+		base = base[:index]
+	}
+	if base == "" {
+		base = strings.SplitN(email, "@", 2)[0]
+	}
+	base = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`).ReplaceAllString(base, "-")
+	suffix := strings.ReplaceAll(objectID, "-", "")
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	return strings.Trim(strings.ToLower(base), "-.") + "-" + suffix
+}
+
+func entraStateCookieName(state string) string { return entraStateCookiePrefix + state }
+
+func validEntraStateCookieName(state string) (string, bool) {
+	if len(state) != 64 {
+		return "", false
+	}
+	if _, err := hex.DecodeString(state); err != nil {
+		return "", false
+	}
+	return entraStateCookieName(state), true
+}
 func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 	if challenge := r.URL.Query().Get("login_challenge"); challenge == "" {
 		http.Error(w, "missing login_challenge", 400)
 		return
 	}
-	user, _, err := s.current(r)
+	user, session, err := s.current(r)
 	if err != nil {
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 		return
 	}
-	redirect, err := s.hydraAccept(r.Context(), "/admin/oauth2/auth/requests/login/accept", r.URL.Query().Get("login_challenge"), map[string]any{"subject": user.ID, "remember": true, "remember_for": 2592000})
+	policy, err := s.store.SessionPolicy(r.Context())
+	if err != nil {
+		http.Error(w, "could not load session policy", http.StatusInternalServerError)
+		return
+	}
+	redirect, err := s.hydraAccept(r.Context(), "/admin/oauth2/auth/requests/login/accept", r.URL.Query().Get("login_challenge"), map[string]any{"subject": user.ID, "identity_provider_session_id": session.ID, "remember": true, "remember_for": int64(policy.OIDCSessionLifetime / time.Second)})
 	if err != nil {
 		http.Error(w, "could not complete OAuth login", http.StatusBadGateway)
 		return
@@ -457,8 +640,12 @@ func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) acceptHydraConsent(ctx context.Context, challenge string, scopes []string, user identity.User) (string, error) {
+	policy, err := s.store.SessionPolicy(ctx)
+	if err != nil {
+		return "", err
+	}
 	claims := map[string]any{"sub": user.ID, "email": user.Email, "preferred_username": user.Username, "role": user.Role}
-	return s.hydraAccept(ctx, "/admin/oauth2/auth/requests/consent/accept", challenge, map[string]any{"grant_scope": scopes, "remember": true, "remember_for": 2592000, "session": map[string]any{"id_token": claims, "access_token": claims}})
+	return s.hydraAccept(ctx, "/admin/oauth2/auth/requests/consent/accept", challenge, map[string]any{"grant_scope": scopes, "remember": true, "remember_for": int64(policy.OIDCSessionLifetime / time.Second), "session": map[string]any{"id_token": claims, "access_token": claims}})
 }
 
 type hydraLogoutRequest struct {
@@ -471,6 +658,7 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 	challenge := r.URL.Query().Get("logout_challenge")
 	request, err := s.hydraLogoutRequest(r.Context(), challenge)
 	if err != nil {
+		log.Printf("load Ory Hydra logout request: %v", err)
 		http.Error(w, "could not load OAuth logout request", http.StatusBadGateway)
 		return
 	}
@@ -479,46 +667,22 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "OAuth logout request belongs to a different account", http.StatusForbidden)
 		return
 	}
-	if _, err := r.Cookie(logoutIntentCookie); err == nil && currentErr == nil {
-		s.completeLogout(w, r, session, challenge)
-		return
-	}
-	allowOIDCFormAction(w)
-	s.render(w, "oauth-logout", map[string]any{"SignedIn": currentErr == nil, "User": user, "IsAdmin": currentErr == nil && user.Role == identity.RoleAdmin, "Challenge": challenge})
-}
-
-func (s *Server) hydraLogoutAccept(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	challenge := r.Form.Get("challenge")
-	request, err := s.hydraLogoutRequest(r.Context(), challenge)
-	if err != nil {
-		http.Error(w, "could not load OAuth logout request", http.StatusBadGateway)
-		return
-	}
-	user, session, currentErr := s.current(r)
 	if currentErr == nil {
-		if user.ID != request.Subject {
-			http.Error(w, "OAuth logout request belongs to a different account", http.StatusForbidden)
-			return
-		}
 		s.completeLogout(w, r, session, challenge)
 		return
 	}
 	redirect, err := s.hydraAcceptLogout(r.Context(), challenge)
 	if err != nil {
+		log.Printf("accept Ory Hydra logout request without local session: %v", err)
 		http.Error(w, "could not complete OAuth logout", http.StatusBadGateway)
 		return
 	}
 	s.expireCookie(w, browserSessionCookie)
-	s.expireCookieAtPath(w, logoutIntentCookie, "/oauth/logout")
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
 // completeLogout ends the local browser session before accepting Hydra's
-// front-channel logout. A failure therefore never leaves the local account
+// logout. A failure therefore never leaves the local account
 // authenticated after the user has confirmed sign-out.
 func (s *Server) completeLogout(w http.ResponseWriter, r *http.Request, session identity.Session, challenge string) {
 	if err := s.store.RevokeSession(r.Context(), session.ID, time.Now()); err != nil {
@@ -526,9 +690,9 @@ func (s *Server) completeLogout(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	s.expireCookie(w, browserSessionCookie)
-	s.expireCookieAtPath(w, logoutIntentCookie, "/oauth/logout")
 	redirect, err := s.hydraAcceptLogout(r.Context(), challenge)
 	if err != nil {
+		log.Printf("accept Ory Hydra logout request after revoking local session: %v", err)
 		http.Error(w, "could not complete OAuth logout", http.StatusBadGateway)
 		return
 	}
@@ -539,6 +703,21 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "admin", map[string]any{"SignedIn": true, "IsAdmin": true})
+}
+
+func (s *Server) adminConnectors(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.render(w, "connectors", map[string]any{
+		"SignedIn":         true,
+		"IsAdmin":          true,
+		"GitHubEnabled":    s.oauth != nil,
+		"EntraEnabled":     s.entraOAuth != nil,
+		"EntraTenantID":    s.config.EntraTenantID,
+		"GitHubAdminTeam":  s.config.GitHubAdminTeam,
+		"GitHubMemberTeam": s.config.GitHubDeveloperTeam,
+	})
 }
 
 type managedAppView struct {
@@ -661,9 +840,11 @@ func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input := oidcClientInput{
-		ID:     strings.TrimSpace(r.Form.Get("client_id")),
-		Name:   strings.TrimSpace(r.Form.Get("client_name")),
-		Secret: r.Form.Get("client_secret"),
+		ID:                    strings.TrimSpace(r.Form.Get("client_id")),
+		Name:                  strings.TrimSpace(r.Form.Get("client_name")),
+		Secret:                r.Form.Get("client_secret"),
+		FrontChannelLogoutURI: strings.TrimSpace(r.Form.Get("frontchannel_logout_uri")),
+		BackChannelLogoutURI:  strings.TrimSpace(r.Form.Get("backchannel_logout_uri")),
 	}
 	for _, rawURI := range strings.Split(r.Form.Get("redirect_uris"), "\n") {
 		if uri := strings.TrimSpace(rawURI); uri != "" {
@@ -714,29 +895,237 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/clients", http.StatusSeeOther)
 }
 
+type sessionPolicyView struct {
+	BrowserAbsoluteHours int64
+	BrowserIdleMinutes   int64
+	OIDCSSOHours         int64
+	AccessTokenMinutes   int64
+	IDTokenMinutes       int64
+	RefreshTokenHours    int64
+}
+
+func newSessionPolicyView(policy identity.SessionPolicy) sessionPolicyView {
+	return sessionPolicyView{
+		BrowserAbsoluteHours: int64(policy.BrowserAbsoluteLifetime / time.Hour),
+		BrowserIdleMinutes:   int64(policy.BrowserIdleTimeout / time.Minute),
+		OIDCSSOHours:         int64(policy.OIDCSessionLifetime / time.Hour),
+		AccessTokenMinutes:   int64(policy.AccessTokenLifetime / time.Minute),
+		IDTokenMinutes:       int64(policy.IDTokenLifetime / time.Minute),
+		RefreshTokenHours:    int64(policy.RefreshTokenLifetime / time.Hour),
+	}
+}
+
+func (s *Server) adminSessionPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	policy, err := s.store.SessionPolicy(r.Context())
+	if err != nil {
+		http.Error(w, "could not load session policy", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "session-policy", map[string]any{"SignedIn": true, "IsAdmin": true, "Policy": newSessionPolicyView(policy), "Error": r.URL.Query().Get("error"), "Saved": r.URL.Query().Get("saved") == "true"})
+}
+
+func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	policy, err := parseSessionPolicyForm(r.Form)
+	if err != nil {
+		http.Redirect(w, r, "/admin/session-policy?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	previous, err := s.store.SessionPolicy(r.Context())
+	if err != nil {
+		http.Error(w, "could not load current session policy", http.StatusInternalServerError)
+		return
+	}
+	if err := s.applyHydraSessionPolicy(r.Context(), policy); err != nil {
+		if rollbackErr := s.applyHydraSessionPolicy(r.Context(), previous); rollbackErr != nil {
+			log.Printf("restore Ory Hydra session policy after client update failed: %v", rollbackErr)
+		}
+		http.Error(w, "could not update OAuth client lifetimes", http.StatusBadGateway)
+		return
+	}
+	if err := s.store.UpdateSessionPolicy(r.Context(), policy, time.Now()); err != nil {
+		if rollbackErr := s.applyHydraSessionPolicy(r.Context(), previous); rollbackErr != nil {
+			log.Printf("restore Ory Hydra session policy after PostgreSQL update failed: %v", rollbackErr)
+		}
+		http.Error(w, "could not save session policy", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/admin/session-policy?saved=true", http.StatusSeeOther)
+}
+
+func parseSessionPolicyForm(values url.Values) (identity.SessionPolicy, error) {
+	parse := func(name string, unit time.Duration) (time.Duration, error) {
+		value, err := strconv.ParseInt(strings.TrimSpace(values.Get(name)), 10, 64)
+		if err != nil || value <= 0 {
+			return 0, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(name, "_", " "))
+		}
+		if value > int64((90*24*time.Hour)/unit) {
+			return 0, fmt.Errorf("%s exceeds the maximum supported duration", strings.ReplaceAll(name, "_", " "))
+		}
+		return time.Duration(value) * unit, nil
+	}
+	var policy identity.SessionPolicy
+	var err error
+	if policy.BrowserAbsoluteLifetime, err = parse("browser_absolute_hours", time.Hour); err != nil {
+		return identity.SessionPolicy{}, err
+	}
+	if policy.BrowserIdleTimeout, err = parse("browser_idle_minutes", time.Minute); err != nil {
+		return identity.SessionPolicy{}, err
+	}
+	if policy.OIDCSessionLifetime, err = parse("oidc_sso_hours", time.Hour); err != nil {
+		return identity.SessionPolicy{}, err
+	}
+	if policy.AccessTokenLifetime, err = parse("access_token_minutes", time.Minute); err != nil {
+		return identity.SessionPolicy{}, err
+	}
+	if policy.IDTokenLifetime, err = parse("id_token_minutes", time.Minute); err != nil {
+		return identity.SessionPolicy{}, err
+	}
+	if policy.RefreshTokenLifetime, err = parse("refresh_token_hours", time.Hour); err != nil {
+		return identity.SessionPolicy{}, err
+	}
+	if err := policy.Validate(); err != nil {
+		return identity.SessionPolicy{}, err
+	}
+	return policy, nil
+}
+
+func hydraClientLifespans(policy identity.SessionPolicy) map[string]string {
+	return map[string]string{
+		"authorization_code_grant_access_token_lifespan":  policy.AccessTokenLifetime.String(),
+		"authorization_code_grant_id_token_lifespan":      policy.IDTokenLifetime.String(),
+		"authorization_code_grant_refresh_token_lifespan": policy.RefreshTokenLifetime.String(),
+	}
+}
+
+func (s *Server) applyHydraSessionPolicy(ctx context.Context, policy identity.SessionPolicy) error {
+	clients, err := listHydraClients[oidcClient](ctx, s.httpClient, s.config.HydraAdminURL)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(hydraClientLifespans(policy))
+	if err != nil {
+		return fmt.Errorf("encode Ory Hydra client lifespans: %w", err)
+	}
+	for _, client := range clients {
+		if client.ID == "" {
+			return fmt.Errorf("Hydra returned a client without an ID")
+		}
+		clientEndpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + url.PathEscape(client.ID) + "/lifespans"})
+		update, err := http.NewRequestWithContext(ctx, http.MethodPut, clientEndpoint.String(), bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		update.Header.Set("Content-Type", "application/json")
+		updated, err := s.httpClient.Do(update)
+		if err != nil {
+			return err
+		}
+		updated.Body.Close()
+		if updated.StatusCode != http.StatusOK {
+			return fmt.Errorf("Hydra update client %q lifespans returned %s", client.ID, updated.Status)
+		}
+	}
+	return nil
+}
+
 func (s *Server) hydraClients(ctx context.Context) ([]oidcClient, error) {
-	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients"})
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return nil, err
+	return listHydraClients[oidcClient](ctx, s.httpClient, s.config.HydraAdminURL)
+}
+
+func listHydraClients[T any](ctx context.Context, client *http.Client, adminURL *url.URL) ([]T, error) {
+	endpoint := adminURL.ResolveReference(&url.URL{Path: "/admin/clients"})
+	pageToken := ""
+	seenTokens := map[string]bool{}
+	var clients []T
+	for {
+		query := endpoint.Query()
+		query.Set("page_size", "1000")
+		if pageToken != "" {
+			query.Set("page_token", pageToken)
+		}
+		endpoint.RawQuery = query.Encode()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode != http.StatusOK {
+			response.Body.Close()
+			return nil, fmt.Errorf("Hydra list clients returned %s", response.Status)
+		}
+		var page []T
+		decodeErr := json.NewDecoder(response.Body).Decode(&page)
+		response.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode Hydra clients: %w", decodeErr)
+		}
+		clients = append(clients, page...)
+		pageToken, err = nextHydraPageToken(response.Header.Get("Link"))
+		if err != nil {
+			return nil, err
+		}
+		if pageToken == "" {
+			return clients, nil
+		}
+		if seenTokens[pageToken] {
+			return nil, fmt.Errorf("Hydra client pagination repeated page token")
+		}
+		seenTokens[pageToken] = true
 	}
-	response, err := s.httpClient.Do(request)
-	if err != nil {
-		return nil, err
+}
+
+func nextHydraPageToken(linkHeader string) (string, error) {
+	for _, link := range strings.Split(linkHeader, ",") {
+		parts := strings.Split(link, ";")
+		if len(parts) < 2 {
+			continue
+		}
+		isNext := false
+		for _, parameter := range parts[1:] {
+			if strings.TrimSpace(parameter) == `rel="next"` || strings.TrimSpace(parameter) == "rel=next" {
+				isNext = true
+				break
+			}
+		}
+		if !isNext {
+			continue
+		}
+		rawURL := strings.TrimSpace(parts[0])
+		if len(rawURL) < 2 || rawURL[0] != '<' || rawURL[len(rawURL)-1] != '>' {
+			return "", fmt.Errorf("Hydra client pagination returned a malformed next link")
+		}
+		nextURL, err := url.Parse(rawURL[1 : len(rawURL)-1])
+		if err != nil {
+			return "", fmt.Errorf("parse Hydra client pagination link: %w", err)
+		}
+		token := nextURL.Query().Get("page_token")
+		if token == "" {
+			return "", fmt.Errorf("Hydra client pagination next link has no page token")
+		}
+		return token, nil
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Hydra list clients returned %s", response.Status)
-	}
-	var clients []oidcClient
-	if err := json.NewDecoder(response.Body).Decode(&clients); err != nil {
-		return nil, fmt.Errorf("decode Hydra clients: %w", err)
-	}
-	return clients, nil
+	return "", nil
 }
 
 func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) error {
-	body, err := marshalHydraClient(input)
+	policy, err := s.store.SessionPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	body, err := marshalHydraClient(input, policy)
 	if err != nil {
 		return err
 	}
@@ -757,16 +1146,34 @@ func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) e
 	return nil
 }
 
-func marshalHydraClient(input oidcClientInput) ([]byte, error) {
+func marshalHydraClient(input oidcClientInput, policy identity.SessionPolicy) ([]byte, error) {
 	payload := map[string]any{
-		"client_id":                  input.ID,
-		"client_name":                input.Name,
-		"client_secret":              input.Secret,
-		"redirect_uris":              input.RedirectURIs,
-		"grant_types":                []string{"authorization_code", "refresh_token"},
-		"response_types":             []string{"code"},
-		"scope":                      "openid offline_access profile email",
-		"token_endpoint_auth_method": "client_secret_post",
+		"client_id":                            input.ID,
+		"client_name":                          input.Name,
+		"client_secret":                        input.Secret,
+		"redirect_uris":                        input.RedirectURIs,
+		"grant_types":                          []string{"authorization_code", "refresh_token"},
+		"response_types":                       []string{"code"},
+		"scope":                                "openid offline_access profile email",
+		"token_endpoint_auth_method":           "client_secret_post",
+		"frontchannel_logout_uri":              input.FrontChannelLogoutURI,
+		"backchannel_logout_uri":               input.BackChannelLogoutURI,
+		"frontchannel_logout_session_required": input.FrontChannelLogoutURI != "",
+		"backchannel_logout_session_required":  true,
+		"authorization_code_grant_access_token_lifespan":  policy.AccessTokenLifetime.String(),
+		"authorization_code_grant_id_token_lifespan":      policy.IDTokenLifetime.String(),
+		"authorization_code_grant_refresh_token_lifespan": policy.RefreshTokenLifetime.String(),
+	}
+	if input.Secret == "" {
+		delete(payload, "client_secret")
+	}
+	if input.FrontChannelLogoutURI == "" {
+		delete(payload, "frontchannel_logout_uri")
+		delete(payload, "frontchannel_logout_session_required")
+	}
+	if input.BackChannelLogoutURI == "" {
+		delete(payload, "backchannel_logout_uri")
+		delete(payload, "backchannel_logout_session_required")
 	}
 	// Only send post_logout_redirect_uris when the client registers some, so
 	// existing clients are unchanged. Hydra honours these as the allowlist
@@ -778,7 +1185,11 @@ func marshalHydraClient(input oidcClientInput) ([]byte, error) {
 }
 
 func (s *Server) updateHydraClient(ctx context.Context, input oidcClientInput) error {
-	body, err := marshalHydraClient(input)
+	policy, err := s.store.SessionPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	body, err := marshalHydraClient(input, policy)
 	if err != nil {
 		return err
 	}
@@ -822,7 +1233,7 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		byID[client.ID] = client
 	}
 	for _, bootstrap := range s.config.BootstrapApps {
-		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs, PostLogoutRedirectURIs: bootstrap.PostLogoutRedirectURIs}
+		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs, PostLogoutRedirectURIs: bootstrap.PostLogoutRedirectURIs, FrontChannelLogoutURI: bootstrap.FrontChannelLogoutURI, BackChannelLogoutURI: bootstrap.BackChannelLogoutURI}
 		if err := input.validate(); err != nil {
 			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
 		}
@@ -990,13 +1401,54 @@ func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("id")
+	userID, err := s.store.SessionUserID(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if err := s.revokeHydraLoginSession(r.Context(), sessionID); err != nil {
+		http.Error(w, "could not revoke OAuth session", http.StatusBadGateway)
+		return
+	}
 	if err := s.store.RevokeSession(r.Context(), sessionID, time.Now()); err != nil {
 		http.Error(w, "could not revoke session", 500)
 		return
 	}
-	http.Redirect(w, r, r.Referer(), 303)
+	http.Redirect(w, r, "/admin/users/"+userID+"/sessions", http.StatusSeeOther)
 }
+
+func (s *Server) revokeHydraLoginSession(ctx context.Context, sessionID string) error {
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/sessions/login"})
+	query := endpoint.Query()
+	query.Set("sid", sessionID)
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
+	if err != nil {
+		return err
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("Hydra login session deletion returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
 func (s *Server) revokeHydraSessions(ctx context.Context, subject string) error {
+	sessions, err := s.store.ListSessions(ctx, subject)
+	if err != nil {
+		return err
+	}
+	for _, session := range sessions {
+		if session.Active {
+			if err := s.revokeHydraLoginSession(ctx, session.ID); err != nil {
+				return err
+			}
+		}
+	}
 	for _, kind := range []string{"login", "consent"} {
 		endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/sessions/" + kind})
 		query := endpoint.Query()
@@ -1302,10 +1754,10 @@ func relativeNext(value string) string {
 		return "/"
 	}
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.IsAbs() || !strings.HasPrefix(parsed.Path, "/") {
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || strings.Contains(parsed.Path, "\\") {
 		return "/"
 	}
-	return value
+	return parsed.RequestURI()
 }
 
 func isOIDCNext(value string) bool {

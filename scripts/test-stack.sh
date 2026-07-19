@@ -28,17 +28,27 @@ SHAUTH_OIDC_CLIENT_SECRET=$(random_secret)
 export SHAUTH_OIDC_CLIENT_SECRET
 SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET=$(random_secret)
 export SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+SHAUTH_GATEWAY_CLIENT_SECRET=$(random_secret)
+export SHAUTH_GATEWAY_CLIENT_SECRET
+SHAUTH_GATEWAY_COOKIE_SECRET=$(random_secret)
+export SHAUTH_GATEWAY_COOKIE_SECRET
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""},{"slug":"gateway-integration","name":"Gateway integration","description":"First-party OIDC gateway acceptance coverage.","launch_url":"http://localhost:5556/healthz","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 cookie_jar=$(mktemp)
+gateway_binary=$(mktemp)
+gateway_pid=
 
 cleanup() {
 	status=$?
 	if [ "$status" -ne 0 ]; then
-		docker compose logs --no-color >&2 || true
+		docker compose logs --no-color --tail=120 shauth hydra >&2 || true
+	fi
+	if [ -n "$gateway_pid" ]; then
+		kill "$gateway_pid" 2>/dev/null || true
+		wait "$gateway_pid" 2>/dev/null || true
 	fi
 	 docker compose down --volumes --remove-orphans
-	rm -f "$cookie_jar"
+	rm -f "$cookie_jar" "$gateway_binary"
 	return "$status"
 }
 trap cleanup EXIT INT TERM
@@ -66,12 +76,13 @@ curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-la
 curl --fail --silent --show-error http://localhost:8080/assets/theme.js | grep -q 'theme-toggle'
 curl --fail --silent --show-error --dump-header - --output /dev/null http://localhost:8080/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self' https://unpkg.com"
 curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/initial'
+curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout'
 
 curl --fail --silent --show-error --cookie-jar "$cookie_jar" http://localhost:8080/login >/dev/null
 csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
 [ -n "$csrf_token" ]
 
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"},{"slug":"gateway-integration","name":"Gateway integration","description":"First-party OIDC gateway acceptance coverage.","launch_url":"http://localhost:5556/healthz","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 docker compose up --force-recreate --no-deps --detach shauth
 attempt=0
@@ -99,7 +110,20 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'client_name=Shauth integration client' \
   --data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
   --data-urlencode 'redirect_uris=http://localhost:5555/callback' \
+  --data-urlencode 'post_logout_redirect_uris=http://localhost:5555/signed-out' \
+  --data-urlencode 'frontchannel_logout_uri=http://localhost:5555/frontchannel-logout' \
+  --data-urlencode 'backchannel_logout_uri=http://localhost:5555/backchannel-logout' \
   http://localhost:8080/admin/clients | grep -q 'shauth-integration-client'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/session-policy | grep -q 'Session time limits'
+curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${csrf_token}" \
+  --data-urlencode 'browser_absolute_hours=720' \
+  --data-urlencode 'browser_idle_minutes=720' \
+  --data-urlencode 'oidc_sso_hours=720' \
+  --data-urlencode 'access_token_minutes=15' \
+  --data-urlencode 'id_token_minutes=15' \
+  --data-urlencode 'refresh_token_hours=720' \
+  http://localhost:8080/admin/session-policy | grep -q 'were saved and applied'
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'slug=integration-app' \
@@ -111,6 +135,29 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'monitoring_url=https://integration.example.test/monitoring' \
   http://localhost:8080/admin/apps | grep -q 'Integration app'
 npm run test:browser
+
+go build -o "$gateway_binary" ./cmd/shauth-gateway
+OIDC_GATEWAY_ISSUER=http://localhost:8080 \
+OIDC_GATEWAY_CLIENT_ID=gateway-integration \
+OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_CLIENT_SECRET" \
+OIDC_GATEWAY_PUBLIC_URL=http://localhost:5556 \
+OIDC_GATEWAY_UPSTREAM_URL=http://127.0.0.1:5557 \
+OIDC_GATEWAY_POST_LOGOUT_URL=http://localhost:5556/auth/signed-out \
+OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_COOKIE_SECRET" \
+OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
+OIDC_GATEWAY_LISTEN_ADDRESS=127.0.0.1:5556 \
+DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
+"$gateway_binary" &
+gateway_pid=$!
+attempt=0
+while [ "$attempt" -lt 60 ] && ! curl --fail --silent http://localhost:5556/auth/healthz >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ "$attempt" -eq 60 ]; then
+  exit 1
+fi
+npm run test:gateway
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
   'http://localhost:8080/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
@@ -194,11 +241,11 @@ if [ "$attempt" -eq 30 ]; then
   exit 1
 fi
 
-# Browser form posts must remain same-origin. Relying applications use Hydra's
-# front-channel logout endpoint instead of posting directly to Shauth.
+# Browser form posts must remain same-origin. Relying applications use Ory
+# Hydra's published logout endpoint instead of posting directly to Shauth.
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data '' http://localhost:8080/logout)" = 403 ]
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data-urlencode 'challenge=invalid' http://localhost:8080/oauth/logout)" = 403 ]
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/logout | grep -q 'Sign out of Shauth?'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/logout | grep -q 'Sign out everywhere?'
 logout_start=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" http://localhost:8080/logout |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 [ "$logout_start" = /oauth2/sessions/logout ]
@@ -214,7 +261,8 @@ case "$logout_verifier" in
 	http://localhost:8080/oauth2/sessions/logout?logout_verifier=*) ;;
 	*) echo "unexpected Hydra logout verifier: ${logout_verifier}" >&2; exit 1 ;;
 esac
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_verifier" | grep -q 'One secure sign-in for your e6qu services.'
+logout_propagation=$(curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_verifier")
+printf '%s' "$logout_propagation" | grep -q 'frontchannel-logout'
 apps_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)
 [ "$apps_status" = 303 ]
 
@@ -227,6 +275,36 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'next=/' \
   http://localhost:8080/login >/dev/null
 admin_id=$(docker compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username = 'admin'")
+single_session_setup=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
+	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Flocalhost%3A5556%2Fauth%2Fcallback&state=single-session-setup&nonce=single-session-setup&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$single_session_setup" in
+	http://localhost:8080/oauth/login?login_challenge=*) ;;
+	*) echo "fresh OpenID Connect session did not request Shauth login: ${single_session_setup}" >&2; exit 1 ;;
+esac
+single_session_accept=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$single_session_setup" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$single_session_accept" in
+	http://localhost:8080/oauth2/auth?*login_verifier=*) ;;
+	*) echo "Shauth did not accept the OpenID Connect login session: ${single_session_accept}" >&2; exit 1 ;;
+esac
+curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$single_session_accept" >/dev/null
+current_session_id=$(docker compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM sessions WHERE user_id='${admin_id}'::uuid AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1")
+curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/users' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/sessions/${current_session_id}/revoke"
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)" = 303 ]
+single_session_login=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
+	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Flocalhost%3A5556%2Fauth%2Fcallback&state=single-session-revocation&nonce=single-session-revocation&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$single_session_login" in
+	http://localhost:8080/oauth/login?login_challenge=*) ;;
+	*) echo "revoked OpenID Connect session was still remembered: ${single_session_login}" >&2; exit 1 ;;
+esac
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+	--data-urlencode "_csrf=${csrf_token}" \
+	--data-urlencode 'username=admin' \
+	--data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
+	--data-urlencode 'next=/' \
+	http://localhost:8080/login >/dev/null
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/users/${admin_id}/sessions/revoke" >/dev/null
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
@@ -251,7 +329,7 @@ fi
 
 docker compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 -c "INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,created_at) VALUES ('00000000-0000-4000-8000-000000000001','protected-app','Protected app','Administrator-owned app.','https://protected.dev.e6qu.dev','protected-client','https://protected.dev.e6qu.dev/health',NULL,now())" >/dev/null
 protected_client_secret=$(random_secret)
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"protected-app","name":"Takeover attempt","description":"Bootstrap must not replace an administrator-owned app.","launch_url":"https://takeover.dev.e6qu.dev","oidc_client_id":"takeover-client","oidc_client_secret":"%s","redirect_uris":["https://takeover.dev.e6qu.dev/oidc/callback"],"health_url":"https://takeover.dev.e6qu.dev/health","monitoring_url":""}]' "$protected_client_secret")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"protected-app","name":"Takeover attempt","description":"Bootstrap must not replace an administrator-owned app.","launch_url":"https://takeover.dev.e6qu.dev","oidc_client_id":"takeover-client","oidc_client_secret":"%s","redirect_uris":["https://takeover.dev.e6qu.dev/oidc/callback"],"post_logout_redirect_uris":["https://takeover.dev.e6qu.dev/"],"backchannel_logout_uri":"https://takeover.dev.e6qu.dev/oidc/backchannel-logout","health_url":"https://takeover.dev.e6qu.dev/health","monitoring_url":""}]' "$protected_client_secret")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 docker compose up --force-recreate --no-deps --detach shauth
 attempt=0

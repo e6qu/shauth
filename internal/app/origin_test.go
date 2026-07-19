@@ -156,6 +156,20 @@ func TestDefaultFormPolicyRemainsSameOrigin(t *testing.T) {
 	}
 }
 
+func TestProviderLogoutPolicyAllowsRegisteredClientFrames(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "https://auth.example.test/oauth2/sessions/logout", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if got := response.Header().Get("Content-Security-Policy"); got != oidcLogoutContentSecurityPolicy {
+		t.Fatalf("content security policy = %q, want %q", got, oidcLogoutContentSecurityPolicy)
+	}
+}
+
 func TestOIDCNextDetection(t *testing.T) {
 	tests := map[string]bool{
 		"/oauth/login?login_challenge=challenge":     true,
@@ -167,6 +181,22 @@ func TestOIDCNextDetection(t *testing.T) {
 	for next, want := range tests {
 		if got := isOIDCNext(relativeNext(next)); got != want {
 			t.Errorf("isOIDCNext(%q) = %t, want %t", next, got, want)
+		}
+	}
+}
+
+func TestRelativeNextRejectsExternalAndBackslashTargets(t *testing.T) {
+	for input, expected := range map[string]string{
+		"":                       "/",
+		"/apps?view=mine":        "/apps?view=mine",
+		"https://attacker.test/": "/",
+		"//attacker.test/apps":   "/",
+		"/\\attacker.test/apps":  "/",
+		"/%5cattacker.test/apps": "/",
+		"apps":                   "/",
+	} {
+		if actual := relativeNext(input); actual != expected {
+			t.Errorf("relativeNext(%q) = %q, want %q", input, actual, expected)
 		}
 	}
 }

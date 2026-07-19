@@ -44,6 +44,9 @@ const server = http.createServer(async (request, response) => {
     assert.equal(tokenResponse.status, 200, `token exchange returned HTTP ${tokenResponse.status}`);
     const tokens = await tokenResponse.json();
     assert.ok(tokens.access_token, "token exchange omitted the access token");
+    assert.ok(tokens.id_token, "token exchange omitted the ID token");
+    const idTokenPayload = JSON.parse(Buffer.from(tokens.id_token.split(".")[1], "base64url"));
+    assert.ok(idTokenPayload.sid, "ID token omitted the correlated provider session ID");
 
     const userInfoResponse = await fetch(`${issuer}/userinfo`, {
       headers: { authorization: `Bearer ${tokens.access_token}` },

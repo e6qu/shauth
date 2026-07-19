@@ -31,6 +31,20 @@ func TestValidateManagedApp(t *testing.T) {
 	}
 }
 
+func TestValidateManagedAppAllowsLoopbackHTTPForLocalIntegration(t *testing.T) {
+	app := ManagedApp{
+		Slug:         "local-app",
+		Name:         "Local app",
+		Description:  "A real local integration service.",
+		LaunchURL:    "http://localhost:5556/",
+		OIDCClientID: "local-app",
+		HealthURL:    "http://127.0.0.1:5556/healthz",
+	}
+	if err := ValidateManagedApp(app); err != nil {
+		t.Fatalf("ValidateManagedApp(loopback) error = %v", err)
+	}
+}
+
 func withManagedApp(app ManagedApp, mutate func(*ManagedApp)) ManagedApp {
 	mutate(&app)
 	return app

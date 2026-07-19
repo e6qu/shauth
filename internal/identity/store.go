@@ -20,8 +20,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const sessionLifetime = 30 * 24 * time.Hour
-
 type Role string
 
 const (
@@ -30,13 +28,14 @@ const (
 )
 
 type User struct {
-	ID          string
-	Username    string
-	Email       string
-	GitHubLogin string
-	Role        Role
-	DisabledAt  *time.Time
-	CreatedAt   time.Time
+	ID                string
+	Username          string
+	Email             string
+	GitHubLogin       string
+	FederatedIdentity string
+	Role              Role
+	DisabledAt        *time.Time
+	CreatedAt         time.Time
 }
 
 type Session struct {
@@ -48,6 +47,7 @@ type Session struct {
 	RevokedAt *time.Time
 	UserAgent string
 	RemoteIP  net.IP
+	Active    bool
 }
 type Invitation struct {
 	ID        string
@@ -84,6 +84,42 @@ func NewStore(pool *pgxpool.Pool) (*Store, error) {
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+func (s *Store) SessionPolicy(ctx context.Context) (SessionPolicy, error) {
+	var absoluteSeconds, idleSeconds, oidcSeconds, accessSeconds, idSeconds, refreshSeconds int64
+	err := s.pool.QueryRow(ctx, `SELECT browser_absolute_lifetime_seconds,browser_idle_timeout_seconds,oidc_session_lifetime_seconds,access_token_lifetime_seconds,id_token_lifetime_seconds,refresh_token_lifetime_seconds FROM session_policy WHERE singleton=TRUE`).
+		Scan(&absoluteSeconds, &idleSeconds, &oidcSeconds, &accessSeconds, &idSeconds, &refreshSeconds)
+	if err != nil {
+		return SessionPolicy{}, fmt.Errorf("read session policy: %w", err)
+	}
+	policy := SessionPolicy{
+		BrowserAbsoluteLifetime: time.Duration(absoluteSeconds) * time.Second,
+		BrowserIdleTimeout:      time.Duration(idleSeconds) * time.Second,
+		OIDCSessionLifetime:     time.Duration(oidcSeconds) * time.Second,
+		AccessTokenLifetime:     time.Duration(accessSeconds) * time.Second,
+		IDTokenLifetime:         time.Duration(idSeconds) * time.Second,
+		RefreshTokenLifetime:    time.Duration(refreshSeconds) * time.Second,
+	}
+	if err := policy.Validate(); err != nil {
+		return SessionPolicy{}, fmt.Errorf("stored session policy: %w", err)
+	}
+	return policy, nil
+}
+
+func (s *Store) UpdateSessionPolicy(ctx context.Context, policy SessionPolicy, now time.Time) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	command, err := s.pool.Exec(ctx, `UPDATE session_policy SET browser_absolute_lifetime_seconds=$1,browser_idle_timeout_seconds=$2,oidc_session_lifetime_seconds=$3,access_token_lifetime_seconds=$4,id_token_lifetime_seconds=$5,refresh_token_lifetime_seconds=$6,updated_at=$7 WHERE singleton=TRUE`,
+		int64(policy.BrowserAbsoluteLifetime/time.Second), int64(policy.BrowserIdleTimeout/time.Second), int64(policy.OIDCSessionLifetime/time.Second), int64(policy.AccessTokenLifetime/time.Second), int64(policy.IDTokenLifetime/time.Second), int64(policy.RefreshTokenLifetime/time.Second), now.UTC())
+	if err != nil {
+		return fmt.Errorf("update session policy: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("session policy record is missing")
+	}
+	return nil
+}
 
 func (s *Store) EnsureGitHubRoleMapping(ctx context.Context, kind, target string, role Role) error {
 	if err := validateGitHubRoleMapping(kind, target, role); err != nil {
@@ -300,20 +336,31 @@ func ValidateManagedApp(app ManagedApp) error {
 		return fmt.Errorf("app name, description, and OIDC client ID are required")
 	}
 	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
-	if err != nil || launchURL.Scheme != "https" || launchURL.Host == "" || launchURL.Fragment != "" {
-		return fmt.Errorf("app launch URL must use HTTPS")
+	if err != nil || !validManagedAppURL(launchURL) {
+		return fmt.Errorf("app launch URL must use HTTPS unless it targets loopback")
 	}
 	healthURL, err := url.ParseRequestURI(strings.TrimSpace(app.HealthURL))
-	if err != nil || healthURL.Scheme != "https" || healthURL.Host == "" || healthURL.Fragment != "" {
-		return fmt.Errorf("app health URL must use HTTPS")
+	if err != nil || !validManagedAppURL(healthURL) {
+		return fmt.Errorf("app health URL must use HTTPS unless it targets loopback")
 	}
 	if app.MonitoringURL != "" {
 		monitoringURL, err := url.ParseRequestURI(app.MonitoringURL)
-		if err != nil || monitoringURL.Scheme != "https" || monitoringURL.Host == "" || monitoringURL.Fragment != "" {
-			return fmt.Errorf("app monitoring URL must use HTTPS")
+		if err != nil || !validManagedAppURL(monitoringURL) {
+			return fmt.Errorf("app monitoring URL must use HTTPS unless it targets loopback")
 		}
 	}
 	return nil
+}
+
+func validManagedAppURL(value *url.URL) bool {
+	if value == nil || value.Host == "" || value.User != nil || value.Fragment != "" {
+		return false
+	}
+	if value.Scheme == "https" {
+		return true
+	}
+	host := strings.Trim(strings.ToLower(value.Hostname()), "[]")
+	return value.Scheme == "http" && (host == "localhost" || host == "::1" || net.ParseIP(host).IsLoopback())
 }
 
 func normalizeGitHubTarget(kind, target string) string {
@@ -452,7 +499,46 @@ func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, logi
 	return s.insertUser(ctx, randomUUID(), login, email, nil, &githubID, login, role)
 }
 
+func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, username, email string) (User, error) {
+	var user User
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at FROM users WHERE entra_tenant_id=$1::uuid AND entra_object_id=$2::uuid`, tenantID, objectID).
+		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	if err == nil {
+		if user.DisabledAt != nil {
+			return User{}, fmt.Errorf("user is disabled")
+		}
+		return user, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return User{}, fmt.Errorf("find Microsoft Entra ID user: %w", err)
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+	username = strings.TrimSpace(username)
+	if tenantID == "" || objectID == "" || email == "" || username == "" {
+		return User{}, fmt.Errorf("Microsoft Entra ID account must provide tenant, object, username, and email claims")
+	}
+	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid WHERE email=$1 AND entra_tenant_id IS NULL AND disabled_at IS NULL RETURNING id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID).
+		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	if err == nil {
+		return user, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return User{}, fmt.Errorf("link Microsoft Entra ID user: %w", err)
+	}
+	id := randomUUID()
+	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,password_hash,role,entra_tenant_id,entra_object_id,created_at) VALUES ($1::uuid,$2,$3,NULL,'developer',$4::uuid,$5::uuid,now()) RETURNING id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, tenantID, objectID).
+		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	if err != nil {
+		return User{}, fmt.Errorf("create Microsoft Entra ID user: %w", err)
+	}
+	return user, nil
+}
+
 func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, remoteIP net.IP, now time.Time) (string, Session, error) {
+	policy, err := s.SessionPolicy(ctx)
+	if err != nil {
+		return "", Session{}, err
+	}
 	raw, err := randomToken()
 	if err != nil {
 		return "", Session{}, err
@@ -460,7 +546,7 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, rem
 	tokenHash := sha256.Sum256([]byte(raw))
 	id := randomUUID()
 	family := randomUUID()
-	expiry := now.UTC().Add(sessionLifetime)
+	expiry := now.UTC().Add(policy.BrowserAbsoluteLifetime)
 	var session Session
 	err = s.pool.QueryRow(ctx, `INSERT INTO sessions (id,user_id,refresh_family_id,browser_token_hash,created_at,last_seen_at,expires_at,user_agent,remote_address)
 	VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$5,$6,$7,$8) RETURNING id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address`, id, userID, family, tokenHash[:], now.UTC(), expiry, userAgent, remoteIP).
@@ -472,11 +558,15 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, rem
 }
 
 func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (User, Session, error) {
+	policy, err := s.SessionPolicy(ctx)
+	if err != nil {
+		return User{}, Session{}, err
+	}
 	hash := sha256.Sum256([]byte(raw))
 	var user User
 	var session Session
-	err := s.pool.QueryRow(ctx, `SELECT u.id::text,u.username,u.email,COALESCE(u.github_login,''),u.role,u.disabled_at,u.created_at,s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address
-	FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.browser_token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>$2 AND u.disabled_at IS NULL`, hash[:], now.UTC()).
+	err = s.pool.QueryRow(ctx, `SELECT u.id::text,u.username,u.email,COALESCE(u.github_login,''),u.role,u.disabled_at,u.created_at,s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address
+	FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.browser_token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>$2 AND s.last_seen_at>$3 AND u.disabled_at IS NULL`, hash[:], now.UTC(), now.UTC().Add(-policy.BrowserIdleTimeout)).
 		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &session.ID, &session.UserID, &session.CreatedAt, &session.LastSeen, &session.ExpiresAt, &session.RevokedAt, &session.UserAgent, &session.RemoteIP)
 	if err != nil {
 		return User{}, Session{}, fmt.Errorf("read active session: %w", err)
@@ -490,7 +580,7 @@ func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (Use
 }
 
 func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' ORDER BY created_at DESC`, strings.TrimSpace(query))
+	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'GitHub: ' || github_login WHEN entra_object_id IS NOT NULL THEN 'Microsoft Entra ID' ELSE 'Local account' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC`, strings.TrimSpace(query))
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -498,7 +588,7 @@ func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.GitHubLogin, &u.Role, &u.DisabledAt, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.GitHubLogin, &u.FederatedIdentity, &u.Role, &u.DisabledAt, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -506,6 +596,10 @@ func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
 	return users, rows.Err()
 }
 func (s *Store) ListSessions(ctx context.Context, userID string) ([]Session, error) {
+	policy, err := s.SessionPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.pool.Query(ctx, `SELECT id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address FROM sessions WHERE user_id=$1::uuid ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
@@ -517,6 +611,8 @@ func (s *Store) ListSessions(ctx context.Context, userID string) ([]Session, err
 		if err := rows.Scan(&v.ID, &v.UserID, &v.CreatedAt, &v.LastSeen, &v.ExpiresAt, &v.RevokedAt, &v.UserAgent, &v.RemoteIP); err != nil {
 			return nil, err
 		}
+		now := time.Now().UTC()
+		v.Active = v.RevokedAt == nil && v.ExpiresAt.After(now) && v.LastSeen.After(now.Add(-policy.BrowserIdleTimeout))
 		sessions = append(sessions, v)
 	}
 	return sessions, rows.Err()
@@ -547,8 +643,12 @@ func (s *Store) RevokeUserSessions(ctx context.Context, userID string, now time.
 	return nil
 }
 func (s *Store) CountActiveSessions(ctx context.Context, now time.Time) (int, error) {
+	policy, err := s.SessionPolicy(ctx)
+	if err != nil {
+		return 0, err
+	}
 	var n int
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE revoked_at IS NULL AND expires_at>$1`, now.UTC()).Scan(&n)
+	err = s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE revoked_at IS NULL AND expires_at>$1 AND last_seen_at>$2`, now.UTC(), now.UTC().Add(-policy.BrowserIdleTimeout)).Scan(&n)
 	return n, err
 }
 func nullable(v string) any {

@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:browser": "node scripts/test-browser-oidc.mjs"
+    "test:browser": "node scripts/test-browser-oidc.mjs",
+    "test:gateway": "node scripts/test-gateway-oidc.mjs"
   },
   "allowScripts": {
     "fsevents@2.3.2": true
