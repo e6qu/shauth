@@ -140,12 +140,20 @@ func ensureRedirectBody(response *http.Response) error {
 	if len(body) == 0 {
 		body = []byte(fmt.Sprintf("<a href=\"%s\">%s</a>.\n", template.HTMLEscapeString(response.Header.Get("Location")), template.HTMLEscapeString(http.StatusText(response.StatusCode))))
 		response.Header.Set("Content-Type", "text/html; charset=utf-8")
-		log.Printf("Hydra redirect body injected: status=%d response_bytes=%d", response.StatusCode, len(body))
+		log.Printf("Hydra redirect body injected: status=%d target=%s response_bytes=%d", response.StatusCode, redirectTarget(response.Header.Get("Location")), len(body))
 	}
 	response.Body = io.NopCloser(bytes.NewReader(body))
 	response.ContentLength = int64(len(body))
 	response.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	return nil
+}
+
+func redirectTarget(location string) string {
+	target, err := url.Parse(location)
+	if err != nil || target.Host == "" {
+		return "invalid"
+	}
+	return target.Host + target.EscapedPath()
 }
 
 func (s *Server) Handler() http.Handler {
