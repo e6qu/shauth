@@ -138,7 +138,7 @@ func ensureRedirectBody(response *http.Response) error {
 		return fmt.Errorf("close OAuth redirect response: %w", err)
 	}
 	if len(body) == 0 {
-		body = []byte("\n")
+		body = []byte(fmt.Sprintf("<a href=\"%s\">%s</a>.\n", template.HTMLEscapeString(response.Header.Get("Location")), template.HTMLEscapeString(http.StatusText(response.StatusCode))))
 		response.Header.Set("Content-Type", "text/html; charset=utf-8")
 	}
 	response.Body = io.NopCloser(bytes.NewReader(body))

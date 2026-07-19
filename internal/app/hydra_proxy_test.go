@@ -5,6 +5,7 @@ package app
 import (
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -24,13 +25,13 @@ func TestEnsureRedirectBodyAddsBodyForUnknownLengthRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response body: %v", err)
 	}
-	if got, want := string(body), "\n"; got != want {
+	if got, want := string(body), "<a href=\"https://app.example.test/callback\">See Other</a>.\n"; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
-	if got, want := response.ContentLength, int64(1); got != want {
+	if got, want := response.ContentLength, int64(len(body)); got != want {
 		t.Fatalf("content length = %d, want %d", got, want)
 	}
-	if got, want := response.Header.Get("Content-Length"), "1"; got != want {
+	if got, want := response.Header.Get("Content-Length"), strconv.Itoa(len(body)); got != want {
 		t.Fatalf("content-length header = %q, want %q", got, want)
 	}
 }
