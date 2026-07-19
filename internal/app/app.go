@@ -33,10 +33,13 @@ import (
 
 const browserSessionCookie = "shauth_session"
 const csrfCookie = "shauth_csrf"
-const githubStateCookie = "shauth_github_state"
+const githubStateCookiePrefix = "shauth_github_state_"
 const logoutIntentCookie = "shauth_logout_intent"
 const bootstrapRetryInterval = time.Second
 const bootstrapRetryTimeout = 45 * time.Second
+
+const baseContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+const oidcContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"
 
 var oidcClientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{2,127}$`)
 
@@ -162,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /assets/theme.js", serveThemeScript)
 	mux.Handle("/.well-known/{path...}", s.hydraPublic)
 	mux.Handle("/oauth2/{path...}", s.hydraPublic)
+	mux.Handle("/userinfo", s.hydraPublic)
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /apps", s.apps)
 	mux.HandleFunc("GET /login", s.login)
@@ -201,7 +205,7 @@ func (s *Server) Handler() http.Handler {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", baseContentSecurityPolicy)
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
@@ -273,7 +277,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	s.render(w, "login", map[string]any{"Next": relativeNext(r.URL.Query().Get("next")), "Error": r.URL.Query().Get("error")})
+	next := relativeNext(r.URL.Query().Get("next"))
+	if isOIDCNext(next) {
+		allowOIDCFormAction(w)
+	}
+	s.render(w, "login", map[string]any{"Next": next, "Error": r.URL.Query().Get("error")})
 }
 func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -313,16 +321,18 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not begin GitHub login", 500)
 		return
 	}
-	s.setCookie(w, &http.Cookie{Name: githubStateCookie, Value: state, Path: "/oauth/github", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+	s.setCookie(w, &http.Cookie{Name: githubStateCookieName(state), Value: relativeNext(r.URL.Query().Get("next")), Path: "/oauth/github/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
 	http.Redirect(w, r, s.oauth.AuthCodeURL(state), http.StatusFound)
 }
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(githubStateCookie)
-	if err != nil || r.URL.Query().Get("state") == "" || cookie.Value != r.URL.Query().Get("state") {
+	state := r.URL.Query().Get("state")
+	cookieName, validState := validGitHubStateCookieName(state)
+	cookie, err := r.Cookie(cookieName)
+	if !validState || err != nil {
 		http.Error(w, "GitHub login state did not match", http.StatusBadRequest)
 		return
 	}
-	s.expireCookie(w, githubStateCookie)
+	s.expireCookieAtPath(w, cookieName, "/oauth/github/callback")
 	token, err := s.oauth.Exchange(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
 		http.Error(w, "GitHub authorization failed", http.StatusBadGateway)
@@ -350,7 +360,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	if !s.startSession(w, r, user) {
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, relativeNext(cookie.Value), http.StatusSeeOther)
 }
 func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 	if challenge := r.URL.Query().Get("login_challenge"); challenge == "" {
@@ -399,6 +409,7 @@ func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirect, http.StatusFound)
 		return
 	}
+	allowOIDCFormAction(w)
 	s.render(w, "consent", map[string]any{"Challenge": challenge, "Scopes": consent.Scopes})
 }
 
@@ -461,6 +472,7 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 		s.completeLogout(w, r, session, challenge)
 		return
 	}
+	allowOIDCFormAction(w)
 	s.render(w, "oauth-logout", map[string]any{"SignedIn": currentErr == nil, "User": user, "IsAdmin": currentErr == nil && user.Role == identity.RoleAdmin, "Challenge": challenge})
 }
 
@@ -1286,4 +1298,28 @@ func relativeNext(value string) string {
 		return "/"
 	}
 	return value
+}
+
+func isOIDCNext(value string) bool {
+	target, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	return target.Path == "/oauth/login" || target.Path == "/oauth/consent"
+}
+
+func allowOIDCFormAction(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", oidcContentSecurityPolicy)
+}
+
+func githubStateCookieName(state string) string {
+	return githubStateCookiePrefix + state
+}
+
+func validGitHubStateCookieName(state string) (string, bool) {
+	decoded, err := hex.DecodeString(state)
+	if err != nil || len(decoded) != 32 {
+		return "", false
+	}
+	return githubStateCookieName(state), true
 }

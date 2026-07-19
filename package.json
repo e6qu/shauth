@@ -1,0 +1,11 @@
+{
+  "name": "shauth-browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:browser": "node scripts/test-browser-oidc.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1"
+  }
+}
