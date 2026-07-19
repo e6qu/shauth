@@ -28,14 +28,14 @@ SHAUTH_OIDC_CLIENT_SECRET=$(random_secret)
 export SHAUTH_OIDC_CLIENT_SECRET
 SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET=$(random_secret)
 export SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 cookie_jar=$(mktemp)
 
 cleanup() {
 	status=$?
 	if [ "$status" -ne 0 ]; then
-		docker compose logs --no-color >&2 || true
+		docker compose logs --no-color --tail=300 >&2 || true
 	fi
 	 docker compose down --volumes --remove-orphans
 	rm -f "$cookie_jar"
@@ -66,12 +66,13 @@ curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-la
 curl --fail --silent --show-error http://localhost:8080/assets/theme.js | grep -q 'theme-toggle'
 curl --fail --silent --show-error --dump-header - --output /dev/null http://localhost:8080/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self' https://unpkg.com"
 curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/initial'
+curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout'
 
 curl --fail --silent --show-error --cookie-jar "$cookie_jar" http://localhost:8080/login >/dev/null
 csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
 [ -n "$csrf_token" ]
 
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 docker compose up --force-recreate --no-deps --detach shauth
 attempt=0
@@ -99,7 +100,20 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'client_name=Shauth integration client' \
   --data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
   --data-urlencode 'redirect_uris=http://localhost:5555/callback' \
+  --data-urlencode 'post_logout_redirect_uris=http://localhost:5555/signed-out' \
+  --data-urlencode 'frontchannel_logout_uri=http://localhost:5555/frontchannel-logout' \
+  --data-urlencode 'backchannel_logout_uri=http://localhost:5555/backchannel-logout' \
   http://localhost:8080/admin/clients | grep -q 'shauth-integration-client'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/session-policy | grep -q 'Session time limits'
+curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${csrf_token}" \
+  --data-urlencode 'browser_absolute_hours=720' \
+  --data-urlencode 'browser_idle_minutes=720' \
+  --data-urlencode 'oidc_sso_hours=720' \
+  --data-urlencode 'access_token_minutes=15' \
+  --data-urlencode 'id_token_minutes=15' \
+  --data-urlencode 'refresh_token_hours=720' \
+  http://localhost:8080/admin/session-policy | grep -q 'were saved and applied'
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'slug=integration-app' \
@@ -194,11 +208,11 @@ if [ "$attempt" -eq 30 ]; then
   exit 1
 fi
 
-# Browser form posts must remain same-origin. Relying applications use Hydra's
-# front-channel logout endpoint instead of posting directly to Shauth.
+# Browser form posts must remain same-origin. Relying applications use Ory
+# Hydra's published logout endpoint instead of posting directly to Shauth.
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data '' http://localhost:8080/logout)" = 403 ]
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data-urlencode 'challenge=invalid' http://localhost:8080/oauth/logout)" = 403 ]
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/logout | grep -q 'Sign out of Shauth?'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/logout | grep -q 'Sign out everywhere?'
 logout_start=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" http://localhost:8080/logout |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 [ "$logout_start" = /oauth2/sessions/logout ]
@@ -214,7 +228,8 @@ case "$logout_verifier" in
 	http://localhost:8080/oauth2/sessions/logout?logout_verifier=*) ;;
 	*) echo "unexpected Hydra logout verifier: ${logout_verifier}" >&2; exit 1 ;;
 esac
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_verifier" | grep -q 'One secure sign-in for your e6qu services.'
+logout_propagation=$(curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_verifier")
+printf '%s' "$logout_propagation" | grep -q 'frontchannel-logout'
 apps_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)
 [ "$apps_status" = 303 ]
 
@@ -251,7 +266,7 @@ fi
 
 docker compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 -c "INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,created_at) VALUES ('00000000-0000-4000-8000-000000000001','protected-app','Protected app','Administrator-owned app.','https://protected.dev.e6qu.dev','protected-client','https://protected.dev.e6qu.dev/health',NULL,now())" >/dev/null
 protected_client_secret=$(random_secret)
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"protected-app","name":"Takeover attempt","description":"Bootstrap must not replace an administrator-owned app.","launch_url":"https://takeover.dev.e6qu.dev","oidc_client_id":"takeover-client","oidc_client_secret":"%s","redirect_uris":["https://takeover.dev.e6qu.dev/oidc/callback"],"health_url":"https://takeover.dev.e6qu.dev/health","monitoring_url":""}]' "$protected_client_secret")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"protected-app","name":"Takeover attempt","description":"Bootstrap must not replace an administrator-owned app.","launch_url":"https://takeover.dev.e6qu.dev","oidc_client_id":"takeover-client","oidc_client_secret":"%s","redirect_uris":["https://takeover.dev.e6qu.dev/oidc/callback"],"post_logout_redirect_uris":["https://takeover.dev.e6qu.dev/"],"backchannel_logout_uri":"https://takeover.dev.e6qu.dev/oidc/backchannel-logout","health_url":"https://takeover.dev.e6qu.dev/health","monitoring_url":""}]' "$protected_client_secret")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 docker compose up --force-recreate --no-deps --detach shauth
 attempt=0

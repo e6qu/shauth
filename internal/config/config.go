@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 )
+
+var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
 // Config contains the runtime coordinates required by the Shauth login and
 // administration application. Secrets are supplied solely through the runtime
@@ -22,6 +25,9 @@ type Config struct {
 	GitHubClientSecret     string
 	GitHubDeveloperTeam    string
 	GitHubAdminTeam        string
+	EntraTenantID          string
+	EntraClientID          string
+	EntraClientSecret      string
 	BootstrapAdminEmail    string
 	BootstrapAdminPassword string
 	AllowInsecureCookies   bool
@@ -34,17 +40,16 @@ type Config struct {
 // deployed service. Deployment supplies this only through a Secrets Manager
 // backed environment variable because it includes the client secret.
 type BootstrapApp struct {
-	Slug             string   `json:"slug"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	LaunchURL        string   `json:"launch_url"`
-	OIDCClientID     string   `json:"oidc_client_id"`
-	OIDCClientSecret string   `json:"oidc_client_secret"`
-	RedirectURIs     []string `json:"redirect_uris"`
-	// Optional allowlist of post-logout redirect URIs. When set, Hydra
-	// honours them so a relying app's RP-initiated logout returns the
-	// browser to the app instead of Shauth's default post-logout page.
-	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris,omitempty"`
+	Slug                   string   `json:"slug"`
+	Name                   string   `json:"name"`
+	Description            string   `json:"description"`
+	LaunchURL              string   `json:"launch_url"`
+	OIDCClientID           string   `json:"oidc_client_id"`
+	OIDCClientSecret       string   `json:"oidc_client_secret"`
+	RedirectURIs           []string `json:"redirect_uris"`
+	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
+	FrontChannelLogoutURI  string   `json:"frontchannel_logout_uri"`
+	BackChannelLogoutURI   string   `json:"backchannel_logout_uri"`
 	HealthURL              string   `json:"health_url"`
 	MonitoringURL          string   `json:"monitoring_url"`
 }
@@ -74,6 +79,9 @@ func Load(getenv func(string) string) (Config, error) {
 		GitHubClientSecret:     getenv("GITHUB_CLIENT_SECRET"),
 		GitHubDeveloperTeam:    getenv("GITHUB_DEVELOPER_TEAM"),
 		GitHubAdminTeam:        getenv("GITHUB_ADMIN_TEAM"),
+		EntraTenantID:          getenv("ENTRA_TENANT_ID"),
+		EntraClientID:          getenv("ENTRA_CLIENT_ID"),
+		EntraClientSecret:      getenv("ENTRA_CLIENT_SECRET"),
 		BootstrapAdminEmail:    getenv("SHAUTH_BOOTSTRAP_ADMIN_EMAIL"),
 		BootstrapAdminPassword: getenv("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"),
 		AllowInsecureCookies:   getenv("SHAUTH_ALLOW_INSECURE_COOKIES") == "true",
@@ -85,6 +93,18 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if config.BootstrapAdminPassword != "" && len(config.BootstrapAdminPassword) < 14 {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must have at least 14 characters")
+	}
+	entraValues := 0
+	for _, value := range []string{config.EntraTenantID, config.EntraClientID, config.EntraClientSecret} {
+		if value != "" {
+			entraValues++
+		}
+	}
+	if entraValues != 0 && entraValues != 3 {
+		return Config{}, fmt.Errorf("ENTRA_TENANT_ID, ENTRA_CLIENT_ID, and ENTRA_CLIENT_SECRET must be set together")
+	}
+	if config.EntraTenantID != "" && !tenantIDPattern.MatchString(config.EntraTenantID) {
+		return Config{}, fmt.Errorf("ENTRA_TENANT_ID must be a specific Microsoft Entra ID tenant UUID")
 	}
 	if publicURL.Scheme != "https" && !config.AllowInsecureCookies {
 		return Config{}, fmt.Errorf("SHAUTH_PUBLIC_URL must use HTTPS unless SHAUTH_ALLOW_INSECURE_COOKIES=true")
