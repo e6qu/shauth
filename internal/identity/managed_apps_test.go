@@ -22,6 +22,12 @@ func TestValidateManagedApp(t *testing.T) {
 		"uppercase slug":     withManagedApp(valid, func(app *ManagedApp) { app.Slug = "Bleephub" }),
 		"invalid launch URL": withManagedApp(valid, func(app *ManagedApp) { app.LaunchURL = "http://bleephub.dev.e6qu.dev" }),
 		"invalid health URL": withManagedApp(valid, func(app *ManagedApp) { app.HealthURL = "http://bleephub.dev.e6qu.dev/health" }),
+		"health origin mismatch": withManagedApp(valid, func(app *ManagedApp) {
+			app.HealthURL = "https://health.example.test/health"
+		}),
+		"monitoring origin mismatch": withManagedApp(valid, func(app *ManagedApp) {
+			app.MonitoringURL = "https://monitoring.example.test/monitoring"
+		}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := ValidateManagedApp(app); err == nil {
@@ -38,7 +44,7 @@ func TestValidateManagedAppAllowsLoopbackHTTPForLocalIntegration(t *testing.T) {
 		Description:  "A real local integration service.",
 		LaunchURL:    "http://localhost:5556/",
 		OIDCClientID: "local-app",
-		HealthURL:    "http://127.0.0.1:5556/healthz",
+		HealthURL:    "http://localhost:5556/healthz",
 	}
 	if err := ValidateManagedApp(app); err != nil {
 		t.Fatalf("ValidateManagedApp(loopback) error = %v", err)

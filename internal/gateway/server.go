@@ -362,7 +362,7 @@ func validLogoutEvent(events map[string]json.RawMessage) bool {
 		return false
 	}
 	var event map[string]json.RawMessage
-	return json.Unmarshal(raw, &event) == nil && event != nil
+	return json.Unmarshal(raw, &event) == nil && event != nil && len(event) == 0
 }
 
 func (server *Server) requireSession(next http.Handler) http.Handler {

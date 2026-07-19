@@ -84,7 +84,7 @@ func TestValidLogoutEvent(t *testing.T) {
 		want   bool
 	}{
 		{name: "empty object", events: map[string]json.RawMessage{logoutEvent: json.RawMessage(`{}`)}, want: true},
-		{name: "nonempty object", events: map[string]json.RawMessage{logoutEvent: json.RawMessage(`{"reason":"administrator"}`)}, want: true},
+		{name: "nonempty object", events: map[string]json.RawMessage{logoutEvent: json.RawMessage(`{"reason":"administrator"}`)}, want: false},
 		{name: "missing event", events: map[string]json.RawMessage{}, want: false},
 		{name: "null", events: map[string]json.RawMessage{logoutEvent: json.RawMessage(`null`)}, want: false},
 		{name: "string", events: map[string]json.RawMessage{logoutEvent: json.RawMessage(`"logout"`)}, want: false},

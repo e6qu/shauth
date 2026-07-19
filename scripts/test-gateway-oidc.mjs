@@ -8,27 +8,8 @@ import { chromium } from "playwright";
 const password = process.env.SHAUTH_BOOTSTRAP_ADMIN_PASSWORD;
 assert.ok(password, "SHAUTH_BOOTSTRAP_ADMIN_PASSWORD is required");
 
-let resolveIdentity;
-const identity = new Promise((resolve) => { resolveIdentity = resolve; });
-const upstream = http.createServer((request, response) => {
-  resolveIdentity({
-    subject: request.headers["x-forwarded-subject"],
-    username: request.headers["x-forwarded-preferred-username"],
-    email: request.headers["x-forwarded-email"],
-    role: request.headers["x-forwarded-role"],
-    authorization: request.headers.authorization,
-  });
-  response.writeHead(200, {
-    "content-type": "text/html; charset=utf-8",
-    "content-security-policy": "default-src 'self'; frame-ancestors 'self'",
-    "x-frame-options": "SAMEORIGIN",
-  });
-  response.end("<!doctype html><html lang=en><title>Protected application</title><h1>Protected application</h1><form method=post action=/auth/logout><button>Sign out</button></form></html>");
-});
-await new Promise((resolve, reject) => {
-  upstream.once("error", reject);
-  upstream.listen(5557, "127.0.0.1", resolve);
-});
+const primary = await createUpstream(5557, "Primary application");
+const secondary = await createUpstream(5559, "Secondary application");
 
 const browser = await chromium.launch({ headless: true });
 try {
@@ -53,7 +34,7 @@ try {
   await page.locator("#password").fill(password);
   await page.getByRole("button", { name: "Sign in with password" }).click();
   await page.waitForURL("http://localhost:5556/");
-  await assertSession(context, 200);
+  await assertSession(context, "http://localhost:5556", 200);
 
   const sessionResponse = await context.request.get("http://localhost:5556/auth/session");
   const session = await sessionResponse.json();
@@ -63,7 +44,7 @@ try {
   const gatewayResponse = await context.request.get("http://localhost:5556/auth/session");
   assert.match(gatewayResponse.headers()["content-security-policy"], /form-action 'self' http:\/\/localhost:8080/);
   assert.equal(gatewayResponse.headers()["x-frame-options"], "DENY");
-  assert.deepEqual(await identity, {
+  assert.deepEqual(await primary.identity, {
     subject: session.subject,
     username: "admin",
     email: "admin@localhost.test",
@@ -80,7 +61,7 @@ try {
 
   const rejectedFrontchannel = await context.request.get(`http://localhost:5556/auth/frontchannel-logout?iss=${encodeURIComponent("https://attacker.example")}&sid=${encodeURIComponent(providerSessionID)}`);
   assert.equal(rejectedFrontchannel.status(), 200);
-  await assertSession(context, 200);
+  await assertSession(context, "http://localhost:5556", 200);
 
   const providerContext = await browser.newContext();
   try {
@@ -89,15 +70,47 @@ try {
   } finally {
     await providerContext.close();
   }
-  await assertSession(context, 401);
+  await assertSession(context, "http://localhost:5556", 401);
 
   await page.goto("http://localhost:5556/");
   await page.waitForURL("http://localhost:5556/");
-  await assertSession(context, 200);
+  await assertSession(context, "http://localhost:5556", 200);
+
+  // A second relying party uses the already authenticated Shauth session.
+  // Reaching its upstream without another credential form proves browser SSO,
+  // while the distinct PostgreSQL session proves the relying parties do not
+  // accidentally share their own cookies.
+  await page.goto("http://localhost:5558/");
+  await page.waitForURL("http://localhost:5558/");
+  await page.getByRole("heading", { name: "Secondary application" }).waitFor();
+  await assertSession(context, "http://localhost:5558", 200);
+  assert.deepEqual(await secondary.identity, {
+    subject: session.subject,
+    username: "admin",
+    email: "admin@localhost.test",
+    role: "admin",
+    authorization: undefined,
+  });
+  const activeClients = execFileSync(
+    "docker",
+    ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT string_agg(DISTINCT client_id, ',' ORDER BY client_id) FROM oidc_gateway_sessions WHERE revoked_at IS NULL AND client_id IN ('gateway-integration','gateway-secondary')"],
+    { encoding: "utf8" },
+  ).trim();
+  assert.equal(activeClients, "gateway-integration,gateway-secondary");
+
+  await page.goto("http://localhost:5556/");
+  await page.waitForURL("http://localhost:5556/");
   await page.getByRole("button", { name: "Sign out" }).click();
   await waitForURL(page, "http://localhost:5556/auth/signed-out", navigationTrace, browserErrors);
   await page.getByRole("heading", { name: "Signed out" }).waitFor();
-  await assertSession(context, 401);
+  await assertSession(context, "http://localhost:5556", 401);
+  await assertSession(context, "http://localhost:5558", 401);
+  const remainingSessions = execFileSync(
+    "docker",
+    ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL AND client_id IN ('gateway-integration','gateway-secondary')"],
+    { encoding: "utf8" },
+  ).trim();
+  assert.equal(remainingSessions, "0");
   const noLocalSessionLogout = await context.request.post("http://localhost:5556/auth/logout", {
     headers: { origin: "http://localhost:5556" },
     maxRedirects: 0,
@@ -114,7 +127,36 @@ try {
   assert.deepEqual(browserErrors, []);
 } finally {
   await browser.close();
-  await new Promise((resolve) => upstream.close(resolve));
+  await Promise.all([closeServer(primary.server), closeServer(secondary.server)]);
+}
+
+async function createUpstream(port, title) {
+  let resolveIdentity;
+  const identity = new Promise((resolve) => { resolveIdentity = resolve; });
+  const server = http.createServer((request, response) => {
+    resolveIdentity({
+      subject: request.headers["x-forwarded-subject"],
+      username: request.headers["x-forwarded-preferred-username"],
+      email: request.headers["x-forwarded-email"],
+      role: request.headers["x-forwarded-role"],
+      authorization: request.headers.authorization,
+    });
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": "default-src 'self'; frame-ancestors 'self'",
+      "x-frame-options": "SAMEORIGIN",
+    });
+    response.end(`<!doctype html><html lang=en><title>${title}</title><h1>${title}</h1><form method=post action=/auth/logout><button>Sign out</button></form></html>`);
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+  return { server, identity };
+}
+
+function closeServer(server) {
+  return new Promise((resolve) => server.close(resolve));
 }
 
 async function waitForURL(page, expected, trace, errors) {
@@ -130,8 +172,8 @@ function sanitizeURL(value) {
   return `${parsed.origin}${parsed.pathname}`;
 }
 
-async function assertSession(context, expectedStatus) {
-  const response = await context.request.get("http://localhost:5556/auth/session");
+async function assertSession(context, applicationOrigin, expectedStatus) {
+  const response = await context.request.get(`${applicationOrigin}/auth/session`);
   assert.equal(response.status(), expectedStatus);
   if (expectedStatus === 200) {
     const session = await response.json();

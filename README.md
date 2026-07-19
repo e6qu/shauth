@@ -69,6 +69,10 @@ and catalog records idempotently during Shauth startup. The input is stored only
 in the Shauth runtime secret and contains each confidential client secret,
 sign-in and post-logout redirect URIs, at least one front-channel or
 back-channel logout URI, launch URL, health URL, and optional monitoring URL.
+Every coordinate for one connected application uses the same scheme, host, and
+port. Shauth verifies that invariant against both its PostgreSQL catalog record
+and Ory Hydra's reconciled client before startup succeeds; bootstrap
+configuration cannot take over an administrator-owned slug or client ID.
 
 ## Native relying-party gateway
 
