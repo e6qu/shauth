@@ -6,6 +6,9 @@ unset CDPATH
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+npm ci
+npx playwright install --with-deps chromium
+
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
 }
@@ -68,7 +71,7 @@ curl --fail --silent --show-error --cookie-jar "$cookie_jar" http://localhost:80
 csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
 [ -n "$csrf_token" ]
 
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 docker compose up --force-recreate --no-deps --detach shauth
 attempt=0
@@ -81,6 +84,8 @@ if [ "$attempt" -eq 30 ]; then
   exit 1
 fi
 curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/updated'
+bootstrap_app=$(docker compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',name,description,launch_url,oidc_client_id,health_url,monitoring_url) FROM managed_apps WHERE slug='bootstrap-app'")
+[ "$bootstrap_app" = 'Bootstrap app updated|Updated bootstrap reconciliation coverage.|https://bootstrap.dev.e6qu.dev/apps|bootstrap-app|https://bootstrap.dev.e6qu.dev/ready|https://bootstrap.dev.e6qu.dev/monitoring' ]
 
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
@@ -243,3 +248,23 @@ if curl --fail --silent \
 	echo 'revoked OIDC refresh token was accepted' >&2
 	exit 1
 fi
+
+docker compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 -c "INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,created_at) VALUES ('00000000-0000-4000-8000-000000000001','protected-app','Protected app','Administrator-owned app.','https://protected.dev.e6qu.dev','protected-client','https://protected.dev.e6qu.dev/health',NULL,now())" >/dev/null
+protected_client_secret=$(random_secret)
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"protected-app","name":"Takeover attempt","description":"Bootstrap must not replace an administrator-owned app.","launch_url":"https://takeover.dev.e6qu.dev","oidc_client_id":"takeover-client","oidc_client_secret":"%s","redirect_uris":["https://takeover.dev.e6qu.dev/oidc/callback"],"health_url":"https://takeover.dev.e6qu.dev/health","monitoring_url":""}]' "$protected_client_secret")
+export SHAUTH_BOOTSTRAP_APPS_JSON
+docker compose up --force-recreate --no-deps --detach shauth
+attempt=0
+shauth_status=running
+while [ "$attempt" -lt 30 ]; do
+	shauth_container=$(docker compose ps --all --quiet shauth)
+	shauth_status=$(docker inspect --format '{{.State.Status}}' "$shauth_container")
+	[ "$shauth_status" = exited ] && break
+	attempt=$((attempt + 1))
+	sleep 1
+done
+if [ "$shauth_status" != exited ] || [ "$(docker inspect --format '{{.State.ExitCode}}' "$shauth_container")" -eq 0 ]; then
+	echo 'Shauth accepted a bootstrap app takeover with another OpenID Connect client' >&2
+	exit 1
+fi
+docker compose logs --no-color shauth | grep -q 'managed app slug "protected-app" belongs to another OpenID Connect client'
