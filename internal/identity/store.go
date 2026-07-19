@@ -336,20 +336,31 @@ func ValidateManagedApp(app ManagedApp) error {
 		return fmt.Errorf("app name, description, and OIDC client ID are required")
 	}
 	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
-	if err != nil || launchURL.Scheme != "https" || launchURL.Host == "" || launchURL.Fragment != "" {
-		return fmt.Errorf("app launch URL must use HTTPS")
+	if err != nil || !validManagedAppURL(launchURL) {
+		return fmt.Errorf("app launch URL must use HTTPS unless it targets loopback")
 	}
 	healthURL, err := url.ParseRequestURI(strings.TrimSpace(app.HealthURL))
-	if err != nil || healthURL.Scheme != "https" || healthURL.Host == "" || healthURL.Fragment != "" {
-		return fmt.Errorf("app health URL must use HTTPS")
+	if err != nil || !validManagedAppURL(healthURL) {
+		return fmt.Errorf("app health URL must use HTTPS unless it targets loopback")
 	}
 	if app.MonitoringURL != "" {
 		monitoringURL, err := url.ParseRequestURI(app.MonitoringURL)
-		if err != nil || monitoringURL.Scheme != "https" || monitoringURL.Host == "" || monitoringURL.Fragment != "" {
-			return fmt.Errorf("app monitoring URL must use HTTPS")
+		if err != nil || !validManagedAppURL(monitoringURL) {
+			return fmt.Errorf("app monitoring URL must use HTTPS unless it targets loopback")
 		}
 	}
 	return nil
+}
+
+func validManagedAppURL(value *url.URL) bool {
+	if value == nil || value.Host == "" || value.User != nil || value.Fragment != "" {
+		return false
+	}
+	if value.Scheme == "https" {
+		return true
+	}
+	host := strings.Trim(strings.ToLower(value.Hostname()), "[]")
+	return value.Scheme == "http" && (host == "localhost" || host == "::1" || net.ParseIP(host).IsLoopback())
 }
 
 func normalizeGitHubTarget(kind, target string) string {

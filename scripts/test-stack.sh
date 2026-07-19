@@ -28,17 +28,27 @@ SHAUTH_OIDC_CLIENT_SECRET=$(random_secret)
 export SHAUTH_OIDC_CLIENT_SECRET
 SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET=$(random_secret)
 export SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+SHAUTH_GATEWAY_CLIENT_SECRET=$(random_secret)
+export SHAUTH_GATEWAY_CLIENT_SECRET
+SHAUTH_GATEWAY_COOKIE_SECRET=$(random_secret)
+export SHAUTH_GATEWAY_COOKIE_SECRET
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""},{"slug":"gateway-integration","name":"Gateway integration","description":"First-party OIDC gateway acceptance coverage.","launch_url":"http://localhost:5556/healthz","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 cookie_jar=$(mktemp)
+gateway_binary=$(mktemp)
+gateway_pid=
 
 cleanup() {
 	status=$?
 	if [ "$status" -ne 0 ]; then
-		docker compose logs --no-color --tail=300 >&2 || true
+		docker compose logs --no-color --tail=120 shauth hydra >&2 || true
+	fi
+	if [ -n "$gateway_pid" ]; then
+		kill "$gateway_pid" 2>/dev/null || true
+		wait "$gateway_pid" 2>/dev/null || true
 	fi
 	 docker compose down --volumes --remove-orphans
-	rm -f "$cookie_jar"
+	rm -f "$cookie_jar" "$gateway_binary"
 	return "$status"
 }
 trap cleanup EXIT INT TERM
@@ -72,7 +82,7 @@ curl --fail --silent --show-error --cookie-jar "$cookie_jar" http://localhost:80
 csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
 [ -n "$csrf_token" ]
 
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"},{"slug":"gateway-integration","name":"Gateway integration","description":"First-party OIDC gateway acceptance coverage.","launch_url":"http://localhost:5556/healthz","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 docker compose up --force-recreate --no-deps --detach shauth
 attempt=0
@@ -125,6 +135,29 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'monitoring_url=https://integration.example.test/monitoring' \
   http://localhost:8080/admin/apps | grep -q 'Integration app'
 npm run test:browser
+
+go build -o "$gateway_binary" ./cmd/shauth-gateway
+OIDC_GATEWAY_ISSUER=http://localhost:8080 \
+OIDC_GATEWAY_CLIENT_ID=gateway-integration \
+OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_CLIENT_SECRET" \
+OIDC_GATEWAY_PUBLIC_URL=http://localhost:5556 \
+OIDC_GATEWAY_UPSTREAM_URL=http://127.0.0.1:5557 \
+OIDC_GATEWAY_POST_LOGOUT_URL=http://localhost:5556/auth/signed-out \
+OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_COOKIE_SECRET" \
+OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
+OIDC_GATEWAY_LISTEN_ADDRESS=127.0.0.1:5556 \
+DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
+"$gateway_binary" &
+gateway_pid=$!
+attempt=0
+while [ "$attempt" -lt 60 ] && ! curl --fail --silent http://localhost:5556/auth/healthz >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  sleep 1
+done
+if [ "$attempt" -eq 60 ]; then
+  exit 1
+fi
+npm run test:gateway
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
   'http://localhost:8080/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')

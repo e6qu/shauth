@@ -68,6 +68,34 @@ in the Shauth runtime secret and contains each confidential client secret,
 sign-in and post-logout redirect URIs, at least one front-channel or
 back-channel logout URI, launch URL, health URL, and optional monitoring URL.
 
+## Native relying-party gateway
+
+The container also includes `/shauth-gateway`, a native OpenID Connect (OIDC)
+relying-party gateway for a first-party web interface that cannot implement the
+protocol itself. It replaces a generic authentication proxy without adding a
+second identity system. The gateway discovers Shauth's public issuer, performs
+the Authorization Code flow with Proof Key for Code Exchange (PKCE), verifies
+the ID token signature, issuer, audience, expiry, nonce, subject, and provider
+session identifier, and stores opaque application sessions in PostgreSQL.
+
+Authenticated requests are proxied to `OIDC_GATEWAY_UPSTREAM_URL` with verified
+`X-Forwarded-Subject`, `X-Forwarded-User`,
+`X-Forwarded-Preferred-Username`, `X-Forwarded-Email`, and `X-Forwarded-Role`
+headers. The gateway removes any client-supplied values for those headers and
+removes the inbound `Authorization` header. Its `/auth/session` endpoint exposes
+the verified user to the first-party UI, and `POST /auth/logout` performs an OIDC
+relying-party-initiated logout using the stored ID token. Signed back-channel
+logout and correlated front-channel logout revoke every matching local session.
+
+The gateway requires `OIDC_GATEWAY_ISSUER`, `OIDC_GATEWAY_CLIENT_ID`,
+`OIDC_GATEWAY_CLIENT_SECRET`, `OIDC_GATEWAY_PUBLIC_URL`,
+`OIDC_GATEWAY_UPSTREAM_URL`, `OIDC_GATEWAY_POST_LOGOUT_URL`,
+`OIDC_GATEWAY_COOKIE_SECRET`, and `DATABASE_URL`. The post-logout URL must use
+the application's public origin and must be registered on its Shauth client.
+`OIDC_GATEWAY_SESSION_MAX_AGE` defaults to eight hours. Production issuer,
+public, and post-logout coordinates require HTTPS; explicit insecure cookies
+are accepted only for loopback integration tests.
+
 ## Deployment model
 
 The Terraform module deploys Shauth and Hydra in private Amazon ECS

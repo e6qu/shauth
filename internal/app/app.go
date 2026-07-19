@@ -40,9 +40,11 @@ const githubStateCookiePrefix = "shauth_github_state_"
 const entraStateCookiePrefix = "shauth_entra_state_"
 const bootstrapRetryInterval = time.Second
 const bootstrapRetryTimeout = 45 * time.Second
+const outboundRequestTimeout = 15 * time.Second
 
 const baseContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 const oidcContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"
+const oidcLogoutContentSecurityPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
 var oidcClientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{2,127}$`)
 
@@ -135,7 +137,8 @@ type Server struct {
 }
 
 func New(cfg config.Config, store *identity.Store) (*Server, error) {
-	client, err := githubapi.NewClient(http.DefaultClient)
+	outboundClient := &http.Client{Timeout: outboundRequestTimeout}
+	client, err := githubapi.NewClient(outboundClient)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +158,7 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
 	}
-	server := &Server{config: cfg, store: store, github: client, httpClient: http.DefaultClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
+	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
 	if cfg.EntraTenantID != "" {
 		issuer := "https://login.microsoftonline.com/" + cfg.EntraTenantID + "/v2.0"
 		discoveryContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -253,7 +256,11 @@ func (s *Server) Handler() http.Handler {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", baseContentSecurityPolicy)
+		policy := baseContentSecurityPolicy
+		if r.URL.Path == "/oauth2/sessions/logout" {
+			policy = oidcLogoutContentSecurityPolicy
+		}
+		w.Header().Set("Content-Security-Policy", policy)
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
@@ -634,6 +641,7 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 	challenge := r.URL.Query().Get("logout_challenge")
 	request, err := s.hydraLogoutRequest(r.Context(), challenge)
 	if err != nil {
+		log.Printf("load Ory Hydra logout request: %v", err)
 		http.Error(w, "could not load OAuth logout request", http.StatusBadGateway)
 		return
 	}
@@ -648,6 +656,7 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	redirect, err := s.hydraAcceptLogout(r.Context(), challenge)
 	if err != nil {
+		log.Printf("accept Ory Hydra logout request without local session: %v", err)
 		http.Error(w, "could not complete OAuth logout", http.StatusBadGateway)
 		return
 	}
@@ -666,6 +675,7 @@ func (s *Server) completeLogout(w http.ResponseWriter, r *http.Request, session 
 	s.expireCookie(w, browserSessionCookie)
 	redirect, err := s.hydraAcceptLogout(r.Context(), challenge)
 	if err != nil {
+		log.Printf("accept Ory Hydra logout request after revoking local session: %v", err)
 		http.Error(w, "could not complete OAuth logout", http.StatusBadGateway)
 		return
 	}

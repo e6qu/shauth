@@ -44,7 +44,10 @@ func main() {
 		Addr:              cfg.Address,
 		Handler:           serverApp.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 * 1024,
 	}
 	log.Printf("shauth listening on %s", cfg.Address)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

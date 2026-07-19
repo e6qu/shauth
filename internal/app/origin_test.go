@@ -156,6 +156,20 @@ func TestDefaultFormPolicyRemainsSameOrigin(t *testing.T) {
 	}
 }
 
+func TestProviderLogoutPolicyAllowsRegisteredClientFrames(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "https://auth.example.test/oauth2/sessions/logout", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if got := response.Header().Get("Content-Security-Policy"); got != oidcLogoutContentSecurityPolicy {
+		t.Fatalf("content security policy = %q, want %q", got, oidcLogoutContentSecurityPolicy)
+	}
+}
+
 func TestOIDCNextDetection(t *testing.T) {
 	tests := map[string]bool{
 		"/oauth/login?login_challenge=challenge":     true,
