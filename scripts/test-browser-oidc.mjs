@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import http from "node:http";
+import { chromium } from "playwright";
+
+const issuer = "http://localhost:8080";
+const callbackURL = "http://localhost:5555/callback";
+const clientID = "shauth-integration-client";
+const clientSecret = process.env.SHAUTH_OIDC_CLIENT_SECRET;
+const password = process.env.SHAUTH_BOOTSTRAP_ADMIN_PASSWORD;
+
+assert.ok(clientSecret, "SHAUTH_OIDC_CLIENT_SECRET is required");
+assert.ok(password, "SHAUTH_BOOTSTRAP_ADMIN_PASSWORD is required");
+
+const state = crypto.randomBytes(32).toString("hex");
+let resolveCallback;
+let rejectCallback;
+const callback = new Promise((resolve, reject) => {
+  resolveCallback = resolve;
+  rejectCallback = reject;
+});
+
+const server = http.createServer(async (request, response) => {
+  try {
+    const callbackRequest = new URL(request.url, callbackURL);
+    assert.equal(callbackRequest.pathname, "/callback");
+    assert.equal(callbackRequest.searchParams.get("state"), state);
+    const code = callbackRequest.searchParams.get("code");
+    assert.ok(code, "OIDC callback omitted the authorization code");
+
+    const tokenResponse = await fetch(`${issuer}/oauth2/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: callbackURL,
+        client_id: clientID,
+        client_secret: clientSecret,
+      }),
+    });
+    assert.equal(tokenResponse.status, 200, `token exchange returned HTTP ${tokenResponse.status}`);
+    const tokens = await tokenResponse.json();
+    assert.ok(tokens.access_token, "token exchange omitted the access token");
+
+    const userInfoResponse = await fetch(`${issuer}/userinfo`, {
+      headers: { authorization: `Bearer ${tokens.access_token}` },
+    });
+    assert.equal(userInfoResponse.status, 200, `UserInfo returned HTTP ${userInfoResponse.status}`);
+    const user = await userInfoResponse.json();
+    assert.equal(user.preferred_username, "admin");
+    assert.equal(user.email, "admin@localhost.test");
+    assert.equal(user.role, "admin");
+
+    response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    response.end("OIDC browser flow completed");
+    resolveCallback();
+  } catch (error) {
+    response.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+    response.end("OIDC browser flow failed");
+    rejectCallback(error);
+  }
+});
+
+await new Promise((resolve, reject) => {
+  server.once("error", reject);
+  server.listen(5555, "127.0.0.1", resolve);
+});
+
+const browser = await chromium.launch({ headless: true });
+try {
+  const page = await browser.newPage();
+  const browserErrors = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("requestfailed", (request) => browserErrors.push(`${request.url()}: ${request.failure()?.errorText ?? "request failed"}`));
+
+  const authorizationURL = new URL("/oauth2/auth", issuer);
+  authorizationURL.search = new URLSearchParams({
+    client_id: clientID,
+    response_type: "code",
+    scope: "openid profile email offline_access",
+    redirect_uri: callbackURL,
+    state,
+  });
+  await page.goto(authorizationURL.toString());
+  await page.locator("#username").fill("admin");
+  await page.locator("#password").fill(password);
+  await page.getByRole("button", { name: "Sign in with password" }).click();
+  await Promise.race([
+    callback,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`OIDC browser callback timed out: ${browserErrors.join("; ")}`)), 30_000)),
+  ]);
+  await page.getByText("OIDC browser flow completed").waitFor();
+  assert.deepEqual(browserErrors, []);
+} finally {
+  await browser.close();
+  await new Promise((resolve) => server.close(resolve));
+}

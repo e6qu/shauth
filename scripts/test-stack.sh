@@ -105,6 +105,7 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'health_url=https://integration.example.test/health' \
   --data-urlencode 'monitoring_url=https://integration.example.test/monitoring' \
   http://localhost:8080/admin/apps | grep -q 'Integration app'
+npm run test:browser
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
   'http://localhost:8080/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
