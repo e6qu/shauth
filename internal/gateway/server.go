@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -108,8 +109,9 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 	originalDirector := proxy.Director
 	proxy.Director = func(request *http.Request) {
 		originalDirector(request)
-		request.Header.Del("Authorization")
+		sanitizeProxyHeaders(request, config)
 		removeCookie(request, configCookieName(config.InsecureCookie))
+		removeCookie(request, configTransactionCookieName(config.InsecureCookie))
 		for _, name := range []string{"X-Forwarded-User", "X-Forwarded-Email", "X-Forwarded-Preferred-Username", "X-Forwarded-Role", "X-Forwarded-Subject"} {
 			request.Header.Del(name)
 		}
@@ -145,6 +147,16 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 	}, nil
 }
 
+func sanitizeProxyHeaders(request *http.Request, config Config) {
+	for name := range request.Header {
+		if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Forwarded") || strings.EqualFold(name, "X-Real-IP") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
+			request.Header.Del(name)
+		}
+	}
+	request.Header.Set("X-Forwarded-Host", config.PublicURL.Host)
+	request.Header.Set("X-Forwarded-Proto", config.PublicURL.Scheme)
+}
+
 func (server *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/login", server.login)
@@ -170,20 +182,30 @@ func (server *Server) signedOut(response http.ResponseWriter, _ *http.Request) {
 }
 
 func (server *Server) frontchannelLogout(response http.ResponseWriter, request *http.Request) {
-	session, browserToken, err := server.currentSession(request)
-	if err == nil && request.URL.Query().Get("iss") == server.config.Issuer.String() && subtle.ConstantTimeCompare([]byte(request.URL.Query().Get("sid")), []byte(session.ProviderSessionID)) == 1 {
-		if err := server.store.RevokeToken(request.Context(), browserToken, server.now()); err != nil {
-			http.Error(response, "Could not revoke application session", http.StatusInternalServerError)
-			return
-		}
-	}
-	server.clearCookie(response, server.sessionCookieName())
-	response.Header().Set("Content-Type", "text/html; charset=utf-8")
 	response.Header().Set("Cache-Control", "no-store")
+	sid := request.URL.Query().Get("sid")
+	if request.URL.Query().Get("iss") != server.config.Issuer.String() || sid == "" {
+		writeFrontchannelLogoutResponse(response)
+		return
+	}
+	currentSession, _, currentSessionError := server.currentSession(request)
+	if err := server.store.RevokeFrontchannelSession(request.Context(), sid, server.now()); err != nil {
+		http.Error(response, "Could not revoke application session", http.StatusInternalServerError)
+		return
+	}
+	if currentSessionError == nil && subtle.ConstantTimeCompare([]byte(sid), []byte(currentSession.ProviderSessionID)) == 1 {
+		server.clearCookie(response, server.sessionCookieName())
+	}
+	writeFrontchannelLogoutResponse(response)
+}
+
+func writeFrontchannelLogoutResponse(response http.ResponseWriter) {
+	response.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = response.Write([]byte("<!doctype html><title>Signed out</title>"))
 }
 
 func (server *Server) login(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
 	returnTo := relativeReturnTo(request.URL.Query().Get("return_to"))
 	state, err := randomValue(32)
 	if err != nil {
@@ -207,6 +229,7 @@ func (server *Server) login(response http.ResponseWriter, request *http.Request)
 }
 
 func (server *Server) callback(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
 	cookie, err := request.Cookie(server.transactionCookieName())
 	if err != nil {
 		http.Error(response, "Authentication transaction is unavailable", http.StatusBadRequest)
@@ -268,6 +291,7 @@ func (server *Server) session(response http.ResponseWriter, request *http.Reques
 }
 
 func (server *Server) logout(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
 	if !server.sameOrigin(request) {
 		http.Error(response, "Cross-origin request denied", http.StatusForbidden)
 		return
@@ -275,7 +299,7 @@ func (server *Server) logout(response http.ResponseWriter, request *http.Request
 	session, browserToken, err := server.currentSession(request)
 	if err != nil {
 		server.clearCookie(response, server.sessionCookieName())
-		http.Redirect(response, request, server.config.PostLogoutURL.String(), http.StatusSeeOther)
+		http.Redirect(response, request, server.endSessionURL(""), http.StatusSeeOther)
 		return
 	}
 	if err := server.store.RevokeToken(request.Context(), browserToken, server.now()); err != nil {
@@ -283,25 +307,34 @@ func (server *Server) logout(response http.ResponseWriter, request *http.Request
 		return
 	}
 	server.clearCookie(response, server.sessionCookieName())
+	http.Redirect(response, request, server.endSessionURL(session.IDToken), http.StatusSeeOther)
+}
+
+func (server *Server) endSessionURL(idToken string) string {
 	target, _ := url.Parse(server.endSessionEndpoint)
 	query := target.Query()
-	query.Set("id_token_hint", session.IDToken)
+	query.Set("client_id", server.config.ClientID)
+	if idToken != "" {
+		query.Set("id_token_hint", idToken)
+	}
 	query.Set("post_logout_redirect_uri", server.config.PostLogoutURL.String())
 	target.RawQuery = query.Encode()
-	http.Redirect(response, request, target.String(), http.StatusSeeOther)
+	return target.String()
 }
 
 func (server *Server) backchannelLogout(response http.ResponseWriter, request *http.Request) {
-	if contentType := strings.ToLower(request.Header.Get("Content-Type")); !strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
+	response.Header().Set("Cache-Control", "no-store")
+	contentType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(contentType, "application/x-www-form-urlencoded") {
 		http.Error(response, "Unsupported media type", http.StatusUnsupportedMediaType)
 		return
 	}
 	request.Body = http.MaxBytesReader(response, request.Body, maximumLogoutTokenBytes)
-	if err := request.ParseForm(); err != nil || len(request.Form["logout_token"]) != 1 {
+	if err := request.ParseForm(); err != nil || len(request.PostForm["logout_token"]) != 1 {
 		http.Error(response, "A single logout_token is required", http.StatusBadRequest)
 		return
 	}
-	verified, err := server.verifier.Verify(request.Context(), request.Form.Get("logout_token"))
+	verified, err := server.verifier.Verify(request.Context(), request.PostForm.Get("logout_token"))
 	if err != nil {
 		http.Error(response, "Invalid logout token", http.StatusBadRequest)
 		return
@@ -403,7 +436,11 @@ func removeCookie(request *http.Request, name string) {
 }
 
 func (server *Server) transactionCookieName() string {
-	if server.config.InsecureCookie {
+	return configTransactionCookieName(server.config.InsecureCookie)
+}
+
+func configTransactionCookieName(insecure bool) string {
+	if insecure {
 		return strings.TrimPrefix(transactionCookieName, "__Host-")
 	}
 	return transactionCookieName
@@ -459,7 +496,7 @@ func randomUUID() (string, error) {
 
 func relativeReturnTo(value string) string {
 	parsed, err := url.Parse(value)
-	if err != nil || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || parsed.IsAbs() || parsed.Host != "" {
+	if err != nil || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || strings.Contains(parsed.Path, "\\") || parsed.IsAbs() || parsed.Host != "" {
 		return "/"
 	}
 	return parsed.RequestURI()
@@ -477,7 +514,7 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 func (server *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/auth/frontchannel-logout" {
-			response.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'")
+			response.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'none'; frame-ancestors %s://%s; base-uri 'none'; form-action 'none'", server.config.Issuer.Scheme, server.config.Issuer.Host))
 		} else {
 			response.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' %s://%s", server.config.Issuer.Scheme, server.config.Issuer.Host))
 			response.Header().Set("X-Frame-Options", "DENY")

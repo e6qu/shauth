@@ -46,8 +46,10 @@ introspection, and front-channel logout endpoints. Relying applications never
 connect to Hydra's private task coordinate directly.
 
 Administrators can invalidate one Shauth browser session or invalidate every
-session for a user. Subject-wide invalidation deletes the user's Hydra login
-and consent sessions as well, revoking associated access and refresh tokens.
+session for a user. Shauth revokes each correlated Ory Hydra login session by
+`sid` so relying applications receive logout notifications, then deletes any
+remaining subject login state and consent grants to revoke associated access
+and refresh tokens.
 Administrators also configure the durable browser absolute lifetime, browser
 idle timeout, OIDC single sign-on lifetime, and access, ID, and refresh token
 lifetimes. Shauth applies the token lifetimes to every paginated Ory Hydra

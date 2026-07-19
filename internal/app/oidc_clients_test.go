@@ -29,6 +29,9 @@ func TestOIDCClientInputValidate(t *testing.T) {
 		"insecure remote": func(input *oidcClientInput) {
 			input.RedirectURIs = []string{"http://intraktible.dev.e6qu.dev/callback"}
 		},
+		"front-channel origin mismatch": func(input *oidcClientInput) {
+			input.FrontChannelLogoutURI = "https://attacker.example.test/frontchannel-logout"
+		},
 		"fragment": func(input *oidcClientInput) {
 			input.RedirectURIs = []string{"https://intraktible.dev.e6qu.dev/callback#fragment"}
 		},

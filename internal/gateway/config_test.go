@@ -64,6 +64,24 @@ func TestSecurityHeadersAllowOnlyApplicationAndIssuerForms(t *testing.T) {
 	}
 }
 
+func TestFrontchannelLogoutCanOnlyBeFramedByIssuer(t *testing.T) {
+	issuer, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: Config{Issuer: issuer}}
+	request := httptest.NewRequest(http.MethodGet, "https://console.example.test/auth/frontchannel-logout", nil)
+	response := httptest.NewRecorder()
+	server.securityHeaders(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(response, request)
+	want := "default-src 'none'; frame-ancestors https://auth.example.test; base-uri 'none'; form-action 'none'"
+	if actual := response.Header().Get("Content-Security-Policy"); actual != want {
+		t.Fatalf("Content-Security-Policy = %q, want %q", actual, want)
+	}
+	if actual := response.Header().Get("X-Frame-Options"); actual != "" {
+		t.Fatalf("X-Frame-Options blocks provider iframe: %q", actual)
+	}
+}
+
 func TestLoadRejectsProviderOriginAsPostLogoutDestination(t *testing.T) {
 	values := map[string]string{
 		"OIDC_GATEWAY_ISSUER":          "https://auth.example.test",
@@ -111,11 +129,13 @@ func TestSameOriginAcceptsBrowserOriginOrReferer(t *testing.T) {
 
 func TestRelativeReturnToRejectsExternalAndNetworkPathTargets(t *testing.T) {
 	for input, expected := range map[string]string{
-		"":                         "/",
-		"/terminal?workspace=dev":  "/terminal?workspace=dev",
-		"https://attacker.test/":   "/",
-		"//attacker.test/terminal": "/",
-		"terminal":                 "/",
+		"":                           "/",
+		"/terminal?workspace=dev":    "/terminal?workspace=dev",
+		"https://attacker.test/":     "/",
+		"//attacker.test/terminal":   "/",
+		"/\\attacker.test/terminal":  "/",
+		"/%5cattacker.test/terminal": "/",
+		"terminal":                   "/",
 	} {
 		if actual := relativeReturnTo(input); actual != expected {
 			t.Errorf("relativeReturnTo(%q) = %q, want %q", input, actual, expected)

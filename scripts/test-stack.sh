@@ -275,6 +275,36 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'next=/' \
   http://localhost:8080/login >/dev/null
 admin_id=$(docker compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username = 'admin'")
+single_session_setup=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
+	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Flocalhost%3A5556%2Fauth%2Fcallback&state=single-session-setup&nonce=single-session-setup&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$single_session_setup" in
+	http://localhost:8080/oauth/login?login_challenge=*) ;;
+	*) echo "fresh OpenID Connect session did not request Shauth login: ${single_session_setup}" >&2; exit 1 ;;
+esac
+single_session_accept=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$single_session_setup" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$single_session_accept" in
+	http://localhost:8080/oauth2/auth?*login_verifier=*) ;;
+	*) echo "Shauth did not accept the OpenID Connect login session: ${single_session_accept}" >&2; exit 1 ;;
+esac
+curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$single_session_accept" >/dev/null
+current_session_id=$(docker compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM sessions WHERE user_id='${admin_id}'::uuid AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1")
+curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/users' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/sessions/${current_session_id}/revoke"
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)" = 303 ]
+single_session_login=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
+	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Flocalhost%3A5556%2Fauth%2Fcallback&state=single-session-revocation&nonce=single-session-revocation&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$single_session_login" in
+	http://localhost:8080/oauth/login?login_challenge=*) ;;
+	*) echo "revoked OpenID Connect session was still remembered: ${single_session_login}" >&2; exit 1 ;;
+esac
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+	--data-urlencode "_csrf=${csrf_token}" \
+	--data-urlencode 'username=admin' \
+	--data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
+	--data-urlencode 'next=/' \
+	http://localhost:8080/login >/dev/null
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/users/${admin_id}/sessions/revoke" >/dev/null
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \

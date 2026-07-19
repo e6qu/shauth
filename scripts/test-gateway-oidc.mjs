@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import http from "node:http";
 import { chromium } from "playwright";
 
@@ -61,10 +62,45 @@ try {
     role: "admin",
     authorization: undefined,
   });
+
+  const providerSessionID = execFileSync(
+    "docker",
+    ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT provider_session_id FROM oidc_gateway_sessions WHERE client_id='gateway-integration' AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1"],
+    { encoding: "utf8" },
+  ).trim();
+  assert.ok(providerSessionID, "gateway session did not persist its provider session identifier");
+
+  const rejectedFrontchannel = await context.request.get(`http://localhost:5556/auth/frontchannel-logout?iss=${encodeURIComponent("https://attacker.example")}&sid=${encodeURIComponent(providerSessionID)}`);
+  assert.equal(rejectedFrontchannel.status(), 200);
+  await assertSession(context, 200);
+
+  const providerContext = await browser.newContext();
+  try {
+    const acceptedFrontchannel = await providerContext.request.get(`http://localhost:5556/auth/frontchannel-logout?iss=${encodeURIComponent("http://localhost:8080")}&sid=${encodeURIComponent(providerSessionID)}`);
+    assert.equal(acceptedFrontchannel.status(), 200);
+  } finally {
+    await providerContext.close();
+  }
+  await assertSession(context, 401);
+
+  await page.goto("http://localhost:5556/");
+  await page.waitForURL("http://localhost:5556/");
+  await assertSession(context, 200);
   await page.getByRole("button", { name: "Sign out" }).click();
   await waitForURL(page, "http://localhost:5556/auth/signed-out", navigationTrace, browserErrors);
   await page.getByRole("heading", { name: "Signed out" }).waitFor();
   await assertSession(context, 401);
+  const noLocalSessionLogout = await context.request.post("http://localhost:5556/auth/logout", {
+    headers: { origin: "http://localhost:5556" },
+    maxRedirects: 0,
+  });
+  assert.equal(noLocalSessionLogout.status(), 303);
+  const noLocalSessionTarget = new URL(noLocalSessionLogout.headers().location);
+  assert.equal(noLocalSessionTarget.origin, "http://localhost:8080");
+  assert.equal(noLocalSessionTarget.pathname, "/oauth2/sessions/logout");
+  assert.equal(noLocalSessionTarget.searchParams.get("client_id"), "gateway-integration");
+  assert.equal(noLocalSessionTarget.searchParams.get("post_logout_redirect_uri"), "http://localhost:5556/auth/signed-out");
+  assert.equal(noLocalSessionTarget.searchParams.has("id_token_hint"), false);
   await page.goto("http://localhost:8080/apps");
   await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
   assert.deepEqual(browserErrors, []);

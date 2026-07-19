@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -52,7 +53,7 @@ func (store *Store) Create(ctx context.Context, session Session, browserToken []
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("generate ID-token nonce: %w", err)
 	}
-	ciphertext := append(nonce, store.aead.Seal(nil, nonce, []byte(session.IDToken), []byte(store.clientID))...)
+	ciphertext := append(nonce, store.aead.Seal(nil, nonce, []byte(session.IDToken), sessionAdditionalData(store.clientID, store.issuer, session))...)
 	tokenHash := sha256.Sum256(browserToken)
 	_, err := store.pool.Exec(ctx, `INSERT INTO oidc_gateway_sessions
 		(id,client_id,token_hash,issuer,subject,provider_session_id,id_token_ciphertext,username,email,role,created_at,expires_at)
@@ -75,7 +76,7 @@ func (store *Store) Find(ctx context.Context, browserToken []byte, now time.Time
 	if len(ciphertext) < store.aead.NonceSize() {
 		return Session{}, fmt.Errorf("gateway session ID token is corrupt")
 	}
-	plain, err := store.aead.Open(nil, ciphertext[:store.aead.NonceSize()], ciphertext[store.aead.NonceSize():], []byte(store.clientID))
+	plain, err := store.aead.Open(nil, ciphertext[:store.aead.NonceSize()], ciphertext[store.aead.NonceSize():], sessionAdditionalData(store.clientID, store.issuer, session))
 	if err != nil {
 		return Session{}, fmt.Errorf("decrypt gateway session ID token: %w", err)
 	}
@@ -83,9 +84,19 @@ func (store *Store) Find(ctx context.Context, browserToken []byte, now time.Time
 	return session, nil
 }
 
+func sessionAdditionalData(clientID, issuer string, session Session) []byte {
+	value, _ := json.Marshal([5]string{clientID, issuer, session.ID, session.Subject, session.ProviderSessionID})
+	return value
+}
+
 func (store *Store) RevokeToken(ctx context.Context, browserToken []byte, now time.Time) error {
 	tokenHash := sha256.Sum256(browserToken)
 	_, err := store.pool.Exec(ctx, `UPDATE oidc_gateway_sessions SET revoked_at=$3 WHERE client_id=$1 AND token_hash=$2 AND revoked_at IS NULL`, store.clientID, tokenHash[:], now.UTC())
+	return err
+}
+
+func (store *Store) RevokeFrontchannelSession(ctx context.Context, sid string, now time.Time) error {
+	_, err := store.pool.Exec(ctx, `UPDATE oidc_gateway_sessions SET revoked_at=$4 WHERE client_id=$1 AND issuer=$2 AND provider_session_id=$3 AND revoked_at IS NULL`, store.clientID, store.issuer, sid, now.UTC())
 	return err
 }
 

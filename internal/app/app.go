@@ -111,6 +111,20 @@ func validateClientURIs(label string, uris []string) error {
 			return fmt.Errorf("%s %q must use HTTPS unless it targets loopback", label, rawURI)
 		}
 	}
+	if input.FrontChannelLogoutURI != "" {
+		frontchannel, _ := url.Parse(input.FrontChannelLogoutURI)
+		matchedRedirectOrigin := false
+		for _, rawRedirect := range input.RedirectURIs {
+			redirect, _ := url.Parse(rawRedirect)
+			if strings.EqualFold(frontchannel.Scheme, redirect.Scheme) && strings.EqualFold(frontchannel.Host, redirect.Host) {
+				matchedRedirectOrigin = true
+				break
+			}
+		}
+		if !matchedRedirectOrigin {
+			return fmt.Errorf("front-channel logout URI must use the scheme, host, and port of a redirect URI")
+		}
+	}
 	return nil
 }
 
@@ -1385,13 +1399,54 @@ func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("id")
+	userID, err := s.store.SessionUserID(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if err := s.revokeHydraLoginSession(r.Context(), sessionID); err != nil {
+		http.Error(w, "could not revoke OAuth session", http.StatusBadGateway)
+		return
+	}
 	if err := s.store.RevokeSession(r.Context(), sessionID, time.Now()); err != nil {
 		http.Error(w, "could not revoke session", 500)
 		return
 	}
-	http.Redirect(w, r, r.Referer(), 303)
+	http.Redirect(w, r, "/admin/users/"+userID+"/sessions", http.StatusSeeOther)
 }
+
+func (s *Server) revokeHydraLoginSession(ctx context.Context, sessionID string) error {
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/sessions/login"})
+	query := endpoint.Query()
+	query.Set("sid", sessionID)
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
+	if err != nil {
+		return err
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("Hydra login session deletion returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
 func (s *Server) revokeHydraSessions(ctx context.Context, subject string) error {
+	sessions, err := s.store.ListSessions(ctx, subject)
+	if err != nil {
+		return err
+	}
+	for _, session := range sessions {
+		if session.Active {
+			if err := s.revokeHydraLoginSession(ctx, session.ID); err != nil {
+				return err
+			}
+		}
+	}
 	for _, kind := range []string{"login", "consent"} {
 		endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/oauth2/auth/sessions/" + kind})
 		query := endpoint.Query()
@@ -1697,10 +1752,10 @@ func relativeNext(value string) string {
 		return "/"
 	}
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.IsAbs() || !strings.HasPrefix(parsed.Path, "/") {
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || strings.Contains(parsed.Path, "\\") {
 		return "/"
 	}
-	return value
+	return parsed.RequestURI()
 }
 
 func isOIDCNext(value string) bool {

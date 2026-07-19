@@ -185,6 +185,22 @@ func TestOIDCNextDetection(t *testing.T) {
 	}
 }
 
+func TestRelativeNextRejectsExternalAndBackslashTargets(t *testing.T) {
+	for input, expected := range map[string]string{
+		"":                       "/",
+		"/apps?view=mine":        "/apps?view=mine",
+		"https://attacker.test/": "/",
+		"//attacker.test/apps":   "/",
+		"/\\attacker.test/apps":  "/",
+		"/%5cattacker.test/apps": "/",
+		"apps":                   "/",
+	} {
+		if actual := relativeNext(input); actual != expected {
+			t.Errorf("relativeNext(%q) = %q, want %q", input, actual, expected)
+		}
+	}
+}
+
 func TestGitHubStateCookieNamesArePerTransaction(t *testing.T) {
 	first := strings.Repeat("a", 64)
 	second := strings.Repeat("b", 64)
