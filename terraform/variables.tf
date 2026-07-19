@@ -53,8 +53,12 @@ variable "bootstrap_apps" {
     oidc_client_id     = string
     oidc_client_secret = string
     redirect_uris      = list(string)
-    health_url         = string
-    monitoring_url     = string
+    # Optional allowlist of post-logout redirect URIs. When set, a relying
+    # app's RP-initiated logout can return the browser to the app; when
+    # omitted, Hydra falls back to Shauth's default post-logout page.
+    post_logout_redirect_uris = optional(list(string), [])
+    health_url                = string
+    monitoring_url            = string
   }))
   default = []
 }

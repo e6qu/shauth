@@ -79,3 +79,70 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 		t.Fatalf("token endpoint auth method = %q", payload.TokenEndpointAuthMethod)
 	}
 }
+
+func TestMarshalHydraClientPostLogoutRedirectURIs(t *testing.T) {
+	// Present only when the client registers some.
+	withURIs, err := marshalHydraClient(oidcClientInput{
+		ID:                     "e6irc-dev",
+		Name:                   "e6irc",
+		Secret:                 "a-very-long-client-secret-that-is-safe-for-a-test",
+		RedirectURIs:           []string{"https://e6irc.dev.e6qu.dev/api/v1/auth/oidc/shauth/callback"},
+		PostLogoutRedirectURIs: []string{"https://e6irc.dev.e6qu.dev"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		PostLogout []string `json:"post_logout_redirect_uris"`
+	}
+	if err := json.Unmarshal(withURIs, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.PostLogout) != 1 || got.PostLogout[0] != "https://e6irc.dev.e6qu.dev" {
+		t.Fatalf("post_logout_redirect_uris = %#v", got.PostLogout)
+	}
+
+	// Absent (not just empty) when the client registers none, so existing
+	// clients' payloads are unchanged.
+	without, err := marshalHydraClient(oidcClientInput{
+		ID:           "e6irc-dev",
+		Name:         "e6irc",
+		Secret:       "a-very-long-client-secret-that-is-safe-for-a-test",
+		RedirectURIs: []string{"https://e6irc.dev.e6qu.dev/api/v1/auth/oidc/shauth/callback"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := map[string]any{}; json.Unmarshal(without, &m) == nil {
+		if _, present := m["post_logout_redirect_uris"]; present {
+			t.Fatal("post_logout_redirect_uris should be omitted when empty")
+		}
+	}
+}
+
+func TestOIDCClientInputValidatesPostLogoutRedirectURIs(t *testing.T) {
+	base := oidcClientInput{
+		ID:           "e6irc-dev",
+		Name:         "e6irc",
+		Secret:       "0123456789abcdef0123456789abcdef",
+		RedirectURIs: []string{"https://e6irc.dev.e6qu.dev/api/v1/auth/oidc/shauth/callback"},
+	}
+	ok := base
+	ok.PostLogoutRedirectURIs = []string{"https://e6irc.dev.e6qu.dev"}
+	if err := ok.validate(); err != nil {
+		t.Fatalf("valid post-logout URI rejected: %v", err)
+	}
+	for name, uri := range map[string]string{
+		"insecure": "http://e6irc.dev.e6qu.dev",
+		"fragment": "https://e6irc.dev.e6qu.dev/#x",
+		"relative": "/logged-out",
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := base
+			bad.PostLogoutRedirectURIs = []string{uri}
+			if err := bad.validate(); err == nil {
+				t.Fatalf("validate accepted invalid post-logout URI %q", uri)
+			}
+		})
+	}
+}
