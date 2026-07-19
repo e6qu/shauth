@@ -799,14 +799,6 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 	for _, client := range clients {
 		byID[client.ID] = client
 	}
-	apps, err := s.store.ListManagedApps(ctx)
-	if err != nil {
-		return fmt.Errorf("list bootstrap managed apps: %w", err)
-	}
-	bySlug := make(map[string]identity.ManagedApp, len(apps))
-	for _, managedApp := range apps {
-		bySlug[managedApp.Slug] = managedApp
-	}
 	for _, bootstrap := range s.config.BootstrapApps {
 		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs}
 		if err := input.validate(); err != nil {
@@ -823,14 +815,8 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		} else if err := s.createHydraClient(ctx, input); err != nil {
 			return fmt.Errorf("create bootstrap OAuth client %q: %w", input.ID, err)
 		}
-		if existing, ok := bySlug[managedApp.Slug]; ok {
-			if existing.Name != managedApp.Name || existing.Description != managedApp.Description || existing.LaunchURL != managedApp.LaunchURL || existing.OIDCClientID != managedApp.OIDCClientID || existing.HealthURL != managedApp.HealthURL || existing.MonitoringURL != managedApp.MonitoringURL {
-				return fmt.Errorf("bootstrap managed app %q conflicts with the registered app", managedApp.Slug)
-			}
-			continue
-		}
-		if _, err := s.store.CreateManagedApp(ctx, managedApp); err != nil {
-			return fmt.Errorf("create bootstrap managed app %q: %w", managedApp.Slug, err)
+		if _, err := s.store.ReconcileBootstrapManagedApp(ctx, managedApp); err != nil {
+			return fmt.Errorf("reconcile bootstrap managed app %q: %w", managedApp.Slug, err)
 		}
 	}
 	return nil

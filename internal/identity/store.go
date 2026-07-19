@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -174,13 +175,7 @@ func (s *Store) DeleteGitHubRoleMapping(ctx context.Context, id string) error {
 }
 
 func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedApp, error) {
-	app.Slug = strings.TrimSpace(app.Slug)
-	app.Name = strings.TrimSpace(app.Name)
-	app.Description = strings.TrimSpace(app.Description)
-	app.LaunchURL = strings.TrimSpace(app.LaunchURL)
-	app.OIDCClientID = strings.TrimSpace(app.OIDCClientID)
-	app.HealthURL = strings.TrimSpace(app.HealthURL)
-	app.MonitoringURL = strings.TrimSpace(app.MonitoringURL)
+	app = normalizeManagedApp(app)
 	if err := ValidateManagedApp(app); err != nil {
 		return ManagedApp{}, err
 	}
@@ -189,6 +184,46 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 		return ManagedApp{}, fmt.Errorf("create managed app: %w", err)
 	}
 	return app, nil
+}
+
+// ReconcileBootstrapManagedApp makes bootstrap configuration authoritative
+// while refusing to take over an administrator-owned slug with another client.
+func (s *Store) ReconcileBootstrapManagedApp(ctx context.Context, app ManagedApp) (ManagedApp, error) {
+	app = normalizeManagedApp(app)
+	if err := ValidateManagedApp(app); err != nil {
+		return ManagedApp{}, err
+	}
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,created_at)
+		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),now())
+		ON CONFLICT (slug) DO UPDATE SET
+			name=EXCLUDED.name,
+			description=EXCLUDED.description,
+			launch_url=EXCLUDED.launch_url,
+			health_url=EXCLUDED.health_url,
+			monitoring_url=EXCLUDED.monitoring_url
+		WHERE managed_apps.oidc_client_id=EXCLUDED.oidc_client_id
+		RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at`,
+		randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL).
+		Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ManagedApp{}, fmt.Errorf("managed app slug %q belongs to another OpenID Connect client", app.Slug)
+	}
+	if err != nil {
+		return ManagedApp{}, fmt.Errorf("reconcile bootstrap managed app: %w", err)
+	}
+	return app, nil
+}
+
+func normalizeManagedApp(app ManagedApp) ManagedApp {
+	app.Slug = strings.TrimSpace(app.Slug)
+	app.Name = strings.TrimSpace(app.Name)
+	app.Description = strings.TrimSpace(app.Description)
+	app.LaunchURL = strings.TrimSpace(app.LaunchURL)
+	app.OIDCClientID = strings.TrimSpace(app.OIDCClientID)
+	app.HealthURL = strings.TrimSpace(app.HealthURL)
+	app.MonitoringURL = strings.TrimSpace(app.MonitoringURL)
+	return app
 }
 
 func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {

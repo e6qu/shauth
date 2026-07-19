@@ -5,6 +5,9 @@
   "scripts": {
     "test:browser": "node scripts/test-browser-oidc.mjs"
   },
+  "allowScripts": {
+    "fsevents@2.3.2": true
+  },
   "devDependencies": {
     "playwright": "1.61.1"
   }
