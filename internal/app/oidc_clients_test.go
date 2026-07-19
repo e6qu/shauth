@@ -32,6 +32,12 @@ func TestOIDCClientInputValidate(t *testing.T) {
 		"front-channel origin mismatch": func(input *oidcClientInput) {
 			input.FrontChannelLogoutURI = "https://attacker.example.test/frontchannel-logout"
 		},
+		"back-channel origin mismatch": func(input *oidcClientInput) {
+			input.BackChannelLogoutURI = "https://attacker.example.test/backchannel-logout"
+		},
+		"post-logout origin mismatch": func(input *oidcClientInput) {
+			input.PostLogoutRedirectURIs = []string{"https://attacker.example.test/signed-out"}
+		},
 		"fragment": func(input *oidcClientInput) {
 			input.RedirectURIs = []string{"https://intraktible.dev.e6qu.dev/callback#fragment"}
 		},
@@ -84,8 +90,8 @@ func TestOIDCClientInputAllowsLoopbackHTTP(t *testing.T) {
 		ID:                     "local-client",
 		Name:                   "Local client",
 		Secret:                 "0123456789abcdef0123456789abcdef",
-		RedirectURIs:           []string{"http://127.0.0.1:8080/callback", "http://localhost:3000/callback"},
-		PostLogoutRedirectURIs: []string{"http://localhost:3000/"},
+		RedirectURIs:           []string{"http://127.0.0.1:8080/callback", "http://127.0.0.1:8080/second-callback"},
+		PostLogoutRedirectURIs: []string{"http://127.0.0.1:8080/"},
 		BackChannelLogoutURI:   "http://127.0.0.1:8080/backchannel-logout",
 	}
 	if err := input.validate(); err != nil {
@@ -137,6 +143,7 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 		ClientID                string   `json:"client_id"`
 		ClientSecret            string   `json:"client_secret"`
 		GrantTypes              []string `json:"grant_types"`
+		ResponseTypes           []string `json:"response_types"`
 		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
 		PostLogoutRedirectURIs  []string `json:"post_logout_redirect_uris"`
 		FrontChannelLogoutURI   string   `json:"frontchannel_logout_uri"`
@@ -156,6 +163,9 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 	if len(payload.GrantTypes) != 2 || payload.GrantTypes[0] != "authorization_code" || payload.GrantTypes[1] != "refresh_token" {
 		t.Fatalf("grant types = %#v", payload.GrantTypes)
 	}
+	if !sameStringSet(payload.ResponseTypes, []string{"code"}) {
+		t.Fatalf("response types = %#v", payload.ResponseTypes)
+	}
 	if payload.TokenEndpointAuthMethod != "client_secret_post" {
 		t.Fatalf("token endpoint auth method = %q", payload.TokenEndpointAuthMethod)
 	}
@@ -167,6 +177,23 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 	}
 	if payload.AccessTokenLifespan != "15m0s" || payload.IDTokenLifespan != "15m0s" || payload.RefreshTokenLifespan != "720h0m0s" {
 		t.Fatalf("token lifespans = %#v", payload)
+	}
+}
+
+func TestManagedAppAndOIDCClientUseOneOrigin(t *testing.T) {
+	app := identity.ManagedApp{LaunchURL: "https://app.example.test/ui", OIDCClientID: "app-client"}
+	client := oidcClient{
+		ID:                     "app-client",
+		RedirectURIs:           []string{"https://app.example.test/auth/callback"},
+		PostLogoutRedirectURIs: []string{"https://app.example.test/auth/signed-out"},
+		BackChannelLogoutURI:   "https://app.example.test/auth/backchannel-logout",
+	}
+	if err := validateManagedAppClient(app, client); err != nil {
+		t.Fatalf("matching registration rejected: %v", err)
+	}
+	app.LaunchURL = "https://other.example.test/ui"
+	if err := validateManagedAppClient(app, client); err == nil {
+		t.Fatal("managed app origin mismatch was accepted")
 	}
 }
 

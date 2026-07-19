@@ -69,6 +69,10 @@ and catalog records idempotently during Shauth startup. The input is stored only
 in the Shauth runtime secret and contains each confidential client secret,
 sign-in and post-logout redirect URIs, at least one front-channel or
 back-channel logout URI, launch URL, health URL, and optional monitoring URL.
+Every coordinate for one connected application uses the same scheme, host, and
+port. Shauth verifies that invariant against both its PostgreSQL catalog record
+and Ory Hydra's reconciled client before startup succeeds; bootstrap
+configuration cannot take over an administrator-owned slug or client ID.
 
 ## Native relying-party gateway
 
@@ -88,6 +92,11 @@ removes the inbound `Authorization` header. Its `/auth/session` endpoint exposes
 the verified user to the first-party UI, and `POST /auth/logout` performs an OIDC
 relying-party-initiated logout using the stored ID token. Signed back-channel
 logout and correlated front-channel logout revoke every matching local session.
+Security headers on gateway-owned `/auth/` responses deny framing except for
+the issuer-only front-channel logout document. Proxied application responses
+retain the upstream application's own Content Security Policy and
+`X-Frame-Options`, so same-origin application frames keep working without the
+identity gateway weakening or replacing their policy.
 
 The gateway requires `OIDC_GATEWAY_ISSUER`, `OIDC_GATEWAY_CLIENT_ID`,
 `OIDC_GATEWAY_CLIENT_SECRET`, `OIDC_GATEWAY_PUBLIC_URL`,

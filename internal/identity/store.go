@@ -76,6 +76,8 @@ type ManagedApp struct {
 
 type Store struct{ pool *pgxpool.Pool }
 
+const bootstrapManagedAppsLockID int64 = 0x5348415554484150
+
 func NewStore(pool *pgxpool.Pool) (*Store, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("identity store requires a PostgreSQL pool")
@@ -84,6 +86,23 @@ func NewStore(pool *pgxpool.Pool) (*Store, error) {
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+
+// LockBootstrapManagedApps serializes the cross-system PostgreSQL/Ory Hydra
+// reconciliation performed by every Shauth replica during startup.
+func (s *Store) LockBootstrapManagedApps(ctx context.Context) (func(), error) {
+	connection, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire bootstrap reconciliation connection: %w", err)
+	}
+	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock($1)`, bootstrapManagedAppsLockID); err != nil {
+		connection.Release()
+		return nil, fmt.Errorf("lock bootstrap reconciliation: %w", err)
+	}
+	return func() {
+		_, _ = connection.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, bootstrapManagedAppsLockID)
+		connection.Release()
+	}, nil
+}
 
 func (s *Store) SessionPolicy(ctx context.Context) (SessionPolicy, error) {
 	var absoluteSeconds, idleSeconds, oidcSeconds, accessSeconds, idSeconds, refreshSeconds int64
@@ -251,6 +270,33 @@ func (s *Store) ReconcileBootstrapManagedApp(ctx context.Context, app ManagedApp
 	return app, nil
 }
 
+// ValidateBootstrapManagedAppOwnership reports whether the catalog already
+// contains the exact slug/client pair that bootstrap is allowed to reconcile.
+// Either coordinate belonging to a different record is an ownership conflict.
+func (s *Store) ValidateBootstrapManagedAppOwnership(ctx context.Context, app ManagedApp) (bool, error) {
+	app = normalizeManagedApp(app)
+	rows, err := s.pool.Query(ctx, `SELECT slug,oidc_client_id FROM managed_apps WHERE slug=$1 OR oidc_client_id=$2`, app.Slug, app.OIDCClientID)
+	if err != nil {
+		return false, fmt.Errorf("query bootstrap managed app ownership: %w", err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var slug, clientID string
+		if err := rows.Scan(&slug, &clientID); err != nil {
+			return false, fmt.Errorf("scan bootstrap managed app ownership: %w", err)
+		}
+		if slug != app.Slug || clientID != app.OIDCClientID {
+			return false, fmt.Errorf("managed app slug %q or OpenID Connect client %q belongs to another registration", app.Slug, app.OIDCClientID)
+		}
+		found = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("read bootstrap managed app ownership: %w", err)
+	}
+	return found, nil
+}
+
 func normalizeManagedApp(app ManagedApp) ManagedApp {
 	app.Slug = strings.TrimSpace(app.Slug)
 	app.Name = strings.TrimSpace(app.Name)
@@ -309,6 +355,14 @@ func (s *Store) DeleteManagedApp(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *Store) ManagedAppUsesOIDCClient(ctx context.Context, clientID string) (bool, error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_apps WHERE oidc_client_id=$1)`, strings.TrimSpace(clientID)).Scan(&exists); err != nil {
+		return false, fmt.Errorf("query managed app OAuth client: %w", err)
+	}
+	return exists, nil
+}
+
 func validateGitHubRoleMapping(kind, target string, role Role) error {
 	if kind != "user" && kind != "organization" && kind != "team" {
 		return fmt.Errorf("GitHub mapping kind must be user, organization, or team")
@@ -343,13 +397,23 @@ func ValidateManagedApp(app ManagedApp) error {
 	if err != nil || !validManagedAppURL(healthURL) {
 		return fmt.Errorf("app health URL must use HTTPS unless it targets loopback")
 	}
+	if !sameURLOrigin(launchURL, healthURL) {
+		return fmt.Errorf("app launch and health URLs must use one application origin")
+	}
 	if app.MonitoringURL != "" {
 		monitoringURL, err := url.ParseRequestURI(app.MonitoringURL)
 		if err != nil || !validManagedAppURL(monitoringURL) {
 			return fmt.Errorf("app monitoring URL must use HTTPS unless it targets loopback")
 		}
+		if !sameURLOrigin(launchURL, monitoringURL) {
+			return fmt.Errorf("app launch and monitoring URLs must use one application origin")
+		}
 	}
 	return nil
+}
+
+func sameURLOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }
 
 func validManagedAppURL(value *url.URL) bool {

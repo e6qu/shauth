@@ -55,6 +55,9 @@ type oidcClient struct {
 	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
 	FrontChannelLogoutURI  string   `json:"frontchannel_logout_uri"`
 	BackChannelLogoutURI   string   `json:"backchannel_logout_uri"`
+	GrantTypes             []string `json:"grant_types"`
+	ResponseTypes          []string `json:"response_types"`
+	TokenEndpointAuth      string   `json:"token_endpoint_auth_method"`
 }
 
 type oidcClientInput struct {
@@ -98,19 +101,53 @@ func (input oidcClientInput) validate() error {
 	if err := validateClientURIs("back-channel logout URI", []string{input.BackChannelLogoutURI}); err != nil {
 		return err
 	}
-	if input.FrontChannelLogoutURI != "" {
-		frontchannel, _ := url.Parse(input.FrontChannelLogoutURI)
-		matchedRedirectOrigin := false
-		for _, rawRedirect := range input.RedirectURIs {
-			redirect, _ := url.Parse(rawRedirect)
-			if strings.EqualFold(frontchannel.Scheme, redirect.Scheme) && strings.EqualFold(frontchannel.Host, redirect.Host) {
-				matchedRedirectOrigin = true
-				break
-			}
+	if _, err := oidcClientOrigin(input.RedirectURIs, input.PostLogoutRedirectURIs, input.FrontChannelLogoutURI, input.BackChannelLogoutURI); err != nil {
+		return err
+	}
+	return nil
+}
+
+func oidcClientOrigin(redirectURIs, postLogoutRedirectURIs []string, frontChannelLogoutURI, backChannelLogoutURI string) (*url.URL, error) {
+	coordinates := append(append([]string{}, redirectURIs...), postLogoutRedirectURIs...)
+	coordinates = append(coordinates, frontChannelLogoutURI, backChannelLogoutURI)
+	var origin *url.URL
+	for _, raw := range coordinates {
+		if raw == "" {
+			continue
 		}
-		if !matchedRedirectOrigin {
-			return fmt.Errorf("front-channel logout URI must use the scheme, host, and port of a redirect URI")
+		coordinate, err := url.Parse(raw)
+		if err != nil {
+			return nil, fmt.Errorf("application coordinate %q is invalid", raw)
 		}
+		if origin == nil {
+			origin = &url.URL{Scheme: strings.ToLower(coordinate.Scheme), Host: strings.ToLower(coordinate.Host)}
+			continue
+		}
+		if !sameOrigin(origin, coordinate) {
+			return nil, fmt.Errorf("all redirect and logout URIs must use one application origin")
+		}
+	}
+	if origin == nil {
+		return nil, fmt.Errorf("application origin is unavailable")
+	}
+	return origin, nil
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
+}
+
+func validateManagedAppClient(app identity.ManagedApp, client oidcClient) error {
+	if app.OIDCClientID != client.ID {
+		return fmt.Errorf("managed app OpenID Connect client does not match the registered client")
+	}
+	clientOrigin, err := oidcClientOrigin(client.RedirectURIs, client.PostLogoutRedirectURIs, client.FrontChannelLogoutURI, client.BackChannelLogoutURI)
+	if err != nil {
+		return err
+	}
+	launchURL, err := url.Parse(app.LaunchURL)
+	if err != nil || !sameOrigin(clientOrigin, launchURL) {
+		return fmt.Errorf("managed app and OpenID Connect client must use one application origin")
 	}
 	return nil
 }
@@ -793,12 +830,24 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not verify OAuth client", http.StatusBadGateway)
 		return
 	}
-	clientFound := false
+	var registeredClient *oidcClient
 	for _, client := range clients {
-		clientFound = clientFound || client.ID == app.OIDCClientID
+		if client.ID == app.OIDCClientID {
+			clientCopy := client
+			registeredClient = &clientCopy
+			break
+		}
 	}
-	if !clientFound {
+	if registeredClient == nil {
 		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape("register the OIDC client before adding its app"), http.StatusSeeOther)
+		return
+	}
+	if err := identity.ValidateManagedApp(app); err != nil {
+		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	if err := validateManagedAppClient(app, *registeredClient); err != nil {
+		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 	if _, err := s.store.CreateManagedApp(r.Context(), app); err != nil {
@@ -876,23 +925,37 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid client ID", http.StatusBadRequest)
 		return
 	}
-	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + url.PathEscape(clientID)})
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, endpoint.String(), nil)
+	used, err := s.store.ManagedAppUsesOIDCClient(r.Context(), clientID)
 	if err != nil {
-		http.Error(w, "could not build OAuth client request", http.StatusInternalServerError)
+		http.Error(w, "could not verify connected apps", http.StatusInternalServerError)
 		return
 	}
-	response, err := s.httpClient.Do(request)
-	if err != nil {
-		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
+	if used {
+		http.Redirect(w, r, "/admin/clients?error="+url.QueryEscape("delete the connected app before deleting its OAuth client"), http.StatusSeeOther)
 		return
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
+	if err := s.deleteHydraClient(r.Context(), clientID); err != nil {
 		http.Error(w, "could not delete OAuth client", http.StatusBadGateway)
 		return
 	}
 	http.Redirect(w, r, "/admin/clients", http.StatusSeeOther)
+}
+
+func (s *Server) deleteHydraClient(ctx context.Context, clientID string) error {
+	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + url.PathEscape(clientID)})
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
+	if err != nil {
+		return err
+	}
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("Hydra delete client returned %s", response.Status)
+	}
+	return nil
 }
 
 type sessionPolicyView struct {
@@ -1184,6 +1247,43 @@ func marshalHydraClient(input oidcClientInput, policy identity.SessionPolicy) ([
 	return json.Marshal(payload)
 }
 
+func (s *Server) assertHydraClientReconciled(ctx context.Context, input oidcClientInput) error {
+	clients, err := s.hydraClients(ctx)
+	if err != nil {
+		return err
+	}
+	for _, client := range clients {
+		if client.ID != input.ID {
+			continue
+		}
+		if client.Name != input.Name || !sameStringSet(client.RedirectURIs, input.RedirectURIs) || !sameStringSet(client.PostLogoutRedirectURIs, input.PostLogoutRedirectURIs) || client.FrontChannelLogoutURI != input.FrontChannelLogoutURI || client.BackChannelLogoutURI != input.BackChannelLogoutURI {
+			return fmt.Errorf("registered redirect or logout coordinates differ from bootstrap configuration")
+		}
+		if client.TokenEndpointAuth != "client_secret_post" || !sameStringSet(client.GrantTypes, []string{"authorization_code", "refresh_token"}) || !sameStringSet(client.ResponseTypes, []string{"code"}) {
+			return fmt.Errorf("registered token authentication contract differs from bootstrap configuration")
+		}
+		return nil
+	}
+	return fmt.Errorf("registered client was not returned by the authorization provider")
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	want := make(map[string]int, len(left))
+	for _, value := range left {
+		want[value]++
+	}
+	for _, value := range right {
+		want[value]--
+		if want[value] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) updateHydraClient(ctx context.Context, input oidcClientInput) error {
 	policy, err := s.store.SessionPolicy(ctx)
 	if err != nil {
@@ -1211,12 +1311,46 @@ func (s *Server) updateHydraClient(ctx context.Context, input oidcClientInput) e
 }
 
 func (s *Server) bootstrapApps(ctx context.Context) error {
-	if len(s.config.BootstrapApps) == 0 {
-		return nil
+	type bootstrapRegistration struct {
+		input        oidcClientInput
+		managedApp   identity.ManagedApp
+		owned        bool
+		clientExists bool
 	}
+	registrations := make([]bootstrapRegistration, 0, len(s.config.BootstrapApps))
+	seenSlugs := make(map[string]struct{}, len(s.config.BootstrapApps))
+	seenClientIDs := make(map[string]struct{}, len(s.config.BootstrapApps))
+	for _, bootstrap := range s.config.BootstrapApps {
+		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs, PostLogoutRedirectURIs: bootstrap.PostLogoutRedirectURIs, FrontChannelLogoutURI: bootstrap.FrontChannelLogoutURI, BackChannelLogoutURI: bootstrap.BackChannelLogoutURI}
+		if err := input.validate(); err != nil {
+			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
+		}
+		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, HealthURL: bootstrap.HealthURL, MonitoringURL: bootstrap.MonitoringURL}
+		if err := identity.ValidateManagedApp(managedApp); err != nil {
+			return fmt.Errorf("bootstrap managed app %q: %w", bootstrap.Slug, err)
+		}
+		registeredClient := oidcClient{ID: input.ID, RedirectURIs: input.RedirectURIs, PostLogoutRedirectURIs: input.PostLogoutRedirectURIs, FrontChannelLogoutURI: input.FrontChannelLogoutURI, BackChannelLogoutURI: input.BackChannelLogoutURI}
+		if err := validateManagedAppClient(managedApp, registeredClient); err != nil {
+			return fmt.Errorf("bootstrap app %q registration: %w", bootstrap.Slug, err)
+		}
+		if _, exists := seenSlugs[managedApp.Slug]; exists {
+			return fmt.Errorf("bootstrap managed app slug %q is duplicated", managedApp.Slug)
+		}
+		if _, exists := seenClientIDs[input.ID]; exists {
+			return fmt.Errorf("bootstrap OAuth client %q is duplicated", input.ID)
+		}
+		seenSlugs[managedApp.Slug] = struct{}{}
+		seenClientIDs[input.ID] = struct{}{}
+		registrations = append(registrations, bootstrapRegistration{input: input, managedApp: managedApp})
+	}
+	unlock, err := s.store.LockBootstrapManagedApps(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	deadline := time.Now().Add(bootstrapRetryTimeout)
 	var clients []oidcClient
-	var err error
+	err = nil
 	for {
 		clients, err = s.hydraClients(ctx)
 		if err == nil {
@@ -1232,24 +1366,64 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 	for _, client := range clients {
 		byID[client.ID] = client
 	}
-	for _, bootstrap := range s.config.BootstrapApps {
-		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs, PostLogoutRedirectURIs: bootstrap.PostLogoutRedirectURIs, FrontChannelLogoutURI: bootstrap.FrontChannelLogoutURI, BackChannelLogoutURI: bootstrap.BackChannelLogoutURI}
-		if err := input.validate(); err != nil {
-			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
+	for index := range registrations {
+		registration := &registrations[index]
+		owned, err := s.store.ValidateBootstrapManagedAppOwnership(ctx, registration.managedApp)
+		if err != nil {
+			return fmt.Errorf("bootstrap managed app %q ownership: %w", registration.managedApp.Slug, err)
 		}
-		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, HealthURL: bootstrap.HealthURL, MonitoringURL: bootstrap.MonitoringURL}
-		if err := identity.ValidateManagedApp(managedApp); err != nil {
-			return fmt.Errorf("bootstrap managed app %q: %w", bootstrap.Slug, err)
+		registration.owned = owned
+		_, registration.clientExists = byID[registration.input.ID]
+		if registration.clientExists && !registration.owned {
+			return fmt.Errorf("bootstrap OAuth client %q exists without its matching managed app", registration.input.ID)
 		}
-		if _, ok := byID[input.ID]; ok {
-			if err := s.updateHydraClient(ctx, input); err != nil {
-				return fmt.Errorf("update bootstrap OAuth client %q: %w", input.ID, err)
+	}
+	for _, registration := range registrations {
+		if registration.clientExists {
+			if err := s.updateHydraClient(ctx, registration.input); err != nil {
+				return fmt.Errorf("update bootstrap OAuth client %q: %w", registration.input.ID, err)
 			}
-		} else if err := s.createHydraClient(ctx, input); err != nil {
-			return fmt.Errorf("create bootstrap OAuth client %q: %w", input.ID, err)
+		} else if err := s.createHydraClient(ctx, registration.input); err != nil {
+			return fmt.Errorf("create bootstrap OAuth client %q: %w", registration.input.ID, err)
 		}
-		if _, err := s.store.ReconcileBootstrapManagedApp(ctx, managedApp); err != nil {
-			return fmt.Errorf("reconcile bootstrap managed app %q: %w", managedApp.Slug, err)
+		if _, err := s.store.ReconcileBootstrapManagedApp(ctx, registration.managedApp); err != nil {
+			if !registration.clientExists {
+				if rollbackErr := s.deleteHydraClient(ctx, registration.input.ID); rollbackErr != nil {
+					return fmt.Errorf("reconcile bootstrap managed app %q: %v; remove newly created OAuth client: %w", registration.managedApp.Slug, err, rollbackErr)
+				}
+			}
+			return fmt.Errorf("reconcile bootstrap managed app %q: %w", registration.managedApp.Slug, err)
+		}
+		if err := s.assertHydraClientReconciled(ctx, registration.input); err != nil {
+			return fmt.Errorf("verify bootstrap OAuth client %q: %w", registration.input.ID, err)
+		}
+	}
+	return s.assertManagedAppRegistrations(ctx)
+}
+
+func (s *Server) assertManagedAppRegistrations(ctx context.Context) error {
+	apps, err := s.store.ListManagedApps(ctx)
+	if err != nil {
+		return fmt.Errorf("list managed apps for registration verification: %w", err)
+	}
+	clients, err := s.hydraClients(ctx)
+	if err != nil {
+		return fmt.Errorf("list OAuth clients for registration verification: %w", err)
+	}
+	byID := make(map[string]oidcClient, len(clients))
+	for _, client := range clients {
+		byID[client.ID] = client
+	}
+	for _, app := range apps {
+		if err := identity.ValidateManagedApp(app); err != nil {
+			return fmt.Errorf("managed app %q registration: %w", app.Slug, err)
+		}
+		client, exists := byID[app.OIDCClientID]
+		if !exists {
+			return fmt.Errorf("managed app %q references missing OAuth client %q", app.Slug, app.OIDCClientID)
+		}
+		if err := validateManagedAppClient(app, client); err != nil {
+			return fmt.Errorf("managed app %q registration: %w", app.Slug, err)
 		}
 	}
 	return nil
