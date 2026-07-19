@@ -162,6 +162,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /assets/theme.js", serveThemeScript)
 	mux.Handle("/.well-known/{path...}", s.hydraPublic)
 	mux.Handle("/oauth2/{path...}", s.hydraPublic)
+	mux.Handle("/userinfo", s.hydraPublic)
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /apps", s.apps)
 	mux.HandleFunc("GET /login", s.login)

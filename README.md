@@ -30,6 +30,10 @@ challenge subject against the signed-in local user, revokes the local browser
 session, and accepts the Hydra logout request. Relying applications clear their
 own session and navigate the browser to Shauth's published
 `/oauth2/sessions/logout` endpoint; they do not POST cross-origin to Shauth.
+Shauth exposes Ory Hydra's complete public OpenID Connect surface at its public
+issuer, including discovery, authorization, token, UserInfo, revocation,
+introspection, and front-channel logout endpoints. Relying applications never
+connect to Hydra's private task coordinate directly.
 
 Administrators can invalidate one Shauth browser session or invalidate every
 session for a user. Subject-wide invalidation deletes the user's Hydra login

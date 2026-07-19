@@ -15,6 +15,7 @@ export POSTGRES_PASSWORD
 HYDRA_SYSTEM_SECRET=$(random_secret)
 export HYDRA_SYSTEM_SECRET
 export HYDRA_DSN="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/hydra?sslmode=disable"
+export HYDRA_PUBLIC_URL=http://localhost:8080
 export SHAUTH_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/shauth?sslmode=disable"
 export GITHUB_CLIENT_ID=local-integration-client
 export GITHUB_CLIENT_SECRET=local-integration-secret
@@ -105,7 +106,7 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'monitoring_url=https://integration.example.test/monitoring' \
   http://localhost:8080/admin/apps | grep -q 'Integration app'
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
-  'http://localhost:4444/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |
+  'http://localhost:8080/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 consent_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$login_location" |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
@@ -117,7 +118,7 @@ consent_page_location=$(curl --fail --silent --show-error --dump-header - --outp
 callback_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$consent_page_location" |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$callback_location" in
-	http://localhost:4444/oauth2/auth?*consent_verifier=*) ;;
+	http://localhost:8080/oauth2/auth?*consent_verifier=*) ;;
 	*) echo "managed application did not receive automatic consent: ${callback_location}" >&2; exit 1 ;;
 esac
 final_callback_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$callback_location" |
@@ -130,16 +131,25 @@ token_response=$(curl --fail --silent --show-error \
 	--data-urlencode 'redirect_uri=http://localhost:5555/callback' \
 	--data-urlencode 'client_id=shauth-integration-client' \
 	--data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
-	http://localhost:4444/oauth2/token)
+	http://localhost:8080/oauth2/token)
+access_token=$(printf '%s' "$token_response" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 refresh_token=$(printf '%s' "$token_response" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
+[ -n "$access_token" ]
 [ -n "$refresh_token" ]
+printf '%s\n' 'reading OpenID Connect UserInfo through Shauth'
+userinfo_response=$(curl --fail --silent --show-error \
+	--header "Authorization: Bearer ${access_token}" \
+	http://localhost:8080/userinfo)
+printf '%s' "$userinfo_response" | grep -q '"email":"admin@localhost.test"'
+printf '%s' "$userinfo_response" | grep -q '"preferred_username":"admin"'
+printf '%s' "$userinfo_response" | grep -q '"role":"admin"'
 printf '%s\n' 'refreshing access token'
 curl --fail --silent --show-error \
 	--data-urlencode 'grant_type=refresh_token' \
 	--data-urlencode "refresh_token=${refresh_token}" \
 	--data-urlencode 'client_id=shauth-integration-client' \
 	--data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
-	http://localhost:4444/oauth2/token | grep -q '"access_token"'
+	http://localhost:8080/oauth2/token | grep -q '"access_token"'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'admin@localhost.test'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin | grep -q 'Private administration'
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
@@ -195,7 +205,7 @@ esac
 logout_verifier=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_callback" |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$logout_verifier" in
-	http://localhost:4444/oauth2/sessions/logout?logout_verifier=*) ;;
+	http://localhost:8080/oauth2/sessions/logout?logout_verifier=*) ;;
 	*) echo "unexpected Hydra logout verifier: ${logout_verifier}" >&2; exit 1 ;;
 esac
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_verifier" | grep -q 'One secure sign-in for your e6qu services.'
@@ -228,7 +238,7 @@ if curl --fail --silent \
 	--data-urlencode "refresh_token=${refresh_token}" \
 	--data-urlencode 'client_id=shauth-integration-client' \
 	--data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
-	http://localhost:4444/oauth2/token >/dev/null 2>&1; then
+	http://localhost:8080/oauth2/token >/dev/null 2>&1; then
 	echo 'revoked OIDC refresh token was accepted' >&2
 	exit 1
 fi
