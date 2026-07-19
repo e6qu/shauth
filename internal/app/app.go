@@ -50,10 +50,11 @@ type oidcClient struct {
 }
 
 type oidcClientInput struct {
-	ID           string
-	Name         string
-	Secret       string
-	RedirectURIs []string
+	ID                     string
+	Name                   string
+	Secret                 string
+	RedirectURIs           []string
+	PostLogoutRedirectURIs []string
 }
 
 func (input oidcClientInput) validate() error {
@@ -69,13 +70,23 @@ func (input oidcClientInput) validate() error {
 	if len(input.RedirectURIs) == 0 {
 		return fmt.Errorf("at least one redirect URI is required")
 	}
-	for _, rawURI := range input.RedirectURIs {
+	if err := validateClientURIs("redirect URI", input.RedirectURIs); err != nil {
+		return err
+	}
+	// Post-logout redirect URIs are optional (a client may omit them), but
+	// each supplied one must satisfy the same absolute-HTTPS rules so an
+	// RP-initiated logout can be returned to a trusted origin.
+	return validateClientURIs("post-logout redirect URI", input.PostLogoutRedirectURIs)
+}
+
+func validateClientURIs(label string, uris []string) error {
+	for _, rawURI := range uris {
 		uri, err := url.Parse(rawURI)
 		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.Fragment != "" {
-			return fmt.Errorf("redirect URI %q must be an absolute URI without a fragment", rawURI)
+			return fmt.Errorf("%s %q must be an absolute URI without a fragment", label, rawURI)
 		}
 		if uri.Scheme != "https" && !isLoopbackRedirect(uri) {
-			return fmt.Errorf("redirect URI %q must use HTTPS unless it targets loopback", rawURI)
+			return fmt.Errorf("%s %q must use HTTPS unless it targets loopback", label, rawURI)
 		}
 	}
 	return nil
@@ -659,6 +670,11 @@ func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
 			input.RedirectURIs = append(input.RedirectURIs, uri)
 		}
 	}
+	for _, rawURI := range strings.Split(r.Form.Get("post_logout_redirect_uris"), "\n") {
+		if uri := strings.TrimSpace(rawURI); uri != "" {
+			input.PostLogoutRedirectURIs = append(input.PostLogoutRedirectURIs, uri)
+		}
+	}
 	if err := input.validate(); err != nil {
 		http.Redirect(w, r, "/admin/clients?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
@@ -752,6 +768,12 @@ func marshalHydraClient(input oidcClientInput) ([]byte, error) {
 		"scope":                      "openid offline_access profile email",
 		"token_endpoint_auth_method": "client_secret_post",
 	}
+	// Only send post_logout_redirect_uris when the client registers some, so
+	// existing clients are unchanged. Hydra honours these as the allowlist
+	// for RP-initiated logout's post_logout_redirect_uri.
+	if len(input.PostLogoutRedirectURIs) > 0 {
+		payload["post_logout_redirect_uris"] = input.PostLogoutRedirectURIs
+	}
 	return json.Marshal(payload)
 }
 
@@ -800,7 +822,7 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		byID[client.ID] = client
 	}
 	for _, bootstrap := range s.config.BootstrapApps {
-		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs}
+		input := oidcClientInput{ID: bootstrap.OIDCClientID, Name: bootstrap.Name, Secret: bootstrap.OIDCClientSecret, RedirectURIs: bootstrap.RedirectURIs, PostLogoutRedirectURIs: bootstrap.PostLogoutRedirectURIs}
 		if err := input.validate(); err != nil {
 			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
 		}

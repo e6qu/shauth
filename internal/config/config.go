@@ -41,8 +41,12 @@ type BootstrapApp struct {
 	OIDCClientID     string   `json:"oidc_client_id"`
 	OIDCClientSecret string   `json:"oidc_client_secret"`
 	RedirectURIs     []string `json:"redirect_uris"`
-	HealthURL        string   `json:"health_url"`
-	MonitoringURL    string   `json:"monitoring_url"`
+	// Optional allowlist of post-logout redirect URIs. When set, Hydra
+	// honours them so a relying app's RP-initiated logout returns the
+	// browser to the app instead of Shauth's default post-logout page.
+	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris,omitempty"`
+	HealthURL              string   `json:"health_url"`
+	MonitoringURL          string   `json:"monitoring_url"`
 }
 
 // Load reads and validates the complete production configuration.
