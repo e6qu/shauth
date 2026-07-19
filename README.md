@@ -13,6 +13,9 @@ OpenID Connect clients, invitations, sessions, and connector health. Client
 secrets are write-only: an administrator supplies the secret when registering
 the client and stores the same value in the relying service's AWS Secrets
 Manager secret. Shauth never renders or returns it afterward.
+The pinned HTMX 2.0.8 browser asset is embedded in the Shauth binary and served
+from the Shauth origin with an immutable URL and Subresource Integrity digest.
+Shauth pages do not depend on a browser-side CDN or other external asset host.
 
 ## Brokered application login
 

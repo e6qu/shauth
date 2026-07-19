@@ -42,8 +42,8 @@ const bootstrapRetryInterval = time.Second
 const bootstrapRetryTimeout = 45 * time.Second
 const outboundRequestTimeout = 15 * time.Second
 
-const baseContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-const oidcContentSecurityPolicy = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"
+const baseContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+const oidcContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"
 const oidcLogoutContentSecurityPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 
 var oidcClientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{2,127}$`)
@@ -264,6 +264,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /assets/theme.js", serveThemeScript)
+	mux.HandleFunc("GET "+htmxAssetPath, serveHTMX)
 	mux.Handle("/.well-known/{path...}", s.hydraPublic)
 	mux.Handle("/oauth2/{path...}", s.hydraPublic)
 	mux.Handle("/userinfo", s.hydraPublic)

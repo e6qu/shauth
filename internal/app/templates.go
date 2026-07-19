@@ -12,7 +12,7 @@ const pageTemplates = `
   <meta name="theme-color" content="#6d28d9">
   <title>Shauth · e6qu identity</title>
   <script src="/assets/theme.js" defer></script>
-  <script src="https://unpkg.com/htmx.org@2.0.8" defer></script>
+  <script src="/assets/htmx-2.0.8.min.js" integrity="sha384-LvL6Vcojcqp2iIBXpGiD8EjaxVMhlKxfJCX1ZWJtWPWF5ki0j7nfzzog6M0nzjZM" defer></script>
   <style>
     :root{color-scheme:light;--bg:#f6f7ff;--surface:#fff;--surface-strong:#f0edff;--text:#1f1833;--muted:#625d72;--border:#d7d2e5;--brand:#6d28d9;--brand-strong:#531caf;--brand-soft:#e9ddff;--accent:#007f89;--accent-soft:#c8f5ef;--danger:#bc1746;--danger-soft:#ffe0ea;--success:#08764d;--success-soft:#cff7df;--focus:#f59e0b;--shadow:0 18px 42px rgba(51,27,104,.12);--radius:18px}
     @media(prefers-color-scheme:dark){:root[data-theme="system"]{color-scheme:dark;--bg:#161124;--surface:#231d34;--surface-strong:#2d2543;--text:#f7f3ff;--muted:#c7c0d7;--border:#50476b;--brand:#bd8cff;--brand-strong:#d5b4ff;--brand-soft:#432466;--accent:#57d9d0;--accent-soft:#123f43;--danger:#ff8caf;--danger-soft:#542036;--success:#6ce2a2;--success-soft:#174b34;--focus:#ffcf70;--shadow:0 18px 42px rgba(0,0,0,.35)}}
