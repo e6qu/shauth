@@ -312,7 +312,7 @@ func (server *Server) backchannelLogout(response http.ResponseWriter, request *h
 		return
 	}
 	issuedAgo := server.now().Sub(time.Unix(claims.IssuedAt, 0))
-	if _, ok := claims.Events[logoutEvent]; !ok || issuedAgo < -5*time.Second || issuedAgo > 5*time.Minute || time.Unix(claims.ExpiresAt, 0).Before(server.now()) {
+	if !validLogoutEvent(claims.Events) || issuedAgo < -5*time.Second || issuedAgo > 5*time.Minute || time.Unix(claims.ExpiresAt, 0).Before(server.now()) {
 		http.Error(response, "Invalid logout token event", http.StatusBadRequest)
 		return
 	}
@@ -321,6 +321,15 @@ func (server *Server) backchannelLogout(response http.ResponseWriter, request *h
 		return
 	}
 	response.WriteHeader(http.StatusOK)
+}
+
+func validLogoutEvent(events map[string]json.RawMessage) bool {
+	raw, ok := events[logoutEvent]
+	if !ok {
+		return false
+	}
+	var event map[string]json.RawMessage
+	return json.Unmarshal(raw, &event) == nil && event != nil
 }
 
 func (server *Server) requireSession(next http.Handler) http.Handler {
