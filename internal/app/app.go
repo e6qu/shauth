@@ -114,16 +114,7 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 	}
 	appController := managedapps.New()
 	proxy := httputil.NewSingleHostReverseProxy(cfg.HydraPublicURL)
-	proxy.ModifyResponse = func(response *http.Response) error {
-		if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest && response.ContentLength == 0 && response.Header.Get("Location") != "" {
-			response.Body.Close()
-			response.Body = io.NopCloser(strings.NewReader("\n"))
-			response.ContentLength = 1
-			response.Header.Set("Content-Length", "1")
-			response.Header.Set("Content-Type", "text/html; charset=utf-8")
-		}
-		return nil
-	}
+	proxy.ModifyResponse = ensureRedirectBody
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
@@ -133,6 +124,27 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		return nil, err
 	}
 	return server, nil
+}
+
+func ensureRedirectBody(response *http.Response) error {
+	if response.StatusCode < http.StatusMultipleChoices || response.StatusCode >= http.StatusBadRequest || response.Header.Get("Location") == "" {
+		return nil
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("read OAuth redirect response: %w", err)
+	}
+	if err := response.Body.Close(); err != nil {
+		return fmt.Errorf("close OAuth redirect response: %w", err)
+	}
+	if len(body) == 0 {
+		body = []byte("\n")
+		response.Header.Set("Content-Type", "text/html; charset=utf-8")
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
