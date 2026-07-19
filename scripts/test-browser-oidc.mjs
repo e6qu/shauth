@@ -76,6 +76,16 @@ const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage();
   const browserErrors = [];
+  const browserAssets = [];
+  const htmxRequests = [];
+  page.on("request", (request) => {
+    if (["script", "stylesheet", "image", "font", "media"].includes(request.resourceType())) {
+      browserAssets.push(request.url());
+    }
+    if (request.method() === "POST" && request.url() === `${issuer}/admin/users`) {
+      htmxRequests.push(request.headers()["hx-request"]);
+    }
+  });
   page.on("console", (message) => {
     if (message.type() === "error") browserErrors.push(message.text());
   });
@@ -99,6 +109,20 @@ try {
     new Promise((_, reject) => setTimeout(() => reject(new Error(`OIDC browser callback timed out: ${browserErrors.join("; ")}`)), 30_000)),
   ]);
   await page.getByText("OIDC browser flow completed").waitFor();
+
+  const username = `htmx-${crypto.randomBytes(6).toString("hex")}`;
+  await page.goto(`${issuer}/admin/users`);
+  await page.locator("#new-username").fill(username);
+  await page.locator("#new-email").fill(`${username}@localhost.test`);
+  await page.locator("#new-password").fill(crypto.randomBytes(24).toString("base64url"));
+  await page.getByRole("button", { name: "Create local user" }).click();
+  await page.locator("#users").getByRole("link", { name: username }).waitFor();
+  assert.equal(page.url(), `${issuer}/admin/users`);
+  assert.deepEqual(htmxRequests, ["true"]);
+  assert.deepEqual([...new Set(browserAssets)].sort(), [
+    `${issuer}/assets/htmx-2.0.8.min.js`,
+    `${issuer}/assets/theme.js`,
+  ]);
   assert.deepEqual(browserErrors, []);
 } finally {
   await browser.close();

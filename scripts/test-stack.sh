@@ -83,7 +83,13 @@ fi
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'id="main-content"'
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-label="Primary navigation"'
 curl --fail --silent --show-error http://localhost:8080/assets/theme.js | grep -q 'theme-toggle'
-curl --fail --silent --show-error --dump-header - --output /dev/null http://localhost:8080/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self' https://unpkg.com"
+curl --fail --silent --show-error http://localhost:8080/login | grep -q 'src="/assets/htmx-2.0.8.min.js"'
+curl --fail --silent --show-error http://localhost:8080/assets/htmx-2.0.8.min.js | grep -q 'htmx'
+curl --fail --silent --show-error --dump-header - --output /dev/null http://localhost:8080/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self';"
+if curl --fail --silent --show-error http://localhost:8080/login | grep -q 'unpkg.com'; then
+	echo 'Shauth rendered an external browser asset' >&2
+	exit 1
+fi
 curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/initial'
 curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout'
 
