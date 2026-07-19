@@ -54,3 +54,15 @@ func TestEnsureRedirectBodyPreservesExistingRedirectBody(t *testing.T) {
 		t.Fatalf("body = %q, want %q", got, want)
 	}
 }
+
+func TestRedirectTargetExcludesOAuthQuery(t *testing.T) {
+	if got, want := redirectTarget("https://app.example.test/callback?code=secret&state=secret"), "app.example.test/callback"; got != want {
+		t.Fatalf("redirect target = %q, want %q", got, want)
+	}
+}
+
+func TestRedirectTargetRejectsRelativeLocation(t *testing.T) {
+	if got, want := redirectTarget("/callback"), "invalid"; got != want {
+		t.Fatalf("redirect target = %q, want %q", got, want)
+	}
+}
