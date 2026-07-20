@@ -301,6 +301,8 @@ if [ "$attempt" -eq 30 ] || [ "$remaining_developer_mappings" != 0 ]; then
 fi
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Ory Hydra authorization provider'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Active browser sessions'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'PostgreSQL session store'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'No infrastructure source configured'
 attempt=0
 while [ "$attempt" -lt 30 ]; do
   if curl --fail --silent http://localhost:8080/.well-known/openid-configuration 2>/dev/null | grep -q 'issuer'; then

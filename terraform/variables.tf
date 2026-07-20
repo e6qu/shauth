@@ -83,3 +83,23 @@ variable "bootstrap_apps" {
     error_message = "Each bootstrap app must set at least one post_logout_redirect_uris entry and frontchannel_logout_uri, backchannel_logout_uri, or both."
   }
 }
+variable "monitoring_sources" {
+  description = "Deployment-neutral authenticated endpoints publishing the e6qu.monitoring/v1 contract."
+  sensitive   = true
+  type = list(object({
+    name         = string
+    url          = string
+    bearer_token = string
+  }))
+  default = []
+  validation {
+    condition = alltrue([
+      for source in var.monitoring_sources :
+      trimspace(source.name) != "" &&
+      can(regex("^https://", source.url)) &&
+      length(source.bearer_token) >= 32 &&
+      !can(regex("[[:space:][:cntrl:]]", source.bearer_token))
+    ])
+    error_message = "Monitoring sources require a name, an HTTPS URL, and a bearer token of at least 32 non-whitespace characters."
+  }
+}

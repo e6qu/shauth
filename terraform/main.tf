@@ -24,6 +24,7 @@ locals {
     { name = "GITHUB_CLIENT_SECRET", valueFrom = "${var.github_oauth_secret_arn}:client_secret::" },
     { name = "SHAUTH_BOOTSTRAP_ADMIN_PASSWORD", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_ADMIN_PASSWORD::" },
     { name = "SHAUTH_BOOTSTRAP_APPS_JSON", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_APPS_JSON::" },
+    { name = "SHAUTH_MONITORING_SOURCES_JSON", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_MONITORING_SOURCES_JSON::" },
     ], local.entra_enabled ? [
     { name = "ENTRA_CLIENT_SECRET", valueFrom = "${var.entra_oauth_secret_arn}:client_secret::" },
   ] : [])
@@ -86,6 +87,7 @@ resource "aws_secretsmanager_secret_version" "runtime" {
     HYDRA_SYSTEM_SECRET             = random_password.hydra.result
     SHAUTH_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap.result
     SHAUTH_BOOTSTRAP_APPS_JSON      = jsonencode(var.bootstrap_apps)
+    SHAUTH_MONITORING_SOURCES_JSON  = jsonencode(var.monitoring_sources)
   })
 }
 

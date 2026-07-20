@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+
+	"github.com/e6qu/shauth/internal/monitoring"
 )
 
 var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
@@ -34,6 +36,7 @@ type Config struct {
 	SESRegion              string
 	InvitationEmailFrom    string
 	BootstrapApps          []BootstrapApp
+	MonitoringSources      []monitoring.Source
 }
 
 // BootstrapApp is a confidential OpenID Connect client and its corresponding
@@ -115,6 +118,14 @@ func Load(getenv func(string) string) (Config, error) {
 	if raw := getenv("SHAUTH_BOOTSTRAP_APPS_JSON"); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &config.BootstrapApps); err != nil {
 			return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_APPS_JSON must be valid JSON: %w", err)
+		}
+	}
+	if raw := getenv("SHAUTH_MONITORING_SOURCES_JSON"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &config.MonitoringSources); err != nil {
+			return Config{}, fmt.Errorf("SHAUTH_MONITORING_SOURCES_JSON must be valid JSON: %w", err)
+		}
+		if err := monitoring.ValidateSources(config.MonitoringSources); err != nil {
+			return Config{}, fmt.Errorf("SHAUTH_MONITORING_SOURCES_JSON: %w", err)
 		}
 	}
 	for name, value := range map[string]string{
