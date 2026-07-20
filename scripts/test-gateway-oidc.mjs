@@ -100,6 +100,12 @@ try {
   await page.getByRole("button", { name: "Sign out" }).click();
   await waitForURL(page, "http://localhost:5556/auth/signed-out", navigationTrace, browserErrors);
   await page.getByRole("heading", { name: "Signed out" }).waitFor();
+  let signInControl = page.getByRole("link", { name: "Sign in with Shauth" });
+  assert.equal(await signInControl.getAttribute("href"), "/auth/login", "signed-out sign-in control must use the application-local login starter");
+  await page.reload();
+  await page.getByRole("heading", { name: "Signed out" }).waitFor();
+  signInControl = page.getByRole("link", { name: "Sign in with Shauth" });
+  assert.equal(await signInControl.getAttribute("href"), "/auth/login", "reloaded signed-out page must preserve the application-local sign-in control");
   await assertSession(context, "http://localhost:5556", 401);
   await assertSession(context, "http://localhost:5558", 401);
   let primaryLogoutTokens = "0";
@@ -126,6 +132,13 @@ try {
   assert.equal(noLocalSessionTarget.searchParams.get("client_id"), "gateway-integration");
   assert.equal(noLocalSessionTarget.searchParams.get("post_logout_redirect_uri"), "http://localhost:5556/auth/signed-out");
   assert.equal(noLocalSessionTarget.searchParams.has("id_token_hint"), false);
+  const signInTraceStart = navigationTrace.length;
+  await signInControl.click();
+  await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
+  assert.ok(
+    navigationTrace.slice(signInTraceStart).includes("request GET http://localhost:5556/auth/login"),
+    `signed-out sign-in control bypassed the application-local login starter:\n${navigationTrace.slice(signInTraceStart).join("\n")}`,
+  );
   await page.goto("http://localhost:8080/apps");
   await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
   assert.deepEqual(browserErrors, []);

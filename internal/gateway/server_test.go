@@ -76,6 +76,51 @@ func TestGatewayAuthHandlersRetainGatewaySecurityPolicy(t *testing.T) {
 	}
 }
 
+func TestSignedOutPageOffersSameOriginLoginAfterReload(t *testing.T) {
+	t.Parallel()
+	server := &Server{}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		request := httptest.NewRequest(http.MethodGet, "https://app.example.test/auth/signed-out", nil)
+		response := httptest.NewRecorder()
+		server.signedOut(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("attempt %d: status = %d, want %d", attempt, response.Code, http.StatusOK)
+		}
+		if actual := response.Header().Get("Content-Type"); actual != "text/html; charset=utf-8" {
+			t.Fatalf("attempt %d: Content-Type = %q", attempt, actual)
+		}
+		if actual := response.Header().Get("Cache-Control"); actual != "no-store" {
+			t.Fatalf("attempt %d: Cache-Control = %q, want no-store", attempt, actual)
+		}
+		body := response.Body.String()
+		if !strings.Contains(body, `href="/auth/login"`) {
+			t.Fatalf("attempt %d: signed-out page did not link to the same-origin login starter", attempt)
+		}
+		if !strings.Contains(body, ">Sign in with Shauth</a>") {
+			t.Fatalf("attempt %d: signed-out page did not expose the explicit Shauth sign-in control", attempt)
+		}
+	}
+}
+
+func TestGatewayStylesSupportKeyboardFocusAndColorSchemes(t *testing.T) {
+	t.Parallel()
+	request := httptest.NewRequest(http.MethodGet, "https://app.example.test/auth/gateway.css", nil)
+	response := httptest.NewRecorder()
+	gatewayStyles(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	styles := response.Body.String()
+	for _, required := range []string{".button:focus-visible", "prefers-color-scheme:dark", "prefers-reduced-motion:no-preference"} {
+		if !strings.Contains(styles, required) {
+			t.Errorf("gateway stylesheet omitted %q", required)
+		}
+	}
+}
+
 func TestValidLogoutEvent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
