@@ -15,6 +15,5 @@
 | .[]
 | . as $version
 | ($version.metadata.container.tags // []) as $tags
-| select(($tags | length) > 0)
 | select([ $tags[] | select(. as $tag | $keep_tags | index($tag) != null) ] | length == 0)
 | $version.id

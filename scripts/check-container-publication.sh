@@ -57,7 +57,7 @@ trap 'rm -f "$fixture"' EXIT
 ] + [{id: 999, created_at: "2026-08-01T00:00:00Z", metadata: {container: {tags: []}}}]' >"$fixture"
 
 selected="$(jq -r --argjson keep 20 -f "$root/scripts/select-obsolete-container-versions.jq" "$fixture" | sort -n | paste -sd, -)"
-if [[ "$selected" != '0,1,2,10,11,12' ]]; then
+if [[ "$selected" != '0,1,2,10,11,12,999' ]]; then
 	echo "retention selector chose unexpected package versions: $selected" >&2
 	exit 1
 fi

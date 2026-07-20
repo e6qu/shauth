@@ -57,8 +57,9 @@ startup.
 Each push to `main` publishes `ghcr.io/e6qu/shauth:<sha12>` as a Linux amd64
 and arm64 image index. The direct single-platform images remain addressable as
 `<sha12>-amd64` and `<sha12>-arm64`; no `latest` or branch alias is published.
-The workflow verifies the registry manifests and retains the newest 20
-immutable releases.
+The workflow verifies the registry manifests and retains exactly the package
+versions belonging to the newest 20 immutable releases, removing older,
+untagged, and non-release versions.
 Shauth exposes Ory Hydra's complete public OpenID Connect surface at its public
 issuer, including discovery, authorization, token, UserInfo, revocation,
 introspection, and front-channel logout endpoints. Relying applications never
