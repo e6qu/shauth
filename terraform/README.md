@@ -46,3 +46,9 @@ Each `bootstrap_apps` client also supplies its sign-in redirect URIs, allowed
 post-logout redirect URIs, and at least one front-channel or back-channel
 logout URI. These coordinates let Ory Hydra propagate one Shauth logout to
 every correlated relying-application session.
+
+`monitoring_sources` supplies deployment-neutral, authenticated HTTPS
+coordinates that publish the `e6qu.monitoring/v1` observation contract. The
+module stores this configuration in the runtime secret, so bearer tokens do
+not appear in task-definition environment values. Shauth only reads the
+endpoints and receives no deployment-control permission.

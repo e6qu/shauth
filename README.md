@@ -84,6 +84,62 @@ register an app only after its Shauth OIDC client, launch URL, and published
 health endpoint exist. Users open services through their own startup paths;
 Shauth monitors standard HTTPS health endpoints without deployment control.
 
+## Infrastructure monitoring contract
+
+Shauth self-monitoring checks its PostgreSQL connection, Ory Hydra readiness,
+and active browser sessions. Deployment operators may additionally configure
+authenticated observation endpoints with `SHAUTH_MONITORING_SOURCES_JSON`.
+Shauth consumes those HTTPS coordinates and does not know which scheduler,
+cloud, or storage implementation produced them. It never starts, stops, or
+otherwise controls infrastructure.
+
+Each source has `name`, `url`, and a bearer token of at least 32 characters.
+The endpoint returns `Content-Type: application/json` and the strict
+`e6qu.monitoring/v1` schema:
+
+```json
+{
+  "schema_version": "e6qu.monitoring/v1",
+  "observed_at": "2026-07-20T12:00:00Z",
+  "resources": [{
+    "id": "shared-database",
+    "name": "Shared PostgreSQL",
+    "kind": "database",
+    "health": "healthy",
+    "metrics": [
+      {"name": "cpu.allocation", "label": "CPU allocation", "value": 0.25, "unit": "vCPU", "status": "available"},
+      {"name": "cpu.usage", "label": "CPU usage", "value": 0.04, "unit": "vCPU", "status": "available"},
+      {"name": "memory.allocation", "label": "Memory allocation", "value": 512, "unit": "MiB", "status": "available"},
+      {"name": "memory.usage", "label": "Memory usage", "value": 192, "unit": "MiB", "status": "available"},
+      {"name": "storage.allocation", "label": "Storage allocation", "unit": "GiB", "status": "not_applicable"},
+      {"name": "storage.usage", "label": "Storage usage", "value": 4096, "unit": "MiB", "status": "available"},
+      {"name": "storage.read_iops", "label": "Read operations", "value": 3.2, "unit": "operations/second", "status": "available"},
+      {"name": "storage.write_iops", "label": "Write operations", "value": 1.4, "unit": "operations/second", "status": "available"}
+    ]
+  }],
+  "cost_estimate": {
+    "currency": "USD",
+    "basis": "public-on-demand",
+    "hours_per_month": 730,
+    "hourly": 0.02,
+    "daily": 0.48,
+    "monthly": 14.60,
+    "excludes": ["taxes", "reservations", "savings_plans", "credits", "free_tier"],
+    "limitations": ["Request-priced services and data transfer are excluded when the source has no current usage metric."],
+    "line_items": [{"name": "Shared database compute", "hourly": 0.02, "monthly": 14.60}]
+  }
+}
+```
+
+Resource health is `healthy`, `degraded`, `unhealthy`, or `unknown`. Metric
+names and units are deployment-neutral; sources publish CPU and memory
+allocation and use, disk allocation and use where capacity is provisioned,
+elastic-storage use and I/O, plus other operational measurements that apply to
+the resource. A report older than five minutes is visibly marked stale.
+Pricing is an estimate based on public on-demand rates, not a bill. The schema
+requires it to exclude taxes, reservations, Savings Plans, credits, and the
+free tier.
+
 Terraform can supply `bootstrap_apps` as a sensitive input to register clients
 and catalog records idempotently during Shauth startup. The input is stored only
 in the Shauth runtime secret and contains each confidential client secret,

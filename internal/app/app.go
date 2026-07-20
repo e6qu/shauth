@@ -30,6 +30,7 @@ import (
 	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/mailer"
 	"github.com/e6qu/shauth/internal/managedapps"
+	"github.com/e6qu/shauth/internal/monitoring"
 	"golang.org/x/oauth2"
 	oauthgithub "golang.org/x/oauth2/github"
 )
@@ -177,17 +178,18 @@ func isLoopbackRedirect(uri *url.URL) bool {
 }
 
 type Server struct {
-	config      config.Config
-	store       *identity.Store
-	github      *githubapi.Client
-	oauth       *oauth2.Config
-	entraOAuth  *oauth2.Config
-	entraVerify *oidc.IDTokenVerifier
-	httpClient  *http.Client
-	templates   *template.Template
-	hydraPublic *httputil.ReverseProxy
-	mailer      mailer.Invitations
-	managedApps *managedapps.Controller
+	config           config.Config
+	store            *identity.Store
+	github           *githubapi.Client
+	oauth            *oauth2.Config
+	entraOAuth       *oauth2.Config
+	entraVerify      *oidc.IDTokenVerifier
+	httpClient       *http.Client
+	templates        *template.Template
+	hydraPublic      *httputil.ReverseProxy
+	mailer           mailer.Invitations
+	managedApps      *managedapps.Controller
+	monitoringClient *monitoring.Client
 }
 
 func New(cfg config.Config, store *identity.Store) (*Server, error) {
@@ -212,7 +214,7 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
 	}
-	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
+	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, monitoringClient: monitoring.NewClient(), oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
 	if cfg.EntraTenantID != "" {
 		issuer := "https://login.microsoftonline.com/" + cfg.EntraTenantID + "/v2.0"
 		discoveryContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1701,7 +1703,18 @@ func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not inspect sessions", 500)
 		return
 	}
-	s.render(w, "monitoring", map[string]any{"SignedIn": true, "IsAdmin": true, "ActiveSessions": active, "HydraHealthy": s.hydraReady(r.Context()), "Now": time.Now().UTC()})
+	checkContext, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	postgresHealthy := s.store.Ping(checkContext) == nil
+	cancel()
+	s.render(w, "monitoring", map[string]any{
+		"SignedIn":          true,
+		"IsAdmin":           true,
+		"ActiveSessions":    active,
+		"PostgreSQLHealthy": postgresHealthy,
+		"HydraHealthy":      s.hydraReady(r.Context()),
+		"Infrastructure":    s.monitoringClient.FetchAll(r.Context(), s.config.MonitoringSources),
+		"Now":               time.Now().UTC(),
+	})
 }
 func (s *Server) hydraReady(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
