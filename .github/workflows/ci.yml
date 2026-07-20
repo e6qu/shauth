@@ -23,6 +23,7 @@ jobs:
           node-version: '24'
           cache: npm
       - run: go test ./...
+      - run: ./scripts/check-container-publication.sh
       - run: ./scripts/test-stack.sh
 
   build-amd64:
@@ -30,6 +31,7 @@ jobs:
     name: Container amd64
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       packages: write
     outputs:
       short_sha: ${{ steps.sha.outputs.short_sha }}
@@ -49,12 +51,15 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ghcr.io/e6qu/shauth:${{ steps.sha.outputs.short_sha }}-amd64
+          provenance: false
+          sbom: false
 
   build-arm64:
     if: github.event_name == 'push'
     name: Container arm64
     runs-on: ubuntu-24.04-arm
     permissions:
+      contents: read
       packages: write
     outputs:
       short_sha: ${{ steps.sha.outputs.short_sha }}
@@ -74,6 +79,8 @@ jobs:
           push: true
           platforms: linux/arm64
           tags: ghcr.io/e6qu/shauth:${{ steps.sha.outputs.short_sha }}-arm64
+          provenance: false
+          sbom: false
 
   manifest:
     if: github.event_name == 'push'
@@ -81,8 +88,10 @@ jobs:
     needs: [build-amd64, build-arm64]
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       packages: write
     steps:
+      - uses: actions/checkout@v4
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -94,3 +103,23 @@ jobs:
           --tag ghcr.io/e6qu/shauth:${{ needs.build-amd64.outputs.short_sha }}
           ghcr.io/e6qu/shauth:${{ needs.build-amd64.outputs.short_sha }}-amd64
           ghcr.io/e6qu/shauth:${{ needs.build-arm64.outputs.short_sha }}-arm64
+      - name: Verify published OCI image shape
+        run: >-
+          ./scripts/verify-published-container.sh
+          ghcr.io/e6qu/shauth
+          ${{ needs.build-amd64.outputs.short_sha }}
+
+  prune:
+    if: github.event_name == 'push'
+    name: Retain 20 container releases
+    needs: manifest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete package versions outside the newest 20 releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prune-ghcr-images.sh "${{ github.repository_owner }}" "${{ github.event.repository.name }}" 20

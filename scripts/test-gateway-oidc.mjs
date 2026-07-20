@@ -6,7 +6,12 @@ import http from "node:http";
 import { chromium } from "playwright";
 
 const password = process.env.SHAUTH_BOOTSTRAP_ADMIN_PASSWORD;
+const primaryDatabase = process.env.SHAUTH_GATEWAY_PRIMARY_DATABASE;
+const secondaryDatabase = process.env.SHAUTH_GATEWAY_SECONDARY_DATABASE;
 assert.ok(password, "SHAUTH_BOOTSTRAP_ADMIN_PASSWORD is required");
+assert.match(primaryDatabase ?? "", /^[a-z][a-z0-9_]+$/, "SHAUTH_GATEWAY_PRIMARY_DATABASE is required");
+assert.match(secondaryDatabase ?? "", /^[a-z][a-z0-9_]+$/, "SHAUTH_GATEWAY_SECONDARY_DATABASE is required");
+assert.notEqual(primaryDatabase, secondaryDatabase, "gateway relying parties must use distinct databases");
 
 const primary = await createUpstream(5557, "Primary application");
 const secondary = await createUpstream(5559, "Secondary application");
@@ -52,11 +57,7 @@ try {
     authorization: undefined,
   });
 
-  const providerSessionID = execFileSync(
-    "docker",
-    ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT provider_session_id FROM oidc_gateway_sessions WHERE client_id='gateway-integration' AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1"],
-    { encoding: "utf8" },
-  ).trim();
+  const providerSessionID = queryGateway(primaryDatabase, "SELECT provider_session_id FROM oidc_gateway_sessions WHERE client_id='gateway-integration' AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1");
   assert.ok(providerSessionID, "gateway session did not persist its provider session identifier");
 
   const rejectedFrontchannel = await context.request.get(`http://localhost:5556/auth/frontchannel-logout?iss=${encodeURIComponent("https://attacker.example")}&sid=${encodeURIComponent(providerSessionID)}`);
@@ -91,12 +92,8 @@ try {
     role: "admin",
     authorization: undefined,
   });
-  const activeClients = execFileSync(
-    "docker",
-    ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT string_agg(DISTINCT client_id, ',' ORDER BY client_id) FROM oidc_gateway_sessions WHERE revoked_at IS NULL AND client_id IN ('gateway-integration','gateway-secondary')"],
-    { encoding: "utf8" },
-  ).trim();
-  assert.equal(activeClients, "gateway-integration,gateway-secondary");
+  assert.equal(queryGateway(primaryDatabase, "SELECT string_agg(DISTINCT client_id, ',' ORDER BY client_id) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "gateway-integration");
+  assert.equal(queryGateway(secondaryDatabase, "SELECT string_agg(DISTINCT client_id, ',' ORDER BY client_id) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "gateway-secondary");
 
   await page.goto("http://localhost:5556/");
   await page.waitForURL("http://localhost:5556/");
@@ -105,12 +102,19 @@ try {
   await page.getByRole("heading", { name: "Signed out" }).waitFor();
   await assertSession(context, "http://localhost:5556", 401);
   await assertSession(context, "http://localhost:5558", 401);
-  const remainingSessions = execFileSync(
-    "docker",
-    ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL AND client_id IN ('gateway-integration','gateway-secondary')"],
-    { encoding: "utf8" },
-  ).trim();
-  assert.equal(remainingSessions, "0");
+  let primaryLogoutTokens = "0";
+  let secondaryLogoutTokens = "0";
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const logoutQuery = "SELECT count(*) FROM oidc_gateway_logout_tokens WHERE expires_at > now() + interval '30 seconds' AND expires_at <= now() + interval '2 minutes'";
+    primaryLogoutTokens = queryGateway(primaryDatabase, logoutQuery);
+    secondaryLogoutTokens = queryGateway(secondaryDatabase, logoutQuery);
+    if (primaryLogoutTokens === "1" && secondaryLogoutTokens === "1") break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(primaryLogoutTokens, "1", "primary relying party must validate its provider logout token");
+  assert.equal(secondaryLogoutTokens, "1", "secondary relying party must validate its provider logout token");
+  assert.equal(queryGateway(primaryDatabase, "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "0");
+  assert.equal(queryGateway(secondaryDatabase, "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "0");
   const noLocalSessionLogout = await context.request.post("http://localhost:5556/auth/logout", {
     headers: { origin: "http://localhost:5556" },
     maxRedirects: 0,
@@ -153,6 +157,14 @@ async function createUpstream(port, title) {
     server.listen(port, "127.0.0.1", resolve);
   });
   return { server, identity };
+}
+
+function queryGateway(database, query) {
+  return execFileSync(
+    "docker",
+    ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", database, "-Atc", query],
+    { encoding: "utf8" },
+  ).trim();
 }
 
 function closeServer(server) {

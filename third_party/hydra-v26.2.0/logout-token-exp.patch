@@ -1,0 +1,12 @@
+diff --git a/consent/strategy_default.go b/consent/strategy_default.go
+index b692a51..127eef0 100644
+--- a/consent/strategy_default.go
++++ b/consent/strategy_default.go
+@@ -714 +714,2 @@ func (s *defaultStrategy) executeBackChannelLogout(ctx context.Context, r *http.
+-		t, _, err := s.r.OpenIDJWTSigner().Generate(ctx, jwt.MapClaims{
++		now := time.Now().UTC()
++		t, _, err := s.r.OpenIDJWTSigner().Generate(ctx, jwt.MapClaims{
+@@ -717 +718,2 @@ func (s *defaultStrategy) executeBackChannelLogout(ctx context.Context, r *http.
+-			"iat":    time.Now().UTC().Unix(),
++			"iat":    now.Unix(),
++			"exp":    now.Add(2 * time.Minute).Unix(),

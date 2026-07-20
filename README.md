@@ -28,6 +28,12 @@ added to the GitHub OAuth application. When Microsoft Entra ID is enabled,
 Shauth discovers the configured tenant-specific issuer and verifies the ID
 token signature, issuer, audience, tenant, and nonce before linking the stable
 tenant and object identifiers to a Shauth user.
+Shauth persists email-verification evidence with each identity and publishes
+the standard `email_verified` claim in both ID tokens and UserInfo. Managed
+local accounts are administrator-attested, and GitHub accounts use GitHub's
+primary verified email endpoint. Microsoft Entra ID accounts are marked
+verified only when the tenant ID token verifies the actual `email` claim;
+falling back to `preferred_username` does not imply email verification.
 
 ## Access and session lifecycle
 
@@ -43,6 +49,17 @@ Shauth. Ory Hydra sends signed back-channel logout tokens and, when configured,
 front-channel logout requests to every client session correlated by `sid`.
 Relying applications validate those notifications and idempotently revoke the
 correlated local sessions.
+The Shauth container includes Ory Hydra v26.2.0 with the repository's audited
+provider patch that adds the Back-Channel Logout 1.0 Errata 1 `exp` claim with
+a two-minute lifetime. The same immutable image runs Shauth, Hydra, and their
+migration entry points, so production never builds or patches the provider at
+startup.
+Each push to `main` publishes `ghcr.io/e6qu/shauth:<sha12>` as a Linux amd64
+and arm64 image index. The direct single-platform images remain addressable as
+`<sha12>-amd64` and `<sha12>-arm64`; no `latest` or branch alias is published.
+The workflow verifies the registry manifests and retains exactly the package
+versions belonging to the newest 20 immutable releases, removing older,
+untagged, and non-release versions.
 Shauth exposes Ory Hydra's complete public OpenID Connect surface at its public
 issuer, including discovery, authorization, token, UserInfo, revocation,
 introspection, and front-channel logout endpoints. Relying applications never
@@ -109,6 +126,11 @@ the application's public origin and must be registered on its Shauth client.
 `OIDC_GATEWAY_SESSION_MAX_AGE` defaults to eight hours. Production issuer,
 public, and post-logout coordinates require HTTPS; explicit insecure cookies
 are accepted only for loopback integration tests.
+
+Each gateway deployment uses its relying party's distinct PostgreSQL database,
+not Shauth's identity database. `/shauth-gateway` applies its embedded,
+gateway-only session and replay-protection migrations before accepting traffic;
+startup fails if the dedicated database is unavailable or cannot be migrated.
 
 ## Deployment model
 

@@ -60,13 +60,11 @@ func (client *Client) Profile(ctx context.Context, accessToken string) (Profile,
 	if err := json.NewDecoder(response.Body).Decode(&profile); err != nil {
 		return Profile{}, fmt.Errorf("decode GitHub user: %w", err)
 	}
-	if strings.TrimSpace(profile.Email) == "" {
-		email, err := client.primaryVerifiedEmail(ctx, accessToken)
-		if err != nil {
-			return Profile{}, err
-		}
-		profile.Email = email
+	email, err := client.primaryVerifiedEmail(ctx, accessToken)
+	if err != nil {
+		return Profile{}, err
 	}
+	profile.Email = email
 	if profile.ID == 0 || strings.TrimSpace(profile.Login) == "" || strings.TrimSpace(profile.Email) == "" {
 		return Profile{}, fmt.Errorf("GitHub user response lacks id, login, or verified email")
 	}

@@ -1,4 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+x-shauth-image: &shauth-image
+  image: shauth-local
+  build: .
+
 services:
   postgres:
     image: postgres:17.5-alpine
@@ -18,7 +22,8 @@ services:
       - ./config/postgres-init.sql:/docker-entrypoint-initdb.d/001-databases.sql:ro
 
   hydra-migrate:
-    image: oryd/hydra:v26.2.0
+    <<: *shauth-image
+    entrypoint: ["/hydra"]
     command: migrate sql up --read-from-env --yes
     environment: &hydra-environment
       DSN: ${HYDRA_DSN:?set HYDRA_DSN}
@@ -37,7 +42,10 @@ services:
         condition: service_healthy
 
   hydra:
-    image: oryd/hydra:v26.2.0
+    <<: *shauth-image
+    entrypoint: ["/hydra"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: serve all --dev --config /etc/config/hydra.yaml
     environment: *hydra-environment
     depends_on:
@@ -50,7 +58,7 @@ services:
       - ./config/hydra.yaml:/etc/config/hydra.yaml:ro
 
   shauth:
-    build: .
+    <<: *shauth-image
     environment:
       SHAUTH_LISTEN_ADDRESS: :8080
       SHAUTH_PUBLIC_URL: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}
@@ -77,7 +85,7 @@ services:
       - "8080:8080"
 
   shauth-migrate:
-    build: .
+    <<: *shauth-image
     entrypoint: ["/shauth-migrate"]
     environment:
       DATABASE_URL: ${SHAUTH_DATABASE_URL:?set SHAUTH_DATABASE_URL}

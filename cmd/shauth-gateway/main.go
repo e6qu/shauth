@@ -24,6 +24,9 @@ func main() {
 		log.Fatalf("connect PostgreSQL: %v", err)
 	}
 	defer pool.Close()
+	if err := gateway.Migrate(context.Background(), pool); err != nil {
+		log.Fatalf("migrate gateway PostgreSQL schema: %v", err)
+	}
 	application, err := gateway.New(context.Background(), config, pool)
 	if err != nil {
 		log.Fatal(err)
