@@ -105,6 +105,17 @@ try {
   await page.getByRole("heading", { name: "Signed out" }).waitFor();
   await assertSession(context, "http://localhost:5556", 401);
   await assertSession(context, "http://localhost:5558", 401);
+  let deliveredLogoutTokens = "0";
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    deliveredLogoutTokens = execFileSync(
+      "docker",
+      ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT count(*) FROM oidc_gateway_logout_tokens WHERE client_id IN ('gateway-integration','gateway-secondary') AND expires_at > now() + interval '30 seconds' AND expires_at <= now() + interval '2 minutes'"],
+      { encoding: "utf8" },
+    ).trim();
+    if (deliveredLogoutTokens === "2") break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(deliveredLogoutTokens, "2", "both relying parties must validate provider logout tokens with a short exp lifetime");
   const remainingSessions = execFileSync(
     "docker",
     ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", "shauth", "-Atc", "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL AND client_id IN ('gateway-integration','gateway-secondary')"],

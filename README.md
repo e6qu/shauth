@@ -49,6 +49,11 @@ Shauth. Ory Hydra sends signed back-channel logout tokens and, when configured,
 front-channel logout requests to every client session correlated by `sid`.
 Relying applications validate those notifications and idempotently revoke the
 correlated local sessions.
+The Shauth container includes Ory Hydra v26.2.0 with the repository's audited
+provider patch that adds the Back-Channel Logout 1.0 Errata 1 `exp` claim with
+a two-minute lifetime. The same immutable image runs Shauth, Hydra, and their
+migration entry points, so production never builds or patches the provider at
+startup.
 Shauth exposes Ory Hydra's complete public OpenID Connect surface at its public
 issuer, including discovery, authorization, token, UserInfo, revocation,
 introspection, and front-channel logout endpoints. Relying applications never

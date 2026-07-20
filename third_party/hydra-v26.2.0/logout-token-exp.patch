@@ -1,0 +1,18 @@
+diff --git a/consent/strategy_default.go b/consent/strategy_default.go
+index b692a51..127eef0 100644
+--- a/consent/strategy_default.go
++++ b/consent/strategy_default.go
+@@ -711,10 +711,12 @@ func (s *defaultStrategy) executeBackChannelLogout(ctx context.Context, r *http.
+ 		// s.r.ConsentManager().GetForcedObfuscatedLoginSession(context.Background(), subject, <missing>)
+ 		// sub := s.obfuscateSubjectIdentifier(c, subject, )
+ 
++		now := time.Now().UTC()
+ 		t, _, err := s.r.OpenIDJWTSigner().Generate(ctx, jwt.MapClaims{
+ 			"iss":    s.r.Config().IssuerURL(ctx).String(),
+ 			"aud":    []string{c.ID},
+-			"iat":    time.Now().UTC().Unix(),
++			"iat":    now.Unix(),
++			"exp":    now.Add(2 * time.Minute).Unix(),
+ 			"jti":    uuid.New(),
+ 			"events": map[string]struct{}{"http://schemas.openid.net/event/backchannel-logout": {}},
+ 			"sid":    sid,

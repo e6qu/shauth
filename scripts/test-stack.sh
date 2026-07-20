@@ -36,7 +36,7 @@ SHAUTH_GATEWAY_COOKIE_SECRET=$(random_secret)
 export SHAUTH_GATEWAY_COOKIE_SECRET
 SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET=$(random_secret)
 export SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://localhost:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://localhost:5558/auth/callback"],"post_logout_redirect_uris":["http://localhost:5558/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5558/auth/frontchannel-logout","health_url":"http://localhost:5558/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5556/auth/backchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://localhost:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://localhost:5558/auth/callback"],"post_logout_redirect_uris":["http://localhost:5558/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5558/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5558/auth/backchannel-logout","health_url":"http://localhost:5558/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 cookie_jar=$(mktemp)
 gateway_binary=$(mktemp)
@@ -63,7 +63,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cleanup
-docker compose up --build --detach
+docker compose build shauth
+docker compose up --no-build --detach
 
 attempt=0
 while [ "$attempt" -lt 300 ]; do
@@ -99,7 +100,7 @@ csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
 
 SHAUTH_GATEWAY_CLIENT_SECRET=$(random_secret)
 SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET=$(random_secret)
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://localhost:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://localhost:5558/auth/callback"],"post_logout_redirect_uris":["http://localhost:5558/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5558/auth/frontchannel-logout","health_url":"http://localhost:5558/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring"},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5556/auth/backchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://localhost:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://localhost:5558/auth/callback"],"post_logout_redirect_uris":["http://localhost:5558/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5558/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5558/auth/backchannel-logout","health_url":"http://localhost:5558/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 docker compose up --force-recreate --no-deps --detach shauth
 attempt=0
@@ -117,6 +118,16 @@ for client_id in bootstrap-app gateway-integration gateway-secondary; do
 	printf '%s' "$client_registration" | grep -q '"token_endpoint_auth_method":"client_secret_post"'
 	printf '%s' "$client_registration" | grep -q '"grant_types":\["authorization_code","refresh_token"\]'
 	printf '%s' "$client_registration" | grep -q '"response_types":\["code"\]'
+done
+# The browser reaches test relying parties through host loopback, while Hydra
+# reaches their real back-channel endpoints across the container boundary.
+for client_port in gateway-integration:5556 gateway-secondary:5558; do
+	client_id=${client_port%:*}
+	port=${client_port#*:}
+	client_registration=$(curl --fail --silent --show-error "http://localhost:4445/admin/clients/${client_id}")
+	client_registration=$(printf '%s' "$client_registration" | sed "s#http://localhost:${port}/auth/backchannel-logout#http://host.docker.internal:${port}/auth/backchannel-logout#")
+	curl --fail --silent --show-error --request PUT --header 'Content-Type: application/json' \
+		--data "$client_registration" "http://localhost:4445/admin/clients/${client_id}" >/dev/null
 done
 bootstrap_app=$(docker compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',name,description,launch_url,oidc_client_id,health_url,monitoring_url) FROM managed_apps WHERE slug='bootstrap-app'")
 [ "$bootstrap_app" = 'Bootstrap app updated|Updated bootstrap reconciliation coverage.|https://bootstrap.dev.e6qu.dev/apps|bootstrap-app|https://bootstrap.dev.e6qu.dev/ready|https://bootstrap.dev.e6qu.dev/monitoring' ]
@@ -168,7 +179,7 @@ OIDC_GATEWAY_UPSTREAM_URL=http://127.0.0.1:5557 \
 OIDC_GATEWAY_POST_LOGOUT_URL=http://localhost:5556/auth/signed-out \
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
-OIDC_GATEWAY_LISTEN_ADDRESS=127.0.0.1:5556 \
+OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5556 \
 DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
 "$gateway_binary" &
 gateway_pid=$!
@@ -180,7 +191,7 @@ OIDC_GATEWAY_UPSTREAM_URL=http://127.0.0.1:5559 \
 OIDC_GATEWAY_POST_LOGOUT_URL=http://localhost:5558/auth/signed-out \
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
-OIDC_GATEWAY_LISTEN_ADDRESS=127.0.0.1:5558 \
+OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5558 \
 DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
 "$gateway_binary" &
 gateway_secondary_pid=$!

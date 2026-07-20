@@ -25,6 +25,9 @@ secret stored in AWS Secrets Manager, together with the separate Secrets
 Manager ARNs for the Shauth and Ory Hydra database URLs created by `fck-rds`.
 The module creates a separate runtime secret containing generated Hydra and
 bootstrap-admin secrets.
+The supplied Shauth image also provides the patched `/hydra` binary; the task
+uses that same immutable image for Hydra and both database migration entry
+points. The provider is fully built before deployment.
 
 Set `entra_tenant_id`, `entra_client_id`, and `entra_oauth_secret_arn` together
 to enable Microsoft Entra ID as an additional upstream identity source. The
