@@ -5,6 +5,33 @@ variable "name" {
 }
 variable "vpc_id" { type = string }
 variable "private_subnet_ids" { type = list(string) }
+variable "create_api_gateway_vpc_link" {
+  type        = bool
+  default     = true
+  description = "Whether this module creates and owns its Amazon API Gateway VPC Link and link security group."
+
+  validation {
+    condition = var.create_api_gateway_vpc_link ? (
+      var.api_gateway_vpc_link_id == null && var.api_gateway_vpc_link_security_group_id == null
+      ) : (
+      var.api_gateway_vpc_link_id != null && trimspace(var.api_gateway_vpc_link_id) != "" &&
+      var.api_gateway_vpc_link_security_group_id != null && trimspace(var.api_gateway_vpc_link_security_group_id) != ""
+    )
+    error_message = "When create_api_gateway_vpc_link is true, the existing VPC Link inputs must be null; when false, api_gateway_vpc_link_id and api_gateway_vpc_link_security_group_id must both be set to non-empty values."
+  }
+}
+variable "api_gateway_vpc_link_id" {
+  type        = string
+  default     = null
+  nullable    = true
+  description = "Existing Amazon API Gateway VPC Link ID used when create_api_gateway_vpc_link is false."
+}
+variable "api_gateway_vpc_link_security_group_id" {
+  type        = string
+  default     = null
+  nullable    = true
+  description = "Security group attached to api_gateway_vpc_link_id when create_api_gateway_vpc_link is false."
+}
 variable "ecs_cluster_arn" { type = string }
 variable "hosted_zone_id" { type = string }
 variable "domain_name" { type = string }
