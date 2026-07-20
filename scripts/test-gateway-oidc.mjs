@@ -95,6 +95,42 @@ try {
   assert.equal(queryGateway(primaryDatabase, "SELECT string_agg(DISTINCT client_id, ',' ORDER BY client_id) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "gateway-integration");
   assert.equal(queryGateway(secondaryDatabase, "SELECT string_agg(DISTINCT client_id, ',' ORDER BY client_id) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "gateway-secondary");
 
+  const correlatedProviderSession = queryShauth(`SELECT browser_session_id::text FROM hydra_login_sessions WHERE hydra_session_id='${providerSessionID}'`);
+  assert.ok(correlatedProviderSession, "Shauth must persist Ory Hydra's provider session ID");
+  assert.notEqual(correlatedProviderSession, providerSessionID, "Shauth must not mistake its own browser-session ID for Ory Hydra's provider session ID");
+
+  // Provider-initiated logout starts at Shauth rather than either relying
+  // party. It must still notify both independently persisted RP sessions.
+  await page.goto("http://localhost:8080/logout");
+  await page.getByRole("button", { name: "Sign out everywhere" }).click();
+  await waitForURL(page, "http://localhost:8080/signed-out", navigationTrace, browserErrors);
+  await page.getByRole("heading", { name: "You are signed out" }).waitFor();
+  let providerSignInControl = page.getByRole("link", { name: "Sign in to Shauth" });
+  assert.equal(await providerSignInControl.getAttribute("href"), "/login");
+  await page.reload();
+  await page.getByRole("heading", { name: "You are signed out" }).waitFor();
+  providerSignInControl = page.getByRole("link", { name: "Sign in to Shauth" });
+  assert.equal(await providerSignInControl.getAttribute("href"), "/login");
+  await waitForSessionStatus(context, "http://localhost:5556", 401);
+  await waitForSessionStatus(context, "http://localhost:5558", 401);
+  await waitForLogoutTokenCount(primaryDatabase, "1");
+  await waitForLogoutTokenCount(secondaryDatabase, "1");
+  assert.equal(queryGateway(primaryDatabase, "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "0");
+  assert.equal(queryGateway(secondaryDatabase, "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "0");
+  assert.equal(queryShauth(`SELECT count(*) FROM sessions WHERE user_id='${session.subject}'::uuid AND revoked_at IS NULL`), "0", "provider logout must revoke every Shauth browser session for the user");
+
+  await providerSignInControl.click();
+  await page.locator("#username").fill("admin");
+  await page.locator("#password").fill(password);
+  await page.getByRole("button", { name: "Sign in with password" }).click();
+  await page.waitForURL("http://localhost:8080/");
+  await page.goto("http://localhost:5556/");
+  await page.waitForURL("http://localhost:5556/");
+  await assertSession(context, "http://localhost:5556", 200);
+  await page.goto("http://localhost:5558/");
+  await page.waitForURL("http://localhost:5558/");
+  await assertSession(context, "http://localhost:5558", 200);
+
   await page.goto("http://localhost:5556/");
   await page.waitForURL("http://localhost:5556/");
   await page.getByRole("button", { name: "Sign out" }).click();
@@ -108,17 +144,8 @@ try {
   assert.equal(await signInControl.getAttribute("href"), "/auth/login", "reloaded signed-out page must preserve the application-local sign-in control");
   await assertSession(context, "http://localhost:5556", 401);
   await assertSession(context, "http://localhost:5558", 401);
-  let primaryLogoutTokens = "0";
-  let secondaryLogoutTokens = "0";
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const logoutQuery = "SELECT count(*) FROM oidc_gateway_logout_tokens WHERE expires_at > now() + interval '30 seconds' AND expires_at <= now() + interval '2 minutes'";
-    primaryLogoutTokens = queryGateway(primaryDatabase, logoutQuery);
-    secondaryLogoutTokens = queryGateway(secondaryDatabase, logoutQuery);
-    if (primaryLogoutTokens === "1" && secondaryLogoutTokens === "1") break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  assert.equal(primaryLogoutTokens, "1", "primary relying party must validate its provider logout token");
-  assert.equal(secondaryLogoutTokens, "1", "secondary relying party must validate its provider logout token");
+  await waitForLogoutTokenCount(primaryDatabase, "2");
+  await waitForLogoutTokenCount(secondaryDatabase, "2");
   assert.equal(queryGateway(primaryDatabase, "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "0");
   assert.equal(queryGateway(secondaryDatabase, "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "0");
   const noLocalSessionLogout = await context.request.post("http://localhost:5556/auth/logout", {
@@ -180,6 +207,20 @@ function queryGateway(database, query) {
   ).trim();
 }
 
+function queryShauth(query) {
+  return queryGateway("shauth", query);
+}
+
+async function waitForLogoutTokenCount(database, expected) {
+  let count = "0";
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    count = queryGateway(database, "SELECT count(*) FROM oidc_gateway_logout_tokens WHERE expires_at > now() + interval '30 seconds' AND expires_at <= now() + interval '2 minutes'");
+    if (count === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(count, expected, `${database} must validate every provider logout token`);
+}
+
 function closeServer(server) {
   return new Promise((resolve) => server.close(resolve));
 }
@@ -209,4 +250,15 @@ async function assertSession(context, applicationOrigin, expectedStatus) {
       role: "admin",
     });
   }
+}
+
+async function waitForSessionStatus(context, applicationOrigin, expectedStatus) {
+  let actualStatus = 0;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const response = await context.request.get(`${applicationOrigin}/auth/session`);
+    actualStatus = response.status();
+    if (actualStatus === expectedStatus) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(actualStatus, expectedStatus, `${applicationOrigin} session did not reach expected status`);
 }

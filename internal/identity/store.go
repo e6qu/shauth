@@ -692,6 +692,60 @@ func (s *Store) ListSessions(ctx context.Context, userID string) ([]Session, err
 	}
 	return sessions, rows.Err()
 }
+
+func (s *Store) RecordHydraLoginSession(ctx context.Context, browserSessionID, hydraSessionID string, now time.Time) error {
+	if strings.TrimSpace(browserSessionID) == "" || strings.TrimSpace(hydraSessionID) == "" {
+		return fmt.Errorf("browser and Ory Hydra session IDs are required")
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO hydra_login_sessions (hydra_session_id,browser_session_id,created_at)
+	VALUES ($1,$2::uuid,$3) ON CONFLICT (hydra_session_id) DO UPDATE SET browser_session_id=EXCLUDED.browser_session_id`, hydraSessionID, browserSessionID, now.UTC())
+	if err != nil {
+		return fmt.Errorf("record Ory Hydra login session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) HydraLoginSessionIDs(ctx context.Context, browserSessionID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT hydra_session_id FROM hydra_login_sessions WHERE browser_session_id=$1::uuid ORDER BY created_at,hydra_session_id`, browserSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list Ory Hydra login sessions: %w", err)
+	}
+	defer rows.Close()
+	var sessionIDs []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return nil, fmt.Errorf("scan Ory Hydra login session: %w", err)
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list Ory Hydra login sessions: %w", err)
+	}
+	return sessionIDs, nil
+}
+
+func (s *Store) UserHydraLoginSessionIDs(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT h.hydra_session_id
+	FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
+	WHERE s.user_id=$1::uuid ORDER BY h.hydra_session_id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list user Ory Hydra login sessions: %w", err)
+	}
+	defer rows.Close()
+	var sessionIDs []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return nil, fmt.Errorf("scan user Ory Hydra login session: %w", err)
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list user Ory Hydra login sessions: %w", err)
+	}
+	return sessionIDs, nil
+}
 func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL`, id, now.UTC())
 	if err != nil {
