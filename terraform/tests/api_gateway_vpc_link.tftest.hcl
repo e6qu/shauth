@@ -47,6 +47,7 @@ run "deployment_owned_vpc_link" {
   command = plan
 
   variables {
+    create_api_gateway_vpc_link            = false
     api_gateway_vpc_link_id                = "vpclink-0123456789abcdef0"
     api_gateway_vpc_link_security_group_id = "sg-0123456789abcdef0"
   }
@@ -80,20 +81,22 @@ run "reject_vpc_link_without_security_group" {
   command = plan
 
   variables {
-    api_gateway_vpc_link_id = "vpclink-0123456789abcdef0"
+    create_api_gateway_vpc_link = false
+    api_gateway_vpc_link_id     = "vpclink-0123456789abcdef0"
   }
 
   plan_options {
     refresh = false
   }
 
-  expect_failures = [var.api_gateway_vpc_link_id]
+  expect_failures = [var.create_api_gateway_vpc_link]
 }
 
 run "reject_security_group_without_vpc_link" {
   command = plan
 
   variables {
+    create_api_gateway_vpc_link            = false
     api_gateway_vpc_link_security_group_id = "sg-0123456789abcdef0"
   }
 
@@ -101,5 +104,20 @@ run "reject_security_group_without_vpc_link" {
     refresh = false
   }
 
-  expect_failures = [var.api_gateway_vpc_link_id]
+  expect_failures = [var.create_api_gateway_vpc_link]
+}
+
+run "reject_existing_coordinates_while_owning_vpc_link" {
+  command = plan
+
+  variables {
+    api_gateway_vpc_link_id                = "vpclink-0123456789abcdef0"
+    api_gateway_vpc_link_security_group_id = "sg-0123456789abcdef0"
+  }
+
+  plan_options {
+    refresh = false
+  }
+
+  expect_failures = [var.create_api_gateway_vpc_link]
 }

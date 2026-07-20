@@ -3,7 +3,7 @@ locals {
   public_url                = "https://${var.domain_name}"
   invitation_email_domain   = split("@", var.invitation_email_from)[1]
   entra_enabled             = var.entra_tenant_id != null && var.entra_client_id != null && var.entra_oauth_secret_arn != null
-  owns_api_gateway_vpc_link = var.api_gateway_vpc_link_id == null
+  owns_api_gateway_vpc_link = var.create_api_gateway_vpc_link
   api_gateway_vpc_link_id = (
     local.owns_api_gateway_vpc_link
     ? aws_apigatewayv2_vpc_link.this[0].id
