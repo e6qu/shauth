@@ -172,7 +172,20 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'health_url=http://localhost:5555/health' \
   --data-urlencode 'monitoring_url=http://localhost:5555/monitoring' \
   http://localhost:8080/admin/apps | grep -q 'Integration app'
+SHAUTH_UNVERIFIED_USER_PASSWORD=$(random_secret)
+export SHAUTH_UNVERIFIED_USER_PASSWORD
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${csrf_token}" \
+  --data-urlencode 'username=unverified-oidc' \
+  --data-urlencode 'email=unverified-oidc@localhost.test' \
+  --data-urlencode "password=${SHAUTH_UNVERIFIED_USER_PASSWORD}" \
+  --data-urlencode 'role=developer' \
+  http://localhost:8080/admin/users | grep -q 'unverified-oidc'
+docker compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 \
+  -c "UPDATE users SET email_verified=FALSE WHERE username='unverified-oidc'" >/dev/null
+[ "$(docker compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT email_verified FROM users WHERE username='unverified-oidc'")" = f ]
 npm run test:browser
+npm run test:oidc-unverified
 
 docker compose exec -T postgres createdb -U shauth --owner=shauth "$SHAUTH_GATEWAY_PRIMARY_DATABASE"
 docker compose exec -T postgres createdb -U shauth --owner=shauth "$SHAUTH_GATEWAY_SECONDARY_DATABASE"
