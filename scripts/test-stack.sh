@@ -36,6 +36,10 @@ SHAUTH_GATEWAY_COOKIE_SECRET=$(random_secret)
 export SHAUTH_GATEWAY_COOKIE_SECRET
 SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET=$(random_secret)
 export SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET
+SHAUTH_GATEWAY_PRIMARY_DATABASE=shauth_gateway_primary
+export SHAUTH_GATEWAY_PRIMARY_DATABASE
+SHAUTH_GATEWAY_SECONDARY_DATABASE=shauth_gateway_secondary
+export SHAUTH_GATEWAY_SECONDARY_DATABASE
 SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":""},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5556/auth/backchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":""},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://localhost:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://localhost:5558/auth/callback"],"post_logout_redirect_uris":["http://localhost:5558/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5558/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5558/auth/backchannel-logout","health_url":"http://localhost:5558/auth/healthz","monitoring_url":""}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET")
 export SHAUTH_BOOTSTRAP_APPS_JSON
 cookie_jar=$(mktemp)
@@ -170,6 +174,15 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   http://localhost:8080/admin/apps | grep -q 'Integration app'
 npm run test:browser
 
+docker compose exec -T postgres createdb -U shauth --owner=shauth "$SHAUTH_GATEWAY_PRIMARY_DATABASE"
+docker compose exec -T postgres createdb -U shauth --owner=shauth "$SHAUTH_GATEWAY_SECONDARY_DATABASE"
+for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE"; do
+	if [ -n "$(docker compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc "SELECT to_regclass('public.oidc_gateway_sessions')")" ]; then
+		echo "fresh relying-party database unexpectedly contained the gateway schema: $gateway_database" >&2
+		exit 1
+	fi
+done
+
 go build -o "$gateway_binary" ./cmd/shauth-gateway
 OIDC_GATEWAY_ISSUER=http://localhost:8080 \
 OIDC_GATEWAY_CLIENT_ID=gateway-integration \
@@ -180,7 +193,7 @@ OIDC_GATEWAY_POST_LOGOUT_URL=http://localhost:5556/auth/signed-out \
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5556 \
-DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
+DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/${SHAUTH_GATEWAY_PRIMARY_DATABASE}?sslmode=disable" \
 "$gateway_binary" &
 gateway_pid=$!
 OIDC_GATEWAY_ISSUER=http://localhost:8080 \
@@ -192,7 +205,7 @@ OIDC_GATEWAY_POST_LOGOUT_URL=http://localhost:5558/auth/signed-out \
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5558 \
-DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
+DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/${SHAUTH_GATEWAY_SECONDARY_DATABASE}?sslmode=disable" \
 "$gateway_binary" &
 gateway_secondary_pid=$!
 attempt=0
@@ -203,6 +216,19 @@ done
 if [ "$attempt" -eq 60 ]; then
   exit 1
 fi
+expected_gateway_tables='oidc_gateway_logout_tokens
+oidc_gateway_sessions
+shauth_gateway_schema_migrations'
+for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE"; do
+	gateway_tables=$(docker compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")
+	if [ "$gateway_tables" != "$expected_gateway_tables" ]; then
+		echo "gateway database contained an unexpected schema: $gateway_database" >&2
+		printf '%s\n' "$gateway_tables" >&2
+		exit 1
+	fi
+	migration_count=$(docker compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc 'SELECT count(*) FROM shauth_gateway_schema_migrations')
+	[ "$migration_count" = 1 ]
+done
 npm run test:gateway
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
   'http://localhost:8080/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |

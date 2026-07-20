@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 
-CREATE TABLE oidc_gateway_sessions (
+CREATE TABLE IF NOT EXISTS oidc_gateway_sessions (
     id UUID PRIMARY KEY,
     client_id TEXT NOT NULL,
     token_hash BYTEA NOT NULL UNIQUE,
@@ -16,11 +16,11 @@ CREATE TABLE oidc_gateway_sessions (
     revoked_at TIMESTAMPTZ
 );
 
-CREATE INDEX oidc_gateway_sessions_provider_idx
+CREATE INDEX IF NOT EXISTS oidc_gateway_sessions_provider_idx
     ON oidc_gateway_sessions(client_id, issuer, provider_session_id)
     WHERE revoked_at IS NULL;
 
-CREATE TABLE oidc_gateway_logout_tokens (
+CREATE TABLE IF NOT EXISTS oidc_gateway_logout_tokens (
     client_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,

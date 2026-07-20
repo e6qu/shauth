@@ -54,6 +54,11 @@ provider patch that adds the Back-Channel Logout 1.0 Errata 1 `exp` claim with
 a two-minute lifetime. The same immutable image runs Shauth, Hydra, and their
 migration entry points, so production never builds or patches the provider at
 startup.
+Each push to `main` publishes `ghcr.io/e6qu/shauth:<sha12>` as a Linux amd64
+and arm64 image index. The direct single-platform images remain addressable as
+`<sha12>-amd64` and `<sha12>-arm64`; no `latest` or branch alias is published.
+The workflow verifies the registry manifests and retains the newest 20
+immutable releases.
 Shauth exposes Ory Hydra's complete public OpenID Connect surface at its public
 issuer, including discovery, authorization, token, UserInfo, revocation,
 introspection, and front-channel logout endpoints. Relying applications never
@@ -120,6 +125,11 @@ the application's public origin and must be registered on its Shauth client.
 `OIDC_GATEWAY_SESSION_MAX_AGE` defaults to eight hours. Production issuer,
 public, and post-logout coordinates require HTTPS; explicit insecure cookies
 are accepted only for loopback integration tests.
+
+Each gateway deployment uses its relying party's distinct PostgreSQL database,
+not Shauth's identity database. `/shauth-gateway` applies its embedded,
+gateway-only session and replay-protection migrations before accepting traffic;
+startup fails if the dedicated database is unavailable or cannot be migrated.
 
 ## Deployment model
 
