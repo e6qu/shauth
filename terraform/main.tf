@@ -1,8 +1,19 @@
 locals {
-  tags                    = merge(var.tags, { service = "shauth", managed-by = "terraform" })
-  public_url              = "https://${var.domain_name}"
-  invitation_email_domain = split("@", var.invitation_email_from)[1]
-  entra_enabled           = var.entra_tenant_id != null && var.entra_client_id != null && var.entra_oauth_secret_arn != null
+  tags                      = merge(var.tags, { service = "shauth", managed-by = "terraform" })
+  public_url                = "https://${var.domain_name}"
+  invitation_email_domain   = split("@", var.invitation_email_from)[1]
+  entra_enabled             = var.entra_tenant_id != null && var.entra_client_id != null && var.entra_oauth_secret_arn != null
+  owns_api_gateway_vpc_link = var.api_gateway_vpc_link_id == null
+  api_gateway_vpc_link_id = (
+    local.owns_api_gateway_vpc_link
+    ? aws_apigatewayv2_vpc_link.this[0].id
+    : var.api_gateway_vpc_link_id
+  )
+  api_gateway_vpc_link_security_group_id = (
+    local.owns_api_gateway_vpc_link
+    ? aws_security_group.api_link[0].id
+    : var.api_gateway_vpc_link_security_group_id
+  )
   shauth_environment = concat([
     { name = "SHAUTH_LISTEN_ADDRESS", value = ":8080" },
     { name = "SHAUTH_PUBLIC_URL", value = local.public_url },
@@ -30,6 +41,16 @@ locals {
   ] : [])
 }
 
+moved {
+  from = aws_security_group.api_link
+  to   = aws_security_group.api_link[0]
+}
+
+moved {
+  from = aws_apigatewayv2_vpc_link.this
+  to   = aws_apigatewayv2_vpc_link.this[0]
+}
+
 resource "aws_cloudwatch_log_group" "this" {
   name              = "/e6qu/${var.name}"
   retention_in_days = 30
@@ -43,7 +64,7 @@ resource "aws_security_group" "task" {
     from_port       = 8080
     to_port         = 8080
     protocol        = "tcp"
-    security_groups = [aws_security_group.api_link.id]
+    security_groups = [local.api_gateway_vpc_link_security_group_id]
   }
   egress {
     from_port   = 0
@@ -55,6 +76,7 @@ resource "aws_security_group" "task" {
 }
 
 resource "aws_security_group" "api_link" {
+  count       = local.owns_api_gateway_vpc_link ? 1 : 0
   name_prefix = "${var.name}-api-link-"
   vpc_id      = var.vpc_id
   egress {
@@ -241,9 +263,10 @@ resource "aws_ecs_service" "this" {
 }
 
 resource "aws_apigatewayv2_vpc_link" "this" {
+  count              = local.owns_api_gateway_vpc_link ? 1 : 0
   name               = var.name
   subnet_ids         = var.private_subnet_ids
-  security_group_ids = [aws_security_group.api_link.id]
+  security_group_ids = [aws_security_group.api_link[0].id]
   tags               = local.tags
 }
 resource "aws_apigatewayv2_api" "this" {
@@ -258,7 +281,7 @@ resource "aws_apigatewayv2_integration" "this" {
   integration_uri        = aws_service_discovery_service.this.arn
   integration_method     = "ANY"
   connection_type        = "VPC_LINK"
-  connection_id          = aws_apigatewayv2_vpc_link.this.id
+  connection_id          = local.api_gateway_vpc_link_id
   payload_format_version = "1.0"
 }
 resource "aws_apigatewayv2_route" "this" {

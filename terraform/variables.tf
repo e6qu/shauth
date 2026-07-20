@@ -5,6 +5,27 @@ variable "name" {
 }
 variable "vpc_id" { type = string }
 variable "private_subnet_ids" { type = list(string) }
+variable "api_gateway_vpc_link_id" {
+  type        = string
+  default     = null
+  nullable    = true
+  description = "Existing Amazon API Gateway VPC Link ID. Set together with api_gateway_vpc_link_security_group_id to reuse a deployment-owned link."
+
+  validation {
+    condition = (
+      (var.api_gateway_vpc_link_id == null && var.api_gateway_vpc_link_security_group_id == null) ||
+      (var.api_gateway_vpc_link_id != null && trimspace(var.api_gateway_vpc_link_id) != "" &&
+      var.api_gateway_vpc_link_security_group_id != null && trimspace(var.api_gateway_vpc_link_security_group_id) != "")
+    )
+    error_message = "api_gateway_vpc_link_id and api_gateway_vpc_link_security_group_id must both be set to non-empty values or both be null."
+  }
+}
+variable "api_gateway_vpc_link_security_group_id" {
+  type        = string
+  default     = null
+  nullable    = true
+  description = "Security group attached to api_gateway_vpc_link_id. Set together with api_gateway_vpc_link_id."
+}
 variable "ecs_cluster_arn" { type = string }
 variable "hosted_zone_id" { type = string }
 variable "domain_name" { type = string }

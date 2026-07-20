@@ -37,6 +37,13 @@ configuration is rejected during Terraform validation.
 
 The caller supplies the shared VPC, private subnet IDs, Amazon ECS cluster,
 and Route 53 hosted zone so Shauth can coexist with the other `dev` services.
+By default the module also creates and owns its Amazon API Gateway VPC Link and
+the link's security group. A deployment that consolidates links can instead set
+`api_gateway_vpc_link_id` and `api_gateway_vpc_link_security_group_id`
+together. In that mode the module creates neither shared resource, permits the
+supplied link security group to reach Shauth's task, and attaches the HTTP API
+integration to the supplied link. Supplying only one value is rejected during
+Terraform validation.
 
 Shauth's task role has only the permissions required for identity delivery.
 Administrators register each managed app with its OIDC client, launch URL,
