@@ -47,6 +47,7 @@ const server = http.createServer(async (request, response) => {
     assert.ok(tokens.id_token, "token exchange omitted the ID token");
     const idTokenPayload = JSON.parse(Buffer.from(tokens.id_token.split(".")[1], "base64url"));
     assert.ok(idTokenPayload.sid, "ID token omitted the correlated provider session ID");
+    assert.equal(idTokenPayload.email_verified, true, "ID token did not preserve verified-email evidence");
 
     const userInfoResponse = await fetch(`${issuer}/userinfo`, {
       headers: { authorization: `Bearer ${tokens.access_token}` },
@@ -55,6 +56,7 @@ const server = http.createServer(async (request, response) => {
     const user = await userInfoResponse.json();
     assert.equal(user.preferred_username, "admin");
     assert.equal(user.email, "admin@localhost.test");
+    assert.equal(user.email_verified, true, "UserInfo did not preserve verified-email evidence");
     assert.equal(user.role, "admin");
 
     response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });

@@ -31,6 +31,7 @@ type User struct {
 	ID                string
 	Username          string
 	Email             string
+	EmailVerified     bool
 	GitHubLogin       string
 	FederatedIdentity string
 	Role              Role
@@ -447,7 +448,7 @@ func (s *Store) CreatePasswordUser(ctx context.Context, username, email, passwor
 	if err != nil {
 		return User{}, fmt.Errorf("hash password: %w", err)
 	}
-	return s.insertUser(ctx, randomUUID(), username, email, hash, nil, "", role)
+	return s.insertUser(ctx, randomUUID(), username, email, true, hash, nil, "", role)
 }
 
 // EnsureBootstrapAdmin creates the explicitly configured break-glass admin on
@@ -456,17 +457,25 @@ func (s *Store) EnsureBootstrapAdmin(ctx context.Context, email, password string
 	if email == "" {
 		return User{}, nil
 	}
-	username := strings.Split(strings.ToLower(strings.TrimSpace(email)), "@")[0]
-	user, err := s.CreatePasswordUser(ctx, username, email, password, RoleAdmin)
-	if err == nil {
-		return user, nil
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || len(password) < 14 {
+		return User{}, fmt.Errorf("bootstrap admin email and a password of at least 14 characters are required")
 	}
-	var existing User
-	err = s.pool.QueryRow(ctx, `UPDATE users SET role='admin', disabled_at=NULL WHERE email=$1 RETURNING id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at`, strings.ToLower(strings.TrimSpace(email))).Scan(&existing.ID, &existing.Username, &existing.Email, &existing.GitHubLogin, &existing.Role, &existing.DisabledAt, &existing.CreatedAt)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, fmt.Errorf("hash bootstrap admin password: %w", err)
+	}
+	username := strings.Split(email, "@")[0]
+	var user User
+	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,created_at)
+	VALUES ($1::uuid,$2,$3,TRUE,$4,'admin',now())
+	ON CONFLICT (email) DO UPDATE SET password_hash=EXCLUDED.password_hash,email_verified=TRUE,role='admin',disabled_at=NULL
+	RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, randomUUID(), username, email, hash).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err != nil {
 		return User{}, fmt.Errorf("ensure bootstrap admin: %w", err)
 	}
-	return existing, nil
+	return user, nil
 }
 
 func (s *Store) CreateInvitation(ctx context.Context, email string, role Role, invitedBy string, now time.Time) (string, Invitation, error) {
@@ -513,11 +522,11 @@ func (s *Store) RevokeInvitation(ctx context.Context, id string, now time.Time) 
 	return nil
 }
 
-func (s *Store) insertUser(ctx context.Context, id, username, email string, hash []byte, githubID *int64, githubLogin string, role Role) (User, error) {
+func (s *Store) insertUser(ctx context.Context, id, username, email string, emailVerified bool, hash []byte, githubID *int64, githubLogin string, role Role) (User, error) {
 	var user User
-	err := s.pool.QueryRow(ctx, `INSERT INTO users (id, username, email, password_hash, github_id, github_login, role, created_at)
-	VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,now()) RETURNING id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, hash, githubID, nullable(githubLogin), role).
-		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	err := s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,github_id,github_login,role,created_at)
+	VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, emailVerified, hash, githubID, nullable(githubLogin), role).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err != nil {
 		return User{}, fmt.Errorf("create user: %w", err)
 	}
@@ -527,8 +536,8 @@ func (s *Store) insertUser(ctx context.Context, id, username, email string, hash
 func (s *Store) AuthenticatePassword(ctx context.Context, username, password string) (User, error) {
 	var user User
 	var hash []byte
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at,password_hash FROM users WHERE username=$1`, strings.TrimSpace(username)).
-		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &hash)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at,password_hash FROM users WHERE username=$1`, strings.TrimSpace(username)).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &hash)
 	if err != nil || user.DisabledAt != nil || len(hash) == 0 || bcrypt.CompareHashAndPassword(hash, []byte(password)) != nil {
 		return User{}, fmt.Errorf("invalid username or password")
 	}
@@ -536,37 +545,44 @@ func (s *Store) AuthenticatePassword(ctx context.Context, username, password str
 }
 
 func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, login, email string, role Role) (User, error) {
+	login = strings.TrimSpace(login)
+	email = strings.ToLower(strings.TrimSpace(email))
 	var user User
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at FROM users WHERE github_id=$1`, githubID).
-		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at FROM users WHERE github_id=$1`, githubID).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		if user.DisabledAt != nil {
 			return User{}, fmt.Errorf("user is disabled")
 		}
-		if user.Role != role {
-			_, err = s.pool.Exec(ctx, `UPDATE users SET role=$2 WHERE id=$1::uuid`, user.ID, role)
+		if user.Role != role || user.Email != email || !user.EmailVerified {
+			_, err = s.pool.Exec(ctx, `UPDATE users SET role=$2,email=$3,email_verified=TRUE WHERE id=$1::uuid`, user.ID, role, email)
 			if err != nil {
-				return User{}, fmt.Errorf("synchronize GitHub user role: %w", err)
+				return User{}, fmt.Errorf("synchronize GitHub user: %w", err)
 			}
 			user.Role = role
+			user.Email = email
+			user.EmailVerified = true
 		}
 		return user, nil
 	}
 	if err != pgx.ErrNoRows {
 		return User{}, fmt.Errorf("find GitHub user: %w", err)
 	}
-	login = strings.TrimSpace(login)
-	email = strings.ToLower(strings.TrimSpace(email))
 	if login == "" || email == "" {
 		return User{}, fmt.Errorf("GitHub account must provide login and verified email")
 	}
-	return s.insertUser(ctx, randomUUID(), login, email, nil, &githubID, login, role)
+	return s.insertUser(ctx, randomUUID(), login, email, true, nil, &githubID, login, role)
 }
 
-func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, username, email string) (User, error) {
+func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, username, email string, emailVerified bool) (User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	username = strings.TrimSpace(username)
+	if tenantID == "" || objectID == "" || email == "" || username == "" {
+		return User{}, fmt.Errorf("Microsoft Entra ID account must provide tenant, object, username, and email claims")
+	}
 	var user User
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at FROM users WHERE entra_tenant_id=$1::uuid AND entra_object_id=$2::uuid`, tenantID, objectID).
-		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	err := s.pool.QueryRow(ctx, `UPDATE users SET email_verified=CASE WHEN email=$3 THEN email_verified OR $4 ELSE $4 END,email=$3 WHERE entra_tenant_id=$1::uuid AND entra_object_id=$2::uuid RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, tenantID, objectID, email, emailVerified).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		if user.DisabledAt != nil {
 			return User{}, fmt.Errorf("user is disabled")
@@ -576,13 +592,8 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return User{}, fmt.Errorf("find Microsoft Entra ID user: %w", err)
 	}
-	email = strings.ToLower(strings.TrimSpace(email))
-	username = strings.TrimSpace(username)
-	if tenantID == "" || objectID == "" || email == "" || username == "" {
-		return User{}, fmt.Errorf("Microsoft Entra ID account must provide tenant, object, username, and email claims")
-	}
-	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid WHERE email=$1 AND entra_tenant_id IS NULL AND disabled_at IS NULL RETURNING id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID).
-		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND entra_tenant_id IS NULL AND disabled_at IS NULL RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		return user, nil
 	}
@@ -590,8 +601,8 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 		return User{}, fmt.Errorf("link Microsoft Entra ID user: %w", err)
 	}
 	id := randomUUID()
-	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,password_hash,role,entra_tenant_id,entra_object_id,created_at) VALUES ($1::uuid,$2,$3,NULL,'developer',$4::uuid,$5::uuid,now()) RETURNING id::text,username,email,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, tenantID, objectID).
-		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,entra_tenant_id,entra_object_id,created_at) VALUES ($1::uuid,$2,$3,$4,NULL,'developer',$5::uuid,$6::uuid,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, emailVerified, tenantID, objectID).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err != nil {
 		return User{}, fmt.Errorf("create Microsoft Entra ID user: %w", err)
 	}
@@ -629,9 +640,9 @@ func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (Use
 	hash := sha256.Sum256([]byte(raw))
 	var user User
 	var session Session
-	err = s.pool.QueryRow(ctx, `SELECT u.id::text,u.username,u.email,COALESCE(u.github_login,''),u.role,u.disabled_at,u.created_at,s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address
+	err = s.pool.QueryRow(ctx, `SELECT u.id::text,u.username,u.email,u.email_verified,COALESCE(u.github_login,''),u.role,u.disabled_at,u.created_at,s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address
 	FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.browser_token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>$2 AND s.last_seen_at>$3 AND u.disabled_at IS NULL`, hash[:], now.UTC(), now.UTC().Add(-policy.BrowserIdleTimeout)).
-		Scan(&user.ID, &user.Username, &user.Email, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &session.ID, &session.UserID, &session.CreatedAt, &session.LastSeen, &session.ExpiresAt, &session.RevokedAt, &session.UserAgent, &session.RemoteIP)
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &session.ID, &session.UserID, &session.CreatedAt, &session.LastSeen, &session.ExpiresAt, &session.RevokedAt, &session.UserAgent, &session.RemoteIP)
 	if err != nil {
 		return User{}, Session{}, fmt.Errorf("read active session: %w", err)
 	}
@@ -644,7 +655,7 @@ func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (Use
 }
 
 func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'GitHub: ' || github_login WHEN entra_object_id IS NOT NULL THEN 'Microsoft Entra ID' ELSE 'Local account' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC`, strings.TrimSpace(query))
+	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'GitHub: ' || github_login WHEN entra_object_id IS NOT NULL THEN 'Microsoft Entra ID' ELSE 'Local account' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC`, strings.TrimSpace(query))
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -652,7 +663,7 @@ func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.GitHubLogin, &u.FederatedIdentity, &u.Role, &u.DisabledAt, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.EmailVerified, &u.GitHubLogin, &u.FederatedIdentity, &u.Role, &u.DisabledAt, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)

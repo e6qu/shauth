@@ -231,6 +231,7 @@ userinfo_response=$(curl --fail --silent --show-error \
 printf '%s' "$userinfo_response" | grep -q '"email":"admin@localhost.test"'
 printf '%s' "$userinfo_response" | grep -q '"preferred_username":"admin"'
 printf '%s' "$userinfo_response" | grep -q '"role":"admin"'
+printf '%s' "$userinfo_response" | grep -q '"email_verified":true'
 printf '%s\n' 'refreshing access token'
 curl --fail --silent --show-error \
 	--data-urlencode 'grant_type=refresh_token' \

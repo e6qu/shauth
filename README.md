@@ -28,6 +28,12 @@ added to the GitHub OAuth application. When Microsoft Entra ID is enabled,
 Shauth discovers the configured tenant-specific issuer and verifies the ID
 token signature, issuer, audience, tenant, and nonce before linking the stable
 tenant and object identifiers to a Shauth user.
+Shauth persists email-verification evidence with each identity and publishes
+the standard `email_verified` claim in both ID tokens and UserInfo. Managed
+local accounts are administrator-attested, and GitHub accounts use GitHub's
+primary verified email endpoint. Microsoft Entra ID accounts are marked
+verified only when the tenant ID token verifies the actual `email` claim;
+falling back to `preferred_username` does not imply email verification.
 
 ## Access and session lifecycle
 

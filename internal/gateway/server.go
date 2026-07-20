@@ -47,6 +47,7 @@ type identityClaims struct {
 	ProviderSessionID string `json:"sid"`
 	Username          string `json:"preferred_username"`
 	Email             string `json:"email"`
+	EmailVerified     bool   `json:"email_verified"`
 	Role              string `json:"role"`
 	Nonce             string `json:"nonce"`
 }
@@ -257,7 +258,7 @@ func (server *Server) callback(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	var claims identityClaims
-	if err := verified.Claims(&claims); err != nil || claims.Subject == "" || claims.ProviderSessionID == "" || claims.Username == "" || claims.Email == "" || (claims.Role != "developer" && claims.Role != "admin") || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(pending.Nonce)) != 1 {
+	if err := verified.Claims(&claims); err != nil || claims.Subject == "" || claims.ProviderSessionID == "" || claims.Username == "" || claims.Email == "" || !claims.EmailVerified || (claims.Role != "developer" && claims.Role != "admin") || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(pending.Nonce)) != 1 {
 		http.Error(response, "ID token identity is incomplete", http.StatusUnauthorized)
 		return
 	}

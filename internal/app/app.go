@@ -500,6 +500,7 @@ type entraClaims struct {
 	ObjectID          string `json:"oid"`
 	TenantID          string `json:"tid"`
 	Email             string `json:"email"`
+	EmailVerified     bool   `json:"email_verified"`
 	PreferredUsername string `json:"preferred_username"`
 	Nonce             string `json:"nonce"`
 }
@@ -547,11 +548,8 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Microsoft Entra ID identity did not match this Shauth tenant", http.StatusForbidden)
 		return
 	}
-	email := strings.TrimSpace(claims.Email)
-	if email == "" {
-		email = strings.TrimSpace(claims.PreferredUsername)
-	}
-	user, err := s.store.FindOrCreateEntraUser(r.Context(), claims.TenantID, claims.ObjectID, entraUsername(claims.PreferredUsername, email, claims.ObjectID), email)
+	email, emailVerified := entraEmail(claims)
+	user, err := s.store.FindOrCreateEntraUser(r.Context(), claims.TenantID, claims.ObjectID, entraUsername(claims.PreferredUsername, email, claims.ObjectID), email, emailVerified)
 	if err != nil {
 		http.Error(w, "could not establish local account", http.StatusInternalServerError)
 		return
@@ -560,6 +558,13 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, relativeNext(transaction["next"]), http.StatusSeeOther)
+}
+
+func entraEmail(claims entraClaims) (string, bool) {
+	if email := strings.TrimSpace(claims.Email); email != "" {
+		return email, claims.EmailVerified
+	}
+	return strings.TrimSpace(claims.PreferredUsername), false
 }
 
 func entraUsername(preferred, email, objectID string) string {
@@ -682,8 +687,12 @@ func (s *Server) acceptHydraConsent(ctx context.Context, challenge string, scope
 	if err != nil {
 		return "", err
 	}
-	claims := map[string]any{"sub": user.ID, "email": user.Email, "preferred_username": user.Username, "role": user.Role}
+	claims := oidcIdentityClaims(user)
 	return s.hydraAccept(ctx, "/admin/oauth2/auth/requests/consent/accept", challenge, map[string]any{"grant_scope": scopes, "remember": true, "remember_for": int64(policy.OIDCSessionLifetime / time.Second), "session": map[string]any{"id_token": claims, "access_token": claims}})
+}
+
+func oidcIdentityClaims(user identity.User) map[string]any {
+	return map[string]any{"sub": user.ID, "email": user.Email, "email_verified": user.EmailVerified, "preferred_username": user.Username, "role": user.Role}
 }
 
 type hydraLogoutRequest struct {
