@@ -150,7 +150,6 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'redirect_uris=http://localhost:5555/callback' \
   --data-urlencode 'post_logout_redirect_uris=http://localhost:5555/signed-out' \
   --data-urlencode 'frontchannel_logout_uri=http://localhost:5555/frontchannel-logout' \
-  --data-urlencode 'backchannel_logout_uri=http://localhost:5555/backchannel-logout' \
   http://localhost:8080/admin/clients | grep -q 'shauth-integration-client'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/session-policy | grep -q 'Session time limits'
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
@@ -243,6 +242,14 @@ for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECO
 	[ "$migration_count" = 1 ]
 done
 npm run test:gateway
+# The provider-initiated browser test deliberately signs the administrator out
+# of every Shauth device, including this shell's independent cookie jar.
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${csrf_token}" \
+  --data-urlencode 'username=admin' \
+  --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
+  --data-urlencode 'next=/' \
+  http://localhost:8080/login >/dev/null
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
   'http://localhost:8080/oauth2/auth?client_id=shauth-integration-client&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback&state=integration' |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
@@ -329,28 +336,17 @@ if [ "$attempt" -eq 30 ]; then
   exit 1
 fi
 
-# Browser form posts must remain same-origin. Relying applications use Ory
-# Hydra's published logout endpoint instead of posting directly to Shauth.
+# Browser form posts must remain same-origin. Provider-initiated logout revokes
+# the user's correlated Ory Hydra sessions before rendering a durable signed-out
+# page; relying applications use Ory Hydra's published logout endpoint.
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data '' http://localhost:8080/logout)" = 403 ]
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data-urlencode 'challenge=invalid' http://localhost:8080/oauth/logout)" = 403 ]
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/logout | grep -q 'Sign out everywhere?'
 logout_start=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" http://localhost:8080/logout |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
-[ "$logout_start" = /oauth2/sessions/logout ]
-logout_callback=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "http://localhost:8080${logout_start}" |
-	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
-case "$logout_callback" in
-	http://localhost:8080/oauth/logout?logout_challenge=*) ;;
-	*) echo "unexpected Hydra logout callback: ${logout_callback}" >&2; exit 1 ;;
-esac
-logout_verifier=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_callback" |
-	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
-case "$logout_verifier" in
-	http://localhost:8080/oauth2/sessions/logout?logout_verifier=*) ;;
-	*) echo "unexpected Hydra logout verifier: ${logout_verifier}" >&2; exit 1 ;;
-esac
-logout_propagation=$(curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$logout_verifier")
-printf '%s' "$logout_propagation" | grep -q 'frontchannel-logout'
+[ "$logout_start" = /signed-out ]
+curl --fail --silent --show-error --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "http://localhost:8080${logout_start}" | grep -q 'You are signed out'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/signed-out | grep -q 'Sign in to Shauth'
 apps_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)
 [ "$apps_status" = 303 ]
 
