@@ -5,6 +5,7 @@ set -eu
 unset CDPATH
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+export GOWORK=off
 
 case ${SHAUTH_STACK_FOCUS:-} in
 	''|logout-correlation|browser-global-logout) ;;
@@ -20,7 +21,7 @@ esac
 ./scripts/check-gateway-test-coordinates.sh
 npm ci
 node node_modules/playwright/cli.js install --with-deps chromium
-npm run test:validator-security
+npm run test:validator
 
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
