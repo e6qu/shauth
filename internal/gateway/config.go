@@ -101,8 +101,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if config.InsecureCookie && (!isLoopbackURL(issuer) || !isLoopbackURL(publicURL) || !isLoopbackURL(postLogoutURL)) {
 		return Config{}, fmt.Errorf("OIDC_GATEWAY_ALLOW_INSECURE_COOKIE is restricted to loopback URLs")
 	}
-	if postLogoutURL.Scheme != publicURL.Scheme || postLogoutURL.Host != publicURL.Host {
-		return Config{}, fmt.Errorf("OIDC_GATEWAY_POST_LOGOUT_URL must use the public application origin")
+	bridgeURL := publicURL.ResolveReference(&url.URL{Path: "/auth/shauth/logout/complete"})
+	if postLogoutURL.String() != bridgeURL.String() {
+		return Config{}, fmt.Errorf("OIDC_GATEWAY_POST_LOGOUT_URL must be the application's exact /auth/shauth/logout/complete bridge URI")
 	}
 	if issuer.RawQuery != "" || publicURL.RawQuery != "" || (publicURL.Path != "" && publicURL.Path != "/") || upstreamURL.RawQuery != "" {
 		return Config{}, fmt.Errorf("issuer, public, and upstream URLs must not contain unsupported paths or queries")

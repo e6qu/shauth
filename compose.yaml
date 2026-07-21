@@ -47,6 +47,9 @@ services:
     entrypoint: ["/hydra"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "gateway-integration.localhost:host-gateway"
+      - "gateway-secondary.localhost:host-gateway"
+      - "gateway-tertiary.localhost:host-gateway"
     command: serve all --dev --config /etc/config/hydra.yaml
     environment: *hydra-environment
     depends_on:

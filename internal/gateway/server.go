@@ -93,7 +93,7 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 	if err != nil || endSessionURL.Scheme != config.Issuer.Scheme || endSessionURL.Host != config.Issuer.Host {
 		return nil, fmt.Errorf("OpenID Connect end_session_endpoint did not use the configured issuer origin")
 	}
-	store, err := NewStore(pool, config.ClientID, config.Issuer.String(), config.CookieSecret)
+	store, err := NewStore(pool, config.ClientID, config.Issuer.String(), config.CookieSecret, config.SessionMaxAge)
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +167,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/signed-out", server.signedOut)
 	mux.HandleFunc("GET /auth/gateway.css", gatewayStyles)
 	mux.HandleFunc("POST /auth/logout", server.logout)
+	mux.HandleFunc("GET /auth/shauth/logout/complete", server.providerLogoutComplete)
 	mux.HandleFunc("GET /auth/frontchannel-logout", server.frontchannelLogout)
 	mux.HandleFunc("POST /auth/backchannel-logout", server.backchannelLogout)
 	mux.HandleFunc("GET /auth/healthz", func(response http.ResponseWriter, _ *http.Request) {
@@ -340,6 +341,12 @@ func (server *Server) endSessionURL(idToken string) string {
 	query.Set("post_logout_redirect_uri", server.config.PostLogoutURL.String())
 	target.RawQuery = query.Encode()
 	return target.String()
+}
+
+func (server *Server) providerLogoutComplete(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
+	target := server.config.Issuer.ResolveReference(&url.URL{Path: "/oauth/logout/complete"})
+	http.Redirect(response, request, target.String(), http.StatusSeeOther)
 }
 
 func (server *Server) backchannelLogout(response http.ResponseWriter, request *http.Request) {

@@ -89,3 +89,13 @@ tests to avoid a failure, or use `--no-verify`.
   documentation to it rather than opening an anemic follow-up.
 - Write timeless, outcome-focused commit messages and pull-request descriptions.
 - Never merge a pull request. The user decides and performs merges.
+
+## Bounded automation
+
+- Every GitHub Actions job must declare `timeout-minutes` as a literal integer
+  no greater than 15. `scripts/check-workflow-timeouts.sh` enforces this for
+  every workflow; run its fixture contract and the checker before changing CI.
+- Local integration scripts must bound every child-process wait, print useful
+  diagnostics at the deadline, send TERM, and escalate to KILL after a short
+  grace period. A CI job timeout is the final safety boundary, not a substitute
+  for correctly bounded processes and cleanup.

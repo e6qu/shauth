@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,10 @@ var immutableReleaseRevisionPattern = regexp.MustCompile(`^([0-9a-f]{12,64}|sha2
 var browserBootstrapTokenPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const validationBrowserBootstrapLifetime = 10 * time.Minute
+const LogoutCorrelationLifetime = 2 * time.Minute
+const LogoutCompletionLifetime = 5 * time.Minute
+const LogoutCorrelationRetention = 24 * time.Hour
+const logoutCorrelationCleanupLease = 30 * time.Second
 
 type User struct {
 	ID                string
@@ -55,6 +60,18 @@ type Session struct {
 	UserAgent string
 	RemoteIP  net.IP
 	Active    bool
+}
+
+type LogoutCorrelationGrant struct {
+	ID                      string
+	SubjectID               string
+	BrowserSessionID        string
+	ActiveBrowserSessionIDs []string
+	BrowserHydraSessionIDs  []string
+	ActiveHydraSessionIDs   []string
+	ManagedClientID         string
+	SignedOutURL            string
+	CleanupAttempts         int
 }
 type Invitation struct {
 	ID        string
@@ -93,6 +110,7 @@ type AppValidationRun struct {
 	LaunchURL              string
 	ValidationURL          string
 	SignedOutURL           string
+	LogoutBridgeURL        string
 	Direction              string
 	ReleaseRevision        string
 	ValidationContractHash string
@@ -113,6 +131,7 @@ type AppValidationWitness struct {
 	LaunchURL       string `json:"launch_url"`
 	ValidationURL   string `json:"validation_url"`
 	SignedOutURL    string `json:"signed_out_url"`
+	LogoutBridgeURL string `json:"logout_bridge_url"`
 	ReleaseRevision string `json:"release_revision"`
 }
 
@@ -700,18 +719,28 @@ func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppVali
 		return nil, fmt.Errorf("lock application validation queue: %w", err)
 	}
 	if activeRunID != nil {
-		var lease time.Time
-		if err := tx.QueryRow(ctx, `SELECT lease_expires_at FROM app_validation_runs WHERE id=$1::uuid`, *activeRunID).Scan(&lease); err != nil {
+		var status string
+		var lease *time.Time
+		if err := tx.QueryRow(ctx, `SELECT status,lease_expires_at FROM app_validation_runs WHERE id=$1::uuid FOR UPDATE`, *activeRunID).Scan(&status, &lease); err != nil {
 			return nil, fmt.Errorf("read active application validation lease: %w", err)
 		}
-		if lease.After(now) {
+		if status != ValidationRunning || lease == nil {
+			if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
+				return nil, fmt.Errorf("clear stale application validation lease: %w", err)
+			}
+		} else if lease.After(now) {
 			return nil, tx.Commit(ctx)
-		}
-		if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, now.UTC()); err != nil {
-			return nil, fmt.Errorf("expire abandoned application validation: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE`); err != nil {
-			return nil, fmt.Errorf("clear abandoned application validation: %w", err)
+		} else {
+			command, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, now.UTC())
+			if err != nil {
+				return nil, fmt.Errorf("expire abandoned application validation: %w", err)
+			}
+			if command.RowsAffected() != 1 {
+				return nil, fmt.Errorf("active application validation not found")
+			}
+			if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
+				return nil, fmt.Errorf("clear abandoned application validation: %w", err)
+			}
 		}
 	}
 	if nextStart.After(now) {
@@ -762,6 +791,13 @@ func (s *Store) CompleteAppValidation(ctx context.Context, runID, status, failur
 		return fmt.Errorf("begin complete application validation: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	var activeRunID *string
+	if err := tx.QueryRow(ctx, `SELECT active_run_id::text FROM app_validation_control WHERE singleton=TRUE FOR UPDATE`).Scan(&activeRunID); err != nil {
+		return fmt.Errorf("lock application validation queue: %w", err)
+	}
+	if activeRunID == nil || *activeRunID != runID {
+		return fmt.Errorf("active application validation not found")
+	}
 	command, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status=$2,completed_at=$3,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($3-started_at))*1000)::bigint,failure=$4 WHERE id=$1::uuid AND status='running'`, runID, status, now.UTC(), strings.TrimSpace(failure))
 	if err != nil {
 		return fmt.Errorf("complete application validation: %w", err)
@@ -793,16 +829,27 @@ func (s *Store) ExpireAbandonedAppValidation(ctx context.Context, now time.Time)
 	if activeRunID == nil {
 		return tx.Commit(ctx)
 	}
-	var lease time.Time
-	if err := tx.QueryRow(ctx, `SELECT lease_expires_at FROM app_validation_runs WHERE id=$1::uuid AND status='running'`, *activeRunID).Scan(&lease); err != nil {
+	var status string
+	var lease *time.Time
+	if err := tx.QueryRow(ctx, `SELECT status,lease_expires_at FROM app_validation_runs WHERE id=$1::uuid FOR UPDATE`, *activeRunID).Scan(&status, &lease); err != nil {
 		return fmt.Errorf("read active application validation lease: %w", err)
+	}
+	if status != ValidationRunning || lease == nil {
+		if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
+			return fmt.Errorf("release stale application validation queue: %w", err)
+		}
+		return tx.Commit(ctx)
 	}
 	if lease.After(now) {
 		return tx.Commit(ctx)
 	}
 	completed := now.UTC()
-	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, completed); err != nil {
+	command, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, completed)
+	if err != nil {
 		return fmt.Errorf("expire abandoned application validation: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("active application validation not found")
 	}
 	if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
 		return fmt.Errorf("release abandoned application validation: %w", err)
@@ -1202,11 +1249,22 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, rem
 	family := randomUUID()
 	expiry := now.UTC().Add(policy.BrowserAbsoluteLifetime)
 	var session Session
-	err = s.pool.QueryRow(ctx, `INSERT INTO sessions (id,user_id,refresh_family_id,browser_token_hash,created_at,last_seen_at,expires_at,user_agent,remote_address)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", Session{}, fmt.Errorf("begin session creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockActiveUser(ctx, tx, userID); err != nil {
+		return "", Session{}, err
+	}
+	err = tx.QueryRow(ctx, `INSERT INTO sessions (id,user_id,refresh_family_id,browser_token_hash,created_at,last_seen_at,expires_at,user_agent,remote_address)
 	VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$5,$6,$7,$8) RETURNING id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address`, id, userID, family, tokenHash[:], now.UTC(), expiry, userAgent, remoteIP).
 		Scan(&session.ID, &session.UserID, &session.CreatedAt, &session.LastSeen, &session.ExpiresAt, &session.RevokedAt, &session.UserAgent, &session.RemoteIP)
 	if err != nil {
 		return "", Session{}, fmt.Errorf("create session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", Session{}, fmt.Errorf("commit session creation: %w", err)
 	}
 	return raw, session, nil
 }
@@ -1276,12 +1334,382 @@ func (s *Store) RecordHydraLoginSession(ctx context.Context, browserSessionID, h
 	if strings.TrimSpace(browserSessionID) == "" || strings.TrimSpace(hydraSessionID) == "" {
 		return fmt.Errorf("browser and Ory Hydra session IDs are required")
 	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO hydra_login_sessions (hydra_session_id,browser_session_id,created_at)
-	VALUES ($1,$2::uuid,$3) ON CONFLICT (hydra_session_id) DO UPDATE SET browser_session_id=EXCLUDED.browser_session_id`, hydraSessionID, browserSessionID, now.UTC())
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin Ory Hydra session recording: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var userID string
+	if err := tx.QueryRow(ctx, `SELECT user_id::text FROM sessions WHERE id=$1::uuid`, browserSessionID).Scan(&userID); err != nil {
+		return fmt.Errorf("find Ory Hydra browser session: %w", err)
+	}
+	if err := lockActiveUser(ctx, tx, userID); err != nil {
+		return err
+	}
+	var activeSessionID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM sessions WHERE id=$1::uuid AND user_id=$2::uuid AND revoked_at IS NULL FOR UPDATE`, browserSessionID, userID).Scan(&activeSessionID); err != nil {
+		return fmt.Errorf("lock active Ory Hydra browser session: %w", err)
+	}
+	command, err := tx.Exec(ctx, `INSERT INTO hydra_login_sessions (hydra_session_id,browser_session_id,created_at)
+	VALUES ($1,$2::uuid,$3)
+	ON CONFLICT (hydra_session_id) DO UPDATE SET created_at=EXCLUDED.created_at
+	WHERE hydra_login_sessions.browser_session_id=EXCLUDED.browser_session_id`, hydraSessionID, activeSessionID, now.UTC())
 	if err != nil {
 		return fmt.Errorf("record Ory Hydra login session: %w", err)
 	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("Ory Hydra session is already correlated with another browser")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Ory Hydra session recording: %w", err)
+	}
 	return nil
+}
+
+// RevalidateSession fences an accepted provider operation against concurrent
+// browser logout. It takes the same user-row lock as session creation and
+// logout snapshotting, then verifies the exact browser session remains active.
+func (s *Store) RevalidateSession(ctx context.Context, userID, browserSessionID string, now time.Time) error {
+	policy, err := s.SessionPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin browser session revalidation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockActiveUser(ctx, tx, userID); err != nil {
+		return err
+	}
+	var activeSessionID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM sessions
+		WHERE id=$1::uuid AND user_id=$2::uuid AND revoked_at IS NULL
+		  AND expires_at>$3 AND last_seen_at>$4
+		FOR UPDATE`, browserSessionID, userID, now.UTC(), now.UTC().Add(-policy.BrowserIdleTimeout)).Scan(&activeSessionID); err != nil {
+		return fmt.Errorf("revalidate active browser session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit browser session revalidation: %w", err)
+	}
+	return nil
+}
+
+// CreateLogoutCorrelationGrant persists the exact provider-session snapshot
+// needed to finish a browser logout after the local Shauth session is revoked.
+// Only the SHA-256 token digest is stored; the raw token is returned once for a
+// narrowly scoped browser cookie.
+func (s *Store) CreateLogoutCorrelationGrant(ctx context.Context, subjectID, browserSessionID, expectedHydraSessionID, managedClientID string, now time.Time) (string, LogoutCorrelationGrant, error) {
+	if strings.TrimSpace(subjectID) == "" || (strings.TrimSpace(browserSessionID) == "" && strings.TrimSpace(expectedHydraSessionID) == "") {
+		return "", LogoutCorrelationGrant{}, fmt.Errorf("logout subject and browser or Ory Hydra session is required")
+	}
+	raw, err := randomToken()
+	if err != nil {
+		return "", LogoutCorrelationGrant{}, err
+	}
+	hash := sha256.Sum256([]byte(raw))
+	created := now.UTC()
+	grantID := randomUUID()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", LogoutCorrelationGrant{}, fmt.Errorf("begin logout correlation grant: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockActiveUser(ctx, tx, subjectID); err != nil {
+		return "", LogoutCorrelationGrant{}, err
+	}
+	var signedOutURL string
+	if managedClientID != "" {
+		if err := tx.QueryRow(ctx, `SELECT signed_out_url FROM managed_apps WHERE oidc_client_id=$1`, managedClientID).Scan(&signedOutURL); err != nil {
+			return "", LogoutCorrelationGrant{}, fmt.Errorf("resolve managed app logout destination: %w", err)
+		}
+	}
+	providerOnly := false
+	if browserSessionID == "" {
+		var revokedAt *time.Time
+		if err := tx.QueryRow(ctx, `SELECT s.id::text,s.revoked_at
+			FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
+			WHERE h.hydra_session_id=$1 AND s.user_id=$2::uuid
+			FOR UPDATE OF s`, expectedHydraSessionID, subjectID).Scan(&browserSessionID, &revokedAt); err != nil {
+			return "", LogoutCorrelationGrant{}, fmt.Errorf("find browser for Ory Hydra logout session: %w", err)
+		}
+		providerOnly = revokedAt != nil
+	}
+	rows, err := tx.Query(ctx, `SELECT id::text FROM sessions WHERE user_id=$1::uuid AND revoked_at IS NULL ORDER BY id FOR UPDATE`, subjectID)
+	if err != nil {
+		return "", LogoutCorrelationGrant{}, fmt.Errorf("snapshot active browser sessions: %w", err)
+	}
+	activeBrowserIDs := []string{}
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			rows.Close()
+			return "", LogoutCorrelationGrant{}, fmt.Errorf("scan active browser session: %w", err)
+		}
+		activeBrowserIDs = append(activeBrowserIDs, sessionID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", LogoutCorrelationGrant{}, fmt.Errorf("list active browser sessions: %w", err)
+	}
+	if !providerOnly && (len(activeBrowserIDs) == 0 || !slices.Contains(activeBrowserIDs, browserSessionID)) {
+		return "", LogoutCorrelationGrant{}, fmt.Errorf("logout browser session is not active")
+	}
+	browserIDs, activeIDs := []string{}, []string{}
+	if providerOnly {
+		browserIDs = []string{expectedHydraSessionID}
+		activeIDs = []string{expectedHydraSessionID}
+		activeBrowserIDs = []string{}
+	} else {
+		browserIDs, err = hydraSessionIDsForBrowsers(ctx, tx, []string{browserSessionID})
+		if err != nil {
+			return "", LogoutCorrelationGrant{}, err
+		}
+		activeIDs, err = hydraSessionIDsForBrowsers(ctx, tx, activeBrowserIDs)
+		if err != nil {
+			return "", LogoutCorrelationGrant{}, err
+		}
+		if expectedHydraSessionID != "" && !slices.Contains(browserIDs, expectedHydraSessionID) {
+			return "", LogoutCorrelationGrant{}, fmt.Errorf("Ory Hydra logout session is not correlated with its active browser")
+		}
+	}
+	grant := LogoutCorrelationGrant{ID: grantID, SubjectID: subjectID, BrowserSessionID: browserSessionID, ActiveBrowserSessionIDs: activeBrowserIDs, BrowserHydraSessionIDs: browserIDs, ActiveHydraSessionIDs: activeIDs, ManagedClientID: managedClientID, SignedOutURL: signedOutURL}
+	if len(activeIDs) == 0 {
+		if err := revokeSessionSnapshot(ctx, tx, activeBrowserIDs, created); err != nil {
+			return "", LogoutCorrelationGrant{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return "", LogoutCorrelationGrant{}, fmt.Errorf("commit logout without provider sessions: %w", err)
+		}
+		return "", grant, nil
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO logout_correlation_grants
+		(id,token_hash,subject_id,browser_session_id,active_browser_session_ids,browser_hydra_session_ids,active_hydra_session_ids,managed_client_id,signed_out_url,created_at,expires_at,cleanup_after)
+		VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5::uuid[],$6,$7,$8,$9,$10,$11,$11)`, grantID, hash[:], subjectID, browserSessionID, activeBrowserIDs, browserIDs, activeIDs, managedClientID, signedOutURL, created, created.Add(LogoutCorrelationLifetime))
+	if err != nil {
+		return "", LogoutCorrelationGrant{}, fmt.Errorf("create logout correlation grant: %w", err)
+	}
+	if len(activeBrowserIDs) > 0 {
+		if err := revokeSessionSnapshot(ctx, tx, activeBrowserIDs, created); err != nil {
+			return "", LogoutCorrelationGrant{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", LogoutCorrelationGrant{}, fmt.Errorf("commit logout correlation grant: %w", err)
+	}
+	return raw, grant, nil
+}
+
+func lockActiveUser(ctx context.Context, tx pgx.Tx, userID string) error {
+	var locked string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE id=$1::uuid AND disabled_at IS NULL FOR UPDATE`, userID).Scan(&locked); err != nil {
+		return fmt.Errorf("lock active user: %w", err)
+	}
+	return nil
+}
+
+func hydraSessionIDsForBrowsers(ctx context.Context, tx pgx.Tx, browserSessionIDs []string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT hydra_session_id FROM hydra_login_sessions WHERE browser_session_id=ANY($1::uuid[]) ORDER BY hydra_session_id`, browserSessionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot Ory Hydra login sessions: %w", err)
+	}
+	defer rows.Close()
+	sessionIDs := []string{}
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return nil, fmt.Errorf("scan Ory Hydra login session snapshot: %w", err)
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("snapshot Ory Hydra login sessions: %w", err)
+	}
+	return sessionIDs, nil
+}
+
+func revokeSessionSnapshot(ctx context.Context, tx pgx.Tx, sessionIDs []string, now time.Time) error {
+	_, err := tx.Exec(ctx, `WITH revoked AS (
+		UPDATE sessions SET revoked_at=$2
+		WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL
+		RETURNING refresh_family_id
+	)
+	UPDATE refresh_tokens SET revoked_at=$2
+	WHERE family_id IN (SELECT refresh_family_id FROM revoked) AND revoked_at IS NULL`, sessionIDs, now.UTC())
+	if err != nil {
+		return fmt.Errorf("revoke browser session snapshot: %w", err)
+	}
+	return nil
+}
+
+// ConsumeLogoutCorrelationGrant atomically exchanges one unexpired browser
+// token for its exact provider-session snapshot. Replays and stale tokens are
+// indistinguishable and are rejected.
+func (s *Store) ConsumeLogoutCorrelationGrant(ctx context.Context, raw, subjectID string, now time.Time) (LogoutCorrelationGrant, error) {
+	if !browserBootstrapTokenPattern.MatchString(raw) || strings.TrimSpace(subjectID) == "" {
+		return LogoutCorrelationGrant{}, fmt.Errorf("logout correlation grant is unavailable")
+	}
+	hash := sha256.Sum256([]byte(raw))
+	var grant LogoutCorrelationGrant
+	err := s.pool.QueryRow(ctx, `UPDATE logout_correlation_grants
+		SET consumed_at=$3,cleanup_after=$3+make_interval(secs => $4)
+		WHERE token_hash=$1
+		  AND subject_id=$2::uuid
+		  AND consumed_at IS NULL
+		  AND completed_at IS NULL
+		  AND expires_at>$3
+		RETURNING id::text,subject_id::text,browser_session_id::text,active_browser_session_ids::text[],browser_hydra_session_ids,active_hydra_session_ids,managed_client_id,signed_out_url,cleanup_attempts`, hash[:], subjectID, now.UTC(), int64(LogoutCompletionLifetime/time.Second)).
+		Scan(&grant.ID, &grant.SubjectID, &grant.BrowserSessionID, &grant.ActiveBrowserSessionIDs, &grant.BrowserHydraSessionIDs, &grant.ActiveHydraSessionIDs, &grant.ManagedClientID, &grant.SignedOutURL, &grant.CleanupAttempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return LogoutCorrelationGrant{}, fmt.Errorf("logout correlation grant is unavailable")
+	}
+	if err != nil {
+		return LogoutCorrelationGrant{}, fmt.Errorf("consume logout correlation grant: %w", err)
+	}
+	return grant, nil
+}
+
+// ClaimAbandonedLogoutCorrelationGrant leases one incomplete grant whose
+// public provider flow expired or failed. The row remains durable until every
+// snapshotted provider session has been revoked successfully.
+func (s *Store) ClaimAbandonedLogoutCorrelationGrant(ctx context.Context, now time.Time) (*LogoutCorrelationGrant, error) {
+	observed := now.UTC()
+	var grant LogoutCorrelationGrant
+	err := s.pool.QueryRow(ctx, `WITH candidate AS (
+		SELECT id FROM logout_correlation_grants
+		WHERE completed_at IS NULL
+		  AND cleanup_after<=$1
+		  AND (cleanup_claimed_until IS NULL OR cleanup_claimed_until<=$1)
+		ORDER BY cleanup_after,id
+		FOR UPDATE SKIP LOCKED
+		LIMIT 1
+	)
+	UPDATE logout_correlation_grants item
+	SET cleanup_claimed_until=$1+make_interval(secs => $2),cleanup_attempts=cleanup_attempts+1
+	FROM candidate
+	WHERE item.id=candidate.id
+	RETURNING item.id::text,item.subject_id::text,item.browser_session_id::text,item.active_browser_session_ids::text[],item.browser_hydra_session_ids,item.active_hydra_session_ids,item.managed_client_id,item.signed_out_url,item.cleanup_attempts`, observed, int64(logoutCorrelationCleanupLease/time.Second)).
+		Scan(&grant.ID, &grant.SubjectID, &grant.BrowserSessionID, &grant.ActiveBrowserSessionIDs, &grant.BrowserHydraSessionIDs, &grant.ActiveHydraSessionIDs, &grant.ManagedClientID, &grant.SignedOutURL, &grant.CleanupAttempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim abandoned logout correlation grant: %w", err)
+	}
+	return &grant, nil
+}
+
+// ClaimConsumedLogoutCorrelationGrant leases the consumed grant named by a
+// one-time browser token after Hydra has returned from its front-channel flow.
+func (s *Store) ClaimConsumedLogoutCorrelationGrant(ctx context.Context, raw string, now time.Time) (*LogoutCorrelationGrant, error) {
+	if !browserBootstrapTokenPattern.MatchString(raw) {
+		return nil, fmt.Errorf("logout correlation grant is unavailable")
+	}
+	hash := sha256.Sum256([]byte(raw))
+	observed := now.UTC()
+	var grant LogoutCorrelationGrant
+	err := s.pool.QueryRow(ctx, `UPDATE logout_correlation_grants
+		SET cleanup_claimed_until=$2+make_interval(secs => $3),cleanup_attempts=cleanup_attempts+1
+		WHERE token_hash=$1
+		  AND consumed_at IS NOT NULL
+		  AND completed_at IS NULL
+		  AND (cleanup_claimed_until IS NULL OR cleanup_claimed_until<=$2)
+		RETURNING id::text,subject_id::text,browser_session_id::text,active_browser_session_ids::text[],browser_hydra_session_ids,active_hydra_session_ids,managed_client_id,signed_out_url,cleanup_attempts`, hash[:], observed, int64(logoutCorrelationCleanupLease/time.Second)).
+		Scan(&grant.ID, &grant.SubjectID, &grant.BrowserSessionID, &grant.ActiveBrowserSessionIDs, &grant.BrowserHydraSessionIDs, &grant.ActiveHydraSessionIDs, &grant.ManagedClientID, &grant.SignedOutURL, &grant.CleanupAttempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("logout correlation grant is unavailable")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim consumed logout correlation grant: %w", err)
+	}
+	return &grant, nil
+}
+
+func (s *Store) CompleteLogoutCorrelationGrant(ctx context.Context, id string, now time.Time) error {
+	command, err := s.pool.Exec(ctx, `UPDATE logout_correlation_grants
+		SET completed_at=$2,cleanup_claimed_until=NULL,last_error=''
+		WHERE id=$1::uuid AND completed_at IS NULL`, id, now.UTC())
+	if err != nil {
+		return fmt.Errorf("complete logout correlation grant: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("logout correlation grant is unavailable")
+	}
+	return nil
+}
+
+func (s *Store) FailLogoutCorrelationGrant(ctx context.Context, id, failure string, retryAt time.Time) error {
+	if strings.TrimSpace(failure) == "" {
+		failure = "provider logout did not complete"
+	}
+	command, err := s.pool.Exec(ctx, `UPDATE logout_correlation_grants
+		SET cleanup_after=$2,cleanup_claimed_until=NULL,last_error=$3
+		WHERE id=$1::uuid AND completed_at IS NULL`, id, retryAt.UTC(), failure)
+	if err != nil {
+		return fmt.Errorf("schedule logout correlation recovery: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("logout correlation grant is unavailable")
+	}
+	return nil
+}
+
+// DeleteCompletedLogoutCorrelationGrants removes bounded batches of old,
+// completed evidence. Incomplete rows are never garbage-collected because they
+// remain the durable source for provider-session recovery.
+func (s *Store) DeleteCompletedLogoutCorrelationGrants(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if limit < 1 || limit > 1000 {
+		return 0, fmt.Errorf("logout correlation cleanup limit must be between 1 and 1000")
+	}
+	command, err := s.pool.Exec(ctx, `WITH expired AS (
+		SELECT id FROM logout_correlation_grants
+		WHERE completed_at<$1
+		ORDER BY completed_at,id
+		LIMIT $2
+	)
+	DELETE FROM logout_correlation_grants item USING expired WHERE item.id=expired.id`, cutoff.UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("delete completed logout correlation grants: %w", err)
+	}
+	return command.RowsAffected(), nil
+}
+
+func (s *Store) BrowserSessionIDForHydraSession(ctx context.Context, subjectID, hydraSessionID string) (string, error) {
+	var browserSessionID string
+	err := s.pool.QueryRow(ctx, `SELECT h.browser_session_id::text
+		FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
+		WHERE h.hydra_session_id=$1 AND s.user_id=$2::uuid`, hydraSessionID, subjectID).Scan(&browserSessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("Ory Hydra session is not correlated with this subject")
+	}
+	if err != nil {
+		return "", fmt.Errorf("find Ory Hydra browser session: %w", err)
+	}
+	return browserSessionID, nil
+}
+
+func normalizedSessionIDs(sessionIDs []string) ([]string, error) {
+	if len(sessionIDs) == 0 {
+		return nil, fmt.Errorf("at least one session is required")
+	}
+	return normalizedOptionalSessionIDs(sessionIDs)
+}
+
+func normalizedOptionalSessionIDs(sessionIDs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(sessionIDs))
+	normalized := make([]string, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" {
+			return nil, fmt.Errorf("session IDs must not be empty")
+		}
+		if _, exists := seen[sessionID]; exists {
+			continue
+		}
+		seen[sessionID] = struct{}{}
+		normalized = append(normalized, sessionID)
+	}
+	return normalized, nil
 }
 
 func (s *Store) HydraLoginSessionIDs(ctx context.Context, browserSessionID string) ([]string, error) {
@@ -1370,6 +1798,33 @@ func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) err
 	}
 	return nil
 }
+
+// RevokeSessions ends only the browser and refresh-token families captured by
+// a logout snapshot. Replaying it is safe and cannot revoke sessions created
+// after that snapshot.
+func (s *Store) RevokeSessions(ctx context.Context, sessionIDs []string, now time.Time) error {
+	ids, err := normalizedOptionalSessionIDs(sessionIDs)
+	if err != nil {
+		return fmt.Errorf("browser sessions: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err = s.pool.Exec(ctx, `WITH revoked AS (
+		UPDATE sessions
+		SET revoked_at=$2
+		WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL
+		RETURNING refresh_family_id
+	)
+	UPDATE refresh_tokens
+	SET revoked_at=$2
+	WHERE family_id IN (SELECT refresh_family_id FROM revoked) AND revoked_at IS NULL`, ids, now.UTC())
+	if err != nil {
+		return fmt.Errorf("revoke browser session snapshot: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 	var userID string
 	err := s.pool.QueryRow(ctx, `SELECT user_id::text FROM sessions WHERE id=$1::uuid`, id).Scan(&userID)
@@ -1379,17 +1834,36 @@ func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 	return userID, nil
 }
 func (s *Store) RevokeUserSessions(ctx context.Context, userID string, now time.Time) error {
-	_, err := s.pool.Exec(ctx, `WITH revoked AS (
-		UPDATE sessions
-		SET revoked_at=$2
-		WHERE user_id=$1::uuid AND revoked_at IS NULL
-		RETURNING refresh_family_id
-	)
-	UPDATE refresh_tokens
-	SET revoked_at=$2
-	WHERE family_id IN (SELECT refresh_family_id FROM revoked) AND revoked_at IS NULL`, userID, now.UTC())
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("revoke user sessions: %w", err)
+		return fmt.Errorf("begin user session revocation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockActiveUser(ctx, tx, userID); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT id::text FROM sessions WHERE user_id=$1::uuid AND revoked_at IS NULL ORDER BY id FOR UPDATE`, userID)
+	if err != nil {
+		return fmt.Errorf("snapshot user sessions for revocation: %w", err)
+	}
+	var sessionIDs []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan user session for revocation: %w", err)
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("snapshot user sessions for revocation: %w", err)
+	}
+	if err := revokeSessionSnapshot(ctx, tx, sessionIDs, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit user session revocation: %w", err)
 	}
 	return nil
 }

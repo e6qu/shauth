@@ -6,13 +6,27 @@ unset CDPATH
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+case ${SHAUTH_STACK_FOCUS:-} in
+	''|logout-correlation|browser-global-logout) ;;
+	*)
+		echo "unknown SHAUTH_STACK_FOCUS: ${SHAUTH_STACK_FOCUS}" >&2
+		exit 2
+		;;
+esac
+
+./scripts/test-workflow-timeouts.sh
+./scripts/check-workflow-timeouts.sh
+./scripts/test-process-wait.sh
+./scripts/check-gateway-test-coordinates.sh
 npm ci
-npm run test:validator-security
 node node_modules/playwright/cli.js install --with-deps chromium
+npm run test:validator-security
 
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
 }
+
+. "$root/scripts/process-wait.sh"
 
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 export POSTGRES_PASSWORD
@@ -39,7 +53,7 @@ compose() {
 }
 
 prepare_test_app_coordinates() {
-	node -e 'let body="";process.stdin.on("data",value=>body+=value);process.stdin.on("end",()=>{const apps=JSON.parse(body);for(const app of apps){if(app.slug.startsWith("gateway-")){app.validation_url=new URL("/auth/validation",app.launch_url).toString()}if(!app.post_logout_redirect_uris.includes(app.signed_out_url)){app.post_logout_redirect_uris.push(app.signed_out_url)}}process.stdout.write(JSON.stringify(apps))})'
+	node -e 'let body="";process.stdin.on("data",value=>body+=value);process.stdin.on("end",()=>{const apps=JSON.parse(body);for(const app of apps){if(app.slug.startsWith("gateway-")){const launch=new URL(app.launch_url);app.validation_url=new URL("/auth/validation",launch).toString();app.backchannel_logout_uri="http://"+app.slug+".localhost:"+launch.port+"/auth/backchannel-logout"}app.post_logout_redirect_uris=[new URL("/auth/shauth/logout/complete",app.launch_url).toString()]}process.stdout.write(JSON.stringify(apps))})'
 }
 if env | grep -Eq '^SHAUTH_VALIDATOR_TOKEN=|^SHAUTH_VALIDATION_STATUS_TOKEN='; then
   echo 'browser-validation secrets leaked into the ambient process environment' >&2
@@ -67,7 +81,7 @@ SHAUTH_GATEWAY_SECONDARY_DATABASE=shauth_gateway_secondary
 export SHAUTH_GATEWAY_SECONDARY_DATABASE
 SHAUTH_GATEWAY_TERTIARY_DATABASE=shauth_gateway_tertiary
 export SHAUTH_GATEWAY_TERTIARY_DATABASE
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":"","validation_url":"https://bootstrap.dev.e6qu.dev/","signed_out_url":"https://bootstrap.dev.e6qu.dev/signed-out","release_revision":"111111111111"},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5556/auth/backchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":"","validation_url":"http://localhost:5556/","signed_out_url":"http://localhost:5556/auth/signed-out","release_revision":"222222222222"},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://127.0.0.1:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://127.0.0.1:5558/auth/callback"],"post_logout_redirect_uris":["http://127.0.0.1:5558/auth/signed-out"],"frontchannel_logout_uri":"http://127.0.0.1:5558/auth/frontchannel-logout","backchannel_logout_uri":"http://127.0.0.1:5558/auth/backchannel-logout","health_url":"http://127.0.0.1:5558/auth/healthz","monitoring_url":"","validation_url":"http://127.0.0.1:5558/","signed_out_url":"http://127.0.0.1:5558/auth/signed-out","release_revision":"333333333333"},{"slug":"gateway-tertiary","name":"Gateway tertiary","description":"Third relying-party single sign-on and logout coverage.","launch_url":"http://gateway-tertiary.localhost:5560/","oidc_client_id":"gateway-tertiary","oidc_client_secret":"%s","redirect_uris":["http://gateway-tertiary.localhost:5560/auth/callback"],"post_logout_redirect_uris":["http://gateway-tertiary.localhost:5560/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/backchannel-logout","health_url":"http://gateway-tertiary.localhost:5560/auth/healthz","monitoring_url":"","validation_url":"http://gateway-tertiary.localhost:5560/","signed_out_url":"http://gateway-tertiary.localhost:5560/auth/signed-out","release_revision":"444444444444"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET" "$SHAUTH_GATEWAY_TERTIARY_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app","description":"Bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/initial"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/health","monitoring_url":"","validation_url":"https://bootstrap.dev.e6qu.dev/","signed_out_url":"https://bootstrap.dev.e6qu.dev/signed-out","release_revision":"111111111111"},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://gateway-integration.localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://gateway-integration.localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://gateway-integration.localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/backchannel-logout","health_url":"http://gateway-integration.localhost:5556/auth/healthz","monitoring_url":"","validation_url":"http://gateway-integration.localhost:5556/","signed_out_url":"http://gateway-integration.localhost:5556/auth/signed-out","release_revision":"222222222222"},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://gateway-secondary.localhost:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://gateway-secondary.localhost:5558/auth/callback"],"post_logout_redirect_uris":["http://gateway-secondary.localhost:5558/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-secondary.localhost:5558/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-secondary.localhost:5558/auth/backchannel-logout","health_url":"http://gateway-secondary.localhost:5558/auth/healthz","monitoring_url":"","validation_url":"http://gateway-secondary.localhost:5558/","signed_out_url":"http://gateway-secondary.localhost:5558/auth/signed-out","release_revision":"333333333333"},{"slug":"gateway-tertiary","name":"Gateway tertiary","description":"Third relying-party single sign-on and logout coverage.","launch_url":"http://gateway-tertiary.localhost:5560/","oidc_client_id":"gateway-tertiary","oidc_client_secret":"%s","redirect_uris":["http://gateway-tertiary.localhost:5560/auth/callback"],"post_logout_redirect_uris":["http://gateway-tertiary.localhost:5560/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/backchannel-logout","health_url":"http://gateway-tertiary.localhost:5560/auth/healthz","monitoring_url":"","validation_url":"http://gateway-tertiary.localhost:5560/","signed_out_url":"http://gateway-tertiary.localhost:5560/auth/signed-out","release_revision":"444444444444"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET" "$SHAUTH_GATEWAY_TERTIARY_CLIENT_SECRET")
 SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '%s' "$SHAUTH_BOOTSTRAP_APPS_JSON" | prepare_test_app_coordinates)
 export SHAUTH_BOOTSTRAP_APPS_JSON
 cookie_jar=$(mktemp)
@@ -91,15 +105,21 @@ cleanup() {
 		compose logs --no-color --tail=5 hydra >&2 || true
 	fi
 	if [ -n "$gateway_test_pid" ]; then
-		kill "$gateway_test_pid" 2>/dev/null || true
-		wait "$gateway_test_pid" 2>/dev/null || true
+		if ! stop_process "$gateway_test_pid" 'gateway browser matrix'; then
+			status=1
+		fi
 	fi
 	for child_pid in "$validator_pid" "$validator_secondary_pid" "$gateway_pid" "$gateway_secondary_pid" "$gateway_tertiary_pid"; do
 		if [ -n "$child_pid" ]; then
-			kill "$child_pid" 2>/dev/null || true
-			wait "$child_pid" 2>/dev/null || true
+			if ! stop_process "$child_pid" "acceptance child ${child_pid}"; then
+				status=1
+			fi
 		fi
 	done
+	if [ "$status" -ne 0 ]; then
+		compose logs --no-color --tail=20 shauth >&2 || true
+		compose logs --no-color --tail=10 hydra >&2 || true
+	fi
 	compose down --volumes --remove-orphans
 	rm -f "$cookie_jar" "$validation_cookie_jar" "$gateway_binary" "$validator_binary"
 	rm -rf "$validator_coordination_directory"
@@ -129,6 +149,10 @@ if [ "$attempt" -eq 300 ]; then
   compose logs --no-color
   exit 1
 fi
+
+SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
+	go test -tags acceptance ./internal/identity ./internal/gateway \
+	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout)$' -count=1
 
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'id="main-content"'
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-label="Primary navigation"'
@@ -181,7 +205,7 @@ csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
 SHAUTH_GATEWAY_CLIENT_SECRET=$(random_secret)
 SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET=$(random_secret)
 SHAUTH_GATEWAY_TERTIARY_CLIENT_SECRET=$(random_secret)
-SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring","validation_url":"https://bootstrap.dev.e6qu.dev/apps","signed_out_url":"https://bootstrap.dev.e6qu.dev/signed-out","release_revision":"555555555555"},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://localhost:5556/auth/frontchannel-logout","backchannel_logout_uri":"http://localhost:5556/auth/backchannel-logout","health_url":"http://localhost:5556/auth/healthz","monitoring_url":"","validation_url":"http://localhost:5556/","signed_out_url":"http://localhost:5556/auth/signed-out","release_revision":"222222222222"},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://127.0.0.1:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://127.0.0.1:5558/auth/callback"],"post_logout_redirect_uris":["http://127.0.0.1:5558/auth/signed-out"],"frontchannel_logout_uri":"http://127.0.0.1:5558/auth/frontchannel-logout","backchannel_logout_uri":"http://127.0.0.1:5558/auth/backchannel-logout","health_url":"http://127.0.0.1:5558/auth/healthz","monitoring_url":"","validation_url":"http://127.0.0.1:5558/","signed_out_url":"http://127.0.0.1:5558/auth/signed-out","release_revision":"333333333333"},{"slug":"gateway-tertiary","name":"Gateway tertiary","description":"Third relying-party single sign-on and logout coverage.","launch_url":"http://gateway-tertiary.localhost:5560/","oidc_client_id":"gateway-tertiary","oidc_client_secret":"%s","redirect_uris":["http://gateway-tertiary.localhost:5560/auth/callback"],"post_logout_redirect_uris":["http://gateway-tertiary.localhost:5560/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/backchannel-logout","health_url":"http://gateway-tertiary.localhost:5560/auth/healthz","monitoring_url":"","validation_url":"http://gateway-tertiary.localhost:5560/","signed_out_url":"http://gateway-tertiary.localhost:5560/auth/signed-out","release_revision":"444444444444"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET" "$SHAUTH_GATEWAY_TERTIARY_CLIENT_SECRET")
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '[{"slug":"bootstrap-app","name":"Bootstrap app updated","description":"Updated bootstrap reconciliation coverage.","launch_url":"https://bootstrap.dev.e6qu.dev/apps","oidc_client_id":"bootstrap-app","oidc_client_secret":"%s","redirect_uris":["https://bootstrap.dev.e6qu.dev/oidc/updated"],"post_logout_redirect_uris":["https://bootstrap.dev.e6qu.dev/signed-out"],"frontchannel_logout_uri":"https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout","health_url":"https://bootstrap.dev.e6qu.dev/ready","monitoring_url":"https://bootstrap.dev.e6qu.dev/monitoring","validation_url":"https://bootstrap.dev.e6qu.dev/apps","signed_out_url":"https://bootstrap.dev.e6qu.dev/signed-out","release_revision":"555555555555"},{"slug":"gateway-integration","name":"Gateway integration","description":"First relying-party acceptance coverage.","launch_url":"http://gateway-integration.localhost:5556/","oidc_client_id":"gateway-integration","oidc_client_secret":"%s","redirect_uris":["http://gateway-integration.localhost:5556/auth/callback"],"post_logout_redirect_uris":["http://gateway-integration.localhost:5556/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/backchannel-logout","health_url":"http://gateway-integration.localhost:5556/auth/healthz","monitoring_url":"","validation_url":"http://gateway-integration.localhost:5556/","signed_out_url":"http://gateway-integration.localhost:5556/auth/signed-out","release_revision":"222222222222"},{"slug":"gateway-secondary","name":"Gateway secondary","description":"Second relying-party single sign-on and logout coverage.","launch_url":"http://gateway-secondary.localhost:5558/","oidc_client_id":"gateway-secondary","oidc_client_secret":"%s","redirect_uris":["http://gateway-secondary.localhost:5558/auth/callback"],"post_logout_redirect_uris":["http://gateway-secondary.localhost:5558/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-secondary.localhost:5558/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-secondary.localhost:5558/auth/backchannel-logout","health_url":"http://gateway-secondary.localhost:5558/auth/healthz","monitoring_url":"","validation_url":"http://gateway-secondary.localhost:5558/","signed_out_url":"http://gateway-secondary.localhost:5558/auth/signed-out","release_revision":"333333333333"},{"slug":"gateway-tertiary","name":"Gateway tertiary","description":"Third relying-party single sign-on and logout coverage.","launch_url":"http://gateway-tertiary.localhost:5560/","oidc_client_id":"gateway-tertiary","oidc_client_secret":"%s","redirect_uris":["http://gateway-tertiary.localhost:5560/auth/callback"],"post_logout_redirect_uris":["http://gateway-tertiary.localhost:5560/auth/signed-out"],"frontchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/frontchannel-logout","backchannel_logout_uri":"http://gateway-tertiary.localhost:5560/auth/backchannel-logout","health_url":"http://gateway-tertiary.localhost:5560/auth/healthz","monitoring_url":"","validation_url":"http://gateway-tertiary.localhost:5560/","signed_out_url":"http://gateway-tertiary.localhost:5560/auth/signed-out","release_revision":"444444444444"}]' "$SHAUTH_BOOTSTRAP_APP_CLIENT_SECRET" "$SHAUTH_GATEWAY_CLIENT_SECRET" "$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET" "$SHAUTH_GATEWAY_TERTIARY_CLIENT_SECRET")
 SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '%s' "$SHAUTH_BOOTSTRAP_APPS_JSON" | prepare_test_app_coordinates)
 export SHAUTH_BOOTSTRAP_APPS_JSON
 compose up --force-recreate --no-deps --detach shauth
@@ -201,18 +225,11 @@ for client_id in bootstrap-app gateway-integration gateway-secondary gateway-ter
 	printf '%s' "$client_registration" | grep -q '"grant_types":\["authorization_code","refresh_token"\]'
 	printf '%s' "$client_registration" | grep -q '"response_types":\["code"\]'
 done
-# The browser reaches test relying parties through host loopback, while Hydra
-# reaches their real back-channel endpoints across the container boundary.
 for client_port in gateway-integration:5556 gateway-secondary:5558 gateway-tertiary:5560; do
 	client_id=${client_port%:*}
 	port=${client_port#*:}
 	client_registration=$(curl --fail --silent --show-error "http://localhost:4445/admin/clients/${client_id}")
-	client_registration=$(printf '%s' "$client_registration" | sed \
-		-e "s#http://localhost:${port}/auth/backchannel-logout#http://host.docker.internal:${port}/auth/backchannel-logout#" \
-		-e "s#http://127.0.0.1:${port}/auth/backchannel-logout#http://host.docker.internal:${port}/auth/backchannel-logout#" \
-		-e "s#http://gateway-tertiary.localhost:${port}/auth/backchannel-logout#http://host.docker.internal:${port}/auth/backchannel-logout#")
-	curl --fail --silent --show-error --request PUT --header 'Content-Type: application/json' \
-		--data "$client_registration" "http://localhost:4445/admin/clients/${client_id}" >/dev/null
+	printf '%s' "$client_registration" | grep -q "\"backchannel_logout_uri\":\"http://${client_id}.localhost:${port}/auth/backchannel-logout\""
 done
 bootstrap_app=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',name,description,launch_url,oidc_client_id,health_url,monitoring_url) FROM managed_apps WHERE slug='bootstrap-app'")
 [ "$bootstrap_app" = 'Bootstrap app updated|Updated bootstrap reconciliation coverage.|https://bootstrap.dev.e6qu.dev/apps|bootstrap-app|https://bootstrap.dev.e6qu.dev/ready|https://bootstrap.dev.e6qu.dev/monitoring' ]
@@ -229,7 +246,7 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'client_name=Shauth integration client' \
   --data-urlencode "client_secret=${SHAUTH_OIDC_CLIENT_SECRET}" \
   --data-urlencode 'redirect_uris=http://localhost:5555/callback' \
-  --data-urlencode 'post_logout_redirect_uris=http://localhost:5555/signed-out' \
+  --data-urlencode 'post_logout_redirect_uris=http://localhost:5555/auth/shauth/logout/complete' \
   --data-urlencode 'frontchannel_logout_uri=http://localhost:5555/frontchannel-logout' \
   http://localhost:8080/admin/clients | grep -q 'shauth-integration-client'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/session-policy | grep -q 'Session time limits'
@@ -252,13 +269,13 @@ rejected_app_location=$(curl --fail --silent --show-error --dump-header - --outp
   --data-urlencode 'health_url=http://localhost:5555/health' \
   --data-urlencode 'monitoring_url=http://localhost:5555/monitoring' \
   --data-urlencode 'validation_url=http://localhost:5555/' \
-  --data-urlencode 'signed_out_url=http://localhost:5555/other-signed-out' \
+  --data-urlencode 'signed_out_url=https://attacker.example/other-signed-out' \
   --data-urlencode 'release_revision=666666666666' \
   http://localhost:8080/admin/apps |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$rejected_app_location" in
-	/admin/apps?error=*exactly+match+a+registered+post-logout+redirect+URI*) ;;
-	*) echo "same-origin unregistered signed-out URL was not rejected: ${rejected_app_location}" >&2; exit 1 ;;
+	/admin/apps?error=*launch+and+signed-out+URLs+must+use+one+application+origin*) ;;
+	*) echo "cross-origin signed-out URL was not rejected: ${rejected_app_location}" >&2; exit 1 ;;
 esac
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='integration-app'")" = 0 ]
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
@@ -306,9 +323,9 @@ OIDC_GATEWAY_ISSUER=http://localhost:8080 \
 OIDC_GATEWAY_CLIENT_ID=gateway-integration \
 APPLICATION_RELEASE_REVISION=222222222222 \
 OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_CLIENT_SECRET" \
-OIDC_GATEWAY_PUBLIC_URL=http://localhost:5556 \
+OIDC_GATEWAY_PUBLIC_URL=http://gateway-integration.localhost:5556 \
 OIDC_GATEWAY_UPSTREAM_URL=http://127.0.0.1:5557 \
-OIDC_GATEWAY_POST_LOGOUT_URL=http://localhost:5556/auth/signed-out \
+OIDC_GATEWAY_POST_LOGOUT_URL=http://gateway-integration.localhost:5556/auth/shauth/logout/complete \
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5556 \
@@ -319,9 +336,9 @@ OIDC_GATEWAY_ISSUER=http://localhost:8080 \
 OIDC_GATEWAY_CLIENT_ID=gateway-secondary \
 APPLICATION_RELEASE_REVISION=333333333333 \
 OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET" \
-OIDC_GATEWAY_PUBLIC_URL='http://127.0.0.1:5558' \
+OIDC_GATEWAY_PUBLIC_URL='http://gateway-secondary.localhost:5558' \
 OIDC_GATEWAY_UPSTREAM_URL=http://127.0.0.1:5559 \
-OIDC_GATEWAY_POST_LOGOUT_URL='http://127.0.0.1:5558/auth/signed-out' \
+OIDC_GATEWAY_POST_LOGOUT_URL='http://gateway-secondary.localhost:5558/auth/shauth/logout/complete' \
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5558 \
@@ -334,7 +351,7 @@ APPLICATION_RELEASE_REVISION=444444444444 \
 OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_TERTIARY_CLIENT_SECRET" \
 OIDC_GATEWAY_PUBLIC_URL='http://gateway-tertiary.localhost:5560' \
 OIDC_GATEWAY_UPSTREAM_URL=http://127.0.0.1:5561 \
-OIDC_GATEWAY_POST_LOGOUT_URL='http://gateway-tertiary.localhost:5560/auth/signed-out' \
+OIDC_GATEWAY_POST_LOGOUT_URL='http://gateway-tertiary.localhost:5560/auth/shauth/logout/complete' \
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_TERTIARY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5560 \
@@ -342,12 +359,12 @@ DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/${SHAUTH_GA
 "$gateway_binary" &
 gateway_tertiary_pid=$!
 attempt=0
-while [ "$attempt" -lt 60 ] && { ! curl --fail --silent --max-time 2 --noproxy '*' http://localhost:5556/auth/healthz >/dev/null 2>&1 || ! curl --fail --silent --max-time 2 --noproxy '*' 'http://127.0.0.1:5558/auth/healthz' >/dev/null 2>&1 || ! curl --fail --silent --max-time 2 --noproxy '*' 'http://gateway-tertiary.localhost:5560/auth/healthz' >/dev/null 2>&1; }; do
+while [ "$attempt" -lt 60 ] && { ! curl --fail --silent --max-time 2 --noproxy '*' http://gateway-integration.localhost:5556/auth/healthz >/dev/null 2>&1 || ! curl --fail --silent --max-time 2 --noproxy '*' 'http://gateway-secondary.localhost:5558/auth/healthz' >/dev/null 2>&1 || ! curl --fail --silent --max-time 2 --noproxy '*' 'http://gateway-tertiary.localhost:5560/auth/healthz' >/dev/null 2>&1; }; do
   attempt=$((attempt + 1))
   sleep 1
 done
 if [ "$attempt" -eq 60 ]; then
-	for relying_party_origin in http://localhost:5556 'http://127.0.0.1:5558' 'http://gateway-tertiary.localhost:5560'; do
+	for relying_party_origin in http://gateway-integration.localhost:5556 'http://gateway-secondary.localhost:5558' 'http://gateway-tertiary.localhost:5560'; do
 		status=$(curl --silent --max-time 2 --noproxy '*' --output /dev/null --write-out '%{http_code}' "$relying_party_origin/auth/healthz" || true)
 		printf 'Relying-party health check failed: %s returned HTTP %s\n' "$relying_party_origin" "${status:-unreachable}" >&2
 	done
@@ -361,10 +378,11 @@ for relying_party_pid in "$gateway_pid" "$gateway_secondary_pid" "$gateway_terti
 		exit 1
 	fi
 done
-for relying_party_origin in http://localhost:5556 'http://127.0.0.1:5558' 'http://gateway-tertiary.localhost:5560'; do
+for relying_party_origin in http://gateway-integration.localhost:5556 'http://gateway-secondary.localhost:5558' 'http://gateway-tertiary.localhost:5560'; do
 	[ "$(curl --silent --max-time 2 --noproxy '*' --output /dev/null --write-out '%{http_code}' "$relying_party_origin/auth/session")" = 401 ]
 done
 expected_gateway_tables='oidc_gateway_logout_tokens
+oidc_gateway_logout_tombstones
 oidc_gateway_sessions
 shauth_gateway_schema_migrations'
 for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE" "$SHAUTH_GATEWAY_TERTIARY_DATABASE"; do
@@ -375,8 +393,21 @@ for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECO
 		exit 1
 	fi
 	migration_count=$(compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc 'SELECT count(*) FROM shauth_gateway_schema_migrations')
-	[ "$migration_count" = 1 ]
+	[ "$migration_count" = 2 ]
 done
+if [ "${SHAUTH_STACK_FOCUS:-}" = browser-global-logout ]; then
+	compose restart shauth >/dev/null
+	attempt=0
+	while [ "$attempt" -lt 30 ] && ! curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1; do
+		attempt=$((attempt + 1))
+		sleep 1
+	done
+	[ "$attempt" -lt 30 ]
+	curl --fail --silent --show-error http://localhost:4445/admin/clients/gateway-integration | grep -q '"backchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/backchannel-logout"'
+	node scripts/test-browser-global-logout.mjs "$cookie_jar"
+	[ "$(compose exec -T postgres psql -U shauth -d "$SHAUTH_GATEWAY_PRIMARY_DATABASE" -Atc "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL")" = 0 ]
+	exit 0
+fi
 bootstrap_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='bootstrap-app'")
 [ -n "$bootstrap_app_id" ]
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
@@ -412,23 +443,35 @@ done
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='queued' AND witness_managed_app_id IS NOT NULL AND witness_managed_app_id<>managed_app_id AND witness_oidc_client_id<>oidc_client_id")" = 6 ]
 validation_witness_ring=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT string_agg(app_slug||':'||direction||'>'||witness_app_slug,',' ORDER BY app_slug,direction) FROM app_validation_runs WHERE status='queued'")
 [ "$validation_witness_ring" = 'gateway-integration:from_app>gateway-secondary,gateway-integration:from_shauth>gateway-secondary,gateway-secondary:from_app>gateway-tertiary,gateway-secondary:from_shauth>gateway-tertiary,gateway-tertiary:from_app>gateway-integration,gateway-tertiary:from_shauth>gateway-integration' ]
-[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE app_slug='gateway-integration' AND validation_url='http://localhost:5556/auth/validation'")" = 2 ]
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE app_slug='gateway-integration' AND validation_url='http://gateway-integration.localhost:5556/auth/validation'")" = 2 ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 \
 	-c "UPDATE managed_apps SET validation_url='http://localhost:5999/drifted-live-row' WHERE slug='gateway-integration'" >/dev/null
 
 go build -o "$validator_binary" ./cmd/shauth-validator
-SHAUTH_VALIDATOR_COORDINATION_DIR=$validator_coordination_directory node scripts/test-gateway-oidc.mjs &
+SHAUTH_VALIDATOR_COORDINATION_DIR=$validator_coordination_directory \
+	SHAUTH_GATEWAY_TEST_FOCUS=${SHAUTH_STACK_FOCUS:-} \
+	node scripts/test-gateway-oidc.mjs &
 gateway_test_pid=$!
 attempt=0
 while [ "$attempt" -lt 120 ] && [ ! -f "$validator_coordination_directory/ready" ]; do
 	if ! kill -0 "$gateway_test_pid" 2>/dev/null; then
-		wait "$gateway_test_pid"
+		wait_for_process "$gateway_test_pid" 'gateway browser matrix startup' 5 || true
 		exit 1
 	fi
 	attempt=$((attempt + 1))
 	sleep 1
 done
 [ -f "$validator_coordination_directory/ready" ]
+
+if [ "${SHAUTH_STACK_FOCUS:-}" = logout-correlation ]; then
+	touch "$validator_coordination_directory/run-gateway-matrix"
+	if ! wait_for_process "$gateway_test_pid" 'focused logout-correlation browser test' 180; then
+		gateway_test_pid=
+		exit 1
+	fi
+	gateway_test_pid=
+	exit 0
+fi
 
 SHAUTH_URL=http://localhost:8080 \
 SHAUTH_VALIDATOR_TOKEN=$SHAUTH_VALIDATOR_TOKEN \
@@ -489,12 +532,10 @@ for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECO
 done
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM sessions JOIN users ON users.id=sessions.user_id WHERE users.username='shauth-validator' AND sessions.revoked_at IS NULL")" = 0 ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 \
-	-c "UPDATE managed_apps SET validation_url='http://localhost:5556/auth/validation' WHERE slug='gateway-integration'" >/dev/null
-kill "$validator_pid"
-wait "$validator_pid" 2>/dev/null || true
+	-c "UPDATE managed_apps SET validation_url='http://gateway-integration.localhost:5556/auth/validation' WHERE slug='gateway-integration'" >/dev/null
+stop_process "$validator_pid" 'primary application validator'
 validator_pid=
-kill "$validator_secondary_pid"
-wait "$validator_secondary_pid" 2>/dev/null || true
+stop_process "$validator_secondary_pid" 'secondary application validator'
 validator_secondary_pid=
 abandoned_validation_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM app_validation_runs WHERE status='passed' ORDER BY requested_at,id LIMIT 1")
 [ -n "$abandoned_validation_id" ]
@@ -527,7 +568,15 @@ for client_mode in gateway-secondary:front gateway-tertiary:back; do
 		--data "$client_registration" "http://localhost:4445/admin/clients/${client_id}" >/dev/null
 done
 touch "$validator_coordination_directory/run-gateway-matrix"
-wait "$gateway_test_pid"
+if ! wait_for_process "$gateway_test_pid" 'gateway browser matrix' 300; then
+	gateway_test_pid=
+	compose exec -T postgres psql -U shauth -d shauth -c "SELECT app_slug,direction,status,failure FROM app_validation_runs ORDER BY requested_at,id" >&2 || true
+	for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE" "$SHAUTH_GATEWAY_TERTIARY_DATABASE"; do
+		printf '%s: ' "$gateway_database" >&2
+		compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc "SELECT 'active_sessions='||count(*) FILTER (WHERE revoked_at IS NULL)||', logout_tokens='||(SELECT count(*) FROM oidc_gateway_logout_tokens) FROM oidc_gateway_sessions" >&2 || true
+	done
+	exit 1
+fi
 gateway_test_pid=
 # The provider-initiated browser test deliberately signs the administrator out
 # of every Shauth device, including this shell's independent cookie jar.
@@ -546,7 +595,7 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'client_name=Automatic consent integration client' \
   --data-urlencode "client_secret=${auto_consent_client_secret}" \
   --data-urlencode "redirect_uris=${auto_consent_redirect_uri}" \
-  --data-urlencode 'post_logout_redirect_uris=http://localhost:5570/signed-out' \
+  --data-urlencode 'post_logout_redirect_uris=http://localhost:5570/auth/shauth/logout/complete' \
   --data-urlencode 'frontchannel_logout_uri=http://localhost:5570/frontchannel-logout' \
   http://localhost:8080/admin/clients | grep -q "$auto_consent_client_id"
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
@@ -630,6 +679,7 @@ if [ "$attempt" -eq 30 ] || [ "$remaining_developer_mappings" != 0 ]; then
   compose logs --no-color
   exit 1
 fi
+curl --fail --silent --show-error http://localhost:4445/admin/clients/gateway-integration | grep -q '"backchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/backchannel-logout"'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Ory Hydra authorization provider'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Active browser sessions'
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'PostgreSQL session store'
@@ -649,13 +699,12 @@ fi
 
 # Browser form posts must remain same-origin. Provider-initiated logout revokes
 # the user's correlated Ory Hydra sessions before rendering a durable signed-out
-# page; relying applications use Ory Hydra's published logout endpoint.
+# page; relying applications use Ory Hydra's published logout endpoint. The
+# local Shauth session is revoked before the browser leaves the form POST.
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data '' http://localhost:8080/logout)" = 403 ]
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data-urlencode 'challenge=invalid' http://localhost:8080/oauth/logout)" = 403 ]
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/logout | grep -q 'Sign out of all apps?'
-logout_start=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" http://localhost:8080/logout |
-	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
-[ "$logout_start" = /oauth2/sessions/logout ]
+node scripts/test-browser-global-logout.mjs "$cookie_jar"
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/signed-out | grep -q 'Sign in to Shauth'
 apps_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)
 [ "$apps_status" = 303 ]
@@ -670,7 +719,7 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   http://localhost:8080/login >/dev/null
 admin_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username = 'admin'")
 single_session_setup=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
-	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Flocalhost%3A5556%2Fauth%2Fcallback&state=single-session-setup&nonce=single-session-setup&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Fgateway-integration.localhost%3A5556%2Fauth%2Fcallback&state=single-session-setup&nonce=single-session-setup&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$single_session_setup" in
 	http://localhost:8080/oauth/login?login_challenge=*) ;;
@@ -687,7 +736,7 @@ current_session_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SEL
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/users' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/sessions/${current_session_id}/revoke"
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)" = 303 ]
 single_session_login=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
-	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Flocalhost%3A5556%2Fauth%2Fcallback&state=single-session-revocation&nonce=single-session-revocation&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Fgateway-integration.localhost%3A5556%2Fauth%2Fcallback&state=single-session-revocation&nonce=single-session-revocation&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$single_session_login" in
 	http://localhost:8080/oauth/login?login_challenge=*) ;;

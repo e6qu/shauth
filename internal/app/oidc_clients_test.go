@@ -15,7 +15,7 @@ func TestOIDCClientInputValidate(t *testing.T) {
 		Name:                   "Intraktible development",
 		Secret:                 "0123456789abcdef0123456789abcdef",
 		RedirectURIs:           []string{"https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/callback"},
-		PostLogoutRedirectURIs: []string{"https://intraktible.dev.e6qu.dev/"},
+		PostLogoutRedirectURIs: []string{"https://intraktible.dev.e6qu.dev/auth/shauth/logout/complete"},
 		FrontChannelLogoutURI:  "https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/frontchannel-logout",
 		BackChannelLogoutURI:   "https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/backchannel-logout",
 	}
@@ -36,7 +36,10 @@ func TestOIDCClientInputValidate(t *testing.T) {
 			input.BackChannelLogoutURI = "https://attacker.example.test/backchannel-logout"
 		},
 		"post-logout origin mismatch": func(input *oidcClientInput) {
-			input.PostLogoutRedirectURIs = []string{"https://attacker.example.test/signed-out"}
+			input.PostLogoutRedirectURIs = []string{"https://attacker.example.test/auth/shauth/logout/complete"}
+		},
+		"insecure remote post-logout redirect": func(input *oidcClientInput) {
+			input.PostLogoutRedirectURIs = []string{"http://auth.dev.e6qu.dev/oauth/logout/complete"}
 		},
 		"fragment": func(input *oidcClientInput) {
 			input.RedirectURIs = []string{"https://intraktible.dev.e6qu.dev/callback#fragment"}
@@ -181,6 +184,7 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 }
 
 func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
+	completionURL := "https://app.example.test/auth/shauth/logout/complete"
 	app := identity.ManagedApp{
 		LaunchURL:    "https://app.example.test/ui",
 		OIDCClientID: "app-client",
@@ -189,7 +193,7 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 	client := oidcClient{
 		ID:                     "app-client",
 		RedirectURIs:           []string{"https://app.example.test/auth/callback"},
-		PostLogoutRedirectURIs: []string{"https://app.example.test/other-signed-out", app.SignedOutURL},
+		PostLogoutRedirectURIs: []string{completionURL},
 		BackChannelLogoutURI:   "https://app.example.test/auth/backchannel-logout",
 	}
 	if err := validateManagedAppClient(app, client); err != nil {
@@ -206,17 +210,17 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 		"missing post-logout redirect": func(_ *identity.ManagedApp, client *oidcClient) {
 			client.PostLogoutRedirectURIs = nil
 		},
-		"same-origin wrong path": func(_ *identity.ManagedApp, client *oidcClient) {
-			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/other-signed-out"}
+		"wrong completion path": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/shauth/logout/not-complete"}
 		},
 		"trailing slash mismatch": func(_ *identity.ManagedApp, client *oidcClient) {
-			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/signed-out/"}
+			client.PostLogoutRedirectURIs = []string{completionURL + "/"}
 		},
 		"path normalization mismatch": func(_ *identity.ManagedApp, client *oidcClient) {
-			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/../auth/signed-out"}
+			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/shauth/logout/../logout/complete"}
 		},
 		"host spelling mismatch": func(_ *identity.ManagedApp, client *oidcClient) {
-			client.PostLogoutRedirectURIs = []string{"https://APP.example.test/auth/signed-out"}
+			client.PostLogoutRedirectURIs = []string{"https://APP.example.test/auth/shauth/logout/complete"}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -227,6 +231,19 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 				t.Fatal("invalid managed app and OpenID Connect client registration was accepted")
 			}
 		})
+	}
+}
+
+func TestManagedAppLogoutBridgeURLUsesOnlyTheLaunchOrigin(t *testing.T) {
+	got, err := managedAppLogoutBridgeURL("https://app.example.test:8443/ui?next=https://attacker.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://app.example.test:8443/auth/shauth/logout/complete" {
+		t.Fatalf("logout bridge URL = %q", got)
+	}
+	if _, err := managedAppLogoutBridgeURL("/relative"); err == nil {
+		t.Fatal("relative launch URL produced a logout bridge")
 	}
 }
 

@@ -63,9 +63,10 @@ immutable `release_revision`, an authenticated `validation_url` exposing an
 accessible `Sign out` control plus exact username, email, normalized role, and
 release-revision fields,
 and an app-local `signed_out_url` exposing an accessible `Sign in with Shauth`
-control. The `signed_out_url` must be byte-for-byte present in the same client's
-`post_logout_redirect_uris`; matching only its origin does not authorize an
-OIDC post-logout return. Release revisions and both container images must use immutable
+control. The client must register its exact app-origin
+`/auth/shauth/logout/complete` bridge in `post_logout_redirect_uris`; the bridge
+returns to Shauth's one-time completion endpoint, which then redirects to the
+trusted app-local `signed_out_url`. Release revisions and both container images must use immutable
 lowercase hexadecimal commits/tags or `sha256` digests; moving labels are
 rejected. Any release or endpoint-coordinate change queues real browser checks
 through both the Shauth catalog and the app's direct launch URL.

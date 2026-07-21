@@ -15,6 +15,12 @@ const username = process.env.SHAUTH_VALIDATION_USERNAME;
 const email = process.env.SHAUTH_VALIDATION_EMAIL;
 if (!username || !email) throw new Error("validation account identity is unavailable");
 if (!Array.isArray(job.bootstrap_urls) || job.bootstrap_urls.length !== 2) throw new Error("validation browser bootstraps are unavailable");
+const expectedLogoutBridgeURL = new URL("/auth/shauth/logout/complete", job.launch_url).toString();
+if (job.logout_bridge_url !== expectedLogoutBridgeURL) throw new Error("application validation logout bridge is invalid");
+if (job.witness) {
+  const expectedWitnessLogoutBridgeURL = new URL("/auth/shauth/logout/complete", job.witness.launch_url).toString();
+  if (job.witness.logout_bridge_url !== expectedWitnessLogoutBridgeURL) throw new Error("witness validation logout bridge is invalid");
+}
 const bootstrapTokens = job.bootstrap_urls.map((rawURL) => new URL(rawURL).hash.slice(1));
 if (bootstrapTokens.some((token) => !/^[0-9a-f]{64}$/.test(token)) || new Set(bootstrapTokens).size !== bootstrapTokens.length) {
   throw new Error("validation browser bootstraps are invalid");
@@ -199,6 +205,24 @@ async function assertWitnessRevoked(witnessPage) {
   throw new Error(`${job.witness.app_slug} witness session remained authenticated after global logout`);
 }
 
+async function observeBrowserRedirect(context, rawURL) {
+  const expectedURL = new URL(rawURL).toString();
+  const probePage = await context.newPage();
+  let observed;
+  probePage.on("response", (response) => {
+    if (new URL(response.url()).toString() === expectedURL) {
+      observed = { status: response.status(), location: response.headers().location ?? "" };
+    }
+  });
+  try {
+    await probePage.goto(expectedURL, { waitUntil: "domcontentloaded" });
+    if (!observed) throw new Error(`browser did not receive a response from ${expectedURL}`);
+    return observed;
+  } finally {
+    await probePage.close();
+  }
+}
+
 async function assertAppSignedInAndGlobalLogout(page, context, providerTrace) {
   validationStage = `verify ${job.app_slug} authenticated page`;
   if (!sameOrigin(page.url(), job.launch_url)) throw new Error(`browser did not reach ${job.app_slug}`);
@@ -210,12 +234,33 @@ async function assertAppSignedInAndGlobalLogout(page, context, providerTrace) {
   const witnessPage = await establishWitnessSession(context, providerTrace);
   validationStage = `sign out ${job.app_slug} through Shauth`;
   const logoutCount = providerTrace.logout;
+  const logoutBridgeCount = providerTrace.logoutBridgeURLs.length;
   await signOutControl(page).click();
   await waitForRegisteredURL(page, (value) => value.toString() === job.signed_out_url, `${job.app_slug} global logout did not return to its exact local signed-out page`);
   if (providerTrace.logout <= logoutCount) throw new Error(`${job.app_slug} sign out did not use Shauth global logout`);
+  const traversedLogoutBridges = providerTrace.logoutBridgeURLs.slice(logoutBridgeCount);
+  if (traversedLogoutBridges.length !== 1 || traversedLogoutBridges[0] !== job.logout_bridge_url) {
+    throw new Error(`${job.app_slug} sign out did not traverse its exact logout bridge once`);
+  }
   await signInControl(page).waitFor({ state: "visible", timeout: 30_000 });
   await page.reload({ waitUntil: "domcontentloaded" });
   await signInControl(page).waitFor({ state: "visible", timeout: 30_000 });
+  validationStage = `verify ${job.app_slug} logout bridge rejects redirect injection and replay`;
+  const injectedBridge = new URL(job.logout_bridge_url);
+  injectedBridge.searchParams.set("next", "https://attacker.example/");
+  injectedBridge.searchParams.set("redirect_uri", "https://attacker.example/");
+  const injectedBridgeResponse = await observeBrowserRedirect(context, injectedBridge.toString());
+  const logoutCompletionURL = new URL("/oauth/logout/complete", job.shauth_url).toString();
+  if (injectedBridgeResponse.status !== 303 || new URL(injectedBridgeResponse.location, job.logout_bridge_url).toString() !== logoutCompletionURL) {
+    throw new Error(`${job.app_slug} logout bridge accepted an injected redirect`);
+  }
+  const replayCompletion = new URL(logoutCompletionURL);
+  replayCompletion.searchParams.set("next", "https://attacker.example/");
+  const replayResponse = await observeBrowserRedirect(context, replayCompletion.toString());
+  const safeReplayDestination = new URL("/signed-out", job.shauth_url).toString();
+  if (replayResponse.status !== 303 || new URL(replayResponse.location, job.shauth_url).toString() !== safeReplayDestination) {
+    throw new Error(`${job.app_slug} logout completion replay escaped Shauth`);
+  }
   await assertWitnessRevoked(witnessPage);
 
   validationStage = "verify Shauth browser session revocation";
@@ -273,12 +318,15 @@ try {
   await installCredentialBoundary(context, job.shauth_url, "", "", (violation) => {
     credentialBoundaryFailure = violation;
   }, bootstrapTokens);
-  const providerTrace = { authorizationClientIDs: [], logout: 0 };
+  const providerTrace = { authorizationClientIDs: [], logout: 0, logoutBridgeURLs: [] };
   context.on("request", (request) => {
     const coordinate = new URL(request.url());
     if (sameOrigin(coordinate.toString(), job.shauth_url)) {
       if (coordinate.pathname === "/oauth2/auth") providerTrace.authorizationClientIDs.push(coordinate.searchParams.get("client_id") ?? "");
       if (coordinate.pathname === "/oauth2/sessions/logout" || coordinate.pathname === "/oauth/logout") providerTrace.logout += 1;
+    }
+    if (coordinate.origin === new URL(job.logout_bridge_url).origin && coordinate.pathname === new URL(job.logout_bridge_url).pathname) {
+      providerTrace.logoutBridgeURLs.push(coordinate.toString());
     }
     if (isTrackedOrigin(coordinate)) flowTrace.push(`request ${request.method()} ${coordinate.origin}${coordinate.pathname}`);
   });
@@ -330,7 +378,7 @@ try {
 }
 
 function isTrackedOrigin(coordinate) {
-  return [job.shauth_url, job.launch_url, job.validation_url, job.signed_out_url, job.witness?.launch_url, job.witness?.validation_url, job.witness?.signed_out_url]
+  return [job.shauth_url, job.launch_url, job.validation_url, job.signed_out_url, job.logout_bridge_url, job.witness?.launch_url, job.witness?.validation_url, job.witness?.signed_out_url, job.witness?.logout_bridge_url]
     .filter(Boolean)
     .some((value) => sameOrigin(coordinate.toString(), value));
 }

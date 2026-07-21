@@ -83,6 +83,7 @@ async function listen(handler) {
 }
 
 async function close(server) {
+	server.closeAllConnections();
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
@@ -104,8 +105,9 @@ test("Chromium sends the canonical form only to Shauth and aborts application ex
     response.setHeader("content-type", "text/html");
     response.end("application");
   });
-  const browser = await chromium.launch({ headless: true });
+  let browser;
   try {
+	  browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const violations = [];
     await installCredentialBoundary(context, provider.origin, username, password, (value) => violations.push(value));
@@ -126,7 +128,7 @@ test("Chromium sends the canonical form only to Shauth and aborts application ex
     assert.equal(violations.length, 1);
     await context.close();
   } finally {
-    await browser.close();
+	if (browser) await browser.close();
     await close(provider.server);
     await close(application.server);
   }
@@ -161,8 +163,9 @@ test("Chromium consumes a fragment bootstrap once and never sends its token to a
     response.setHeader("content-type", "text/html");
     response.end("application");
   });
-  const browser = await chromium.launch({ headless: true });
+  let browser;
   try {
+	  browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const violations = [];
     await installCredentialBoundary(context, provider.origin, "", "", (value) => violations.push(value), [bootstrapToken]);
@@ -184,7 +187,7 @@ test("Chromium consumes a fragment bootstrap once and never sends its token to a
     assert.equal(violations.length, 1);
     await context.close();
   } finally {
-    await browser.close();
+	if (browser) await browser.close();
     await close(provider.server);
     await close(application.server);
   }

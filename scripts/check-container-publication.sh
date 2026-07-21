@@ -6,6 +6,10 @@ root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 workflow="$root/.github/workflows/ci.yml"
 gha='$'
 
+"$root/scripts/test-workflow-timeouts.sh"
+"$root/scripts/check-workflow-timeouts.sh"
+"$root/scripts/test-process-wait.sh"
+
 expect_count() {
 	local expected="$1" literal="$2" actual
 	actual="$(grep -Fxc -- "$literal" "$workflow" || true)"

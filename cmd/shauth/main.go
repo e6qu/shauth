@@ -54,6 +54,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for observedAt := range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			recoveryErr := serverApp.RecoverAbandonedLogout(ctx, observedAt)
+			_, cleanupErr := store.DeleteCompletedLogoutCorrelationGrants(ctx, observedAt.Add(-identity.LogoutCorrelationRetention), 1000)
+			cancel()
+			if recoveryErr != nil {
+				log.Printf("recover abandoned provider logout: %v", recoveryErr)
+			}
+			if cleanupErr != nil {
+				log.Printf("delete completed provider logout evidence: %v", cleanupErr)
+			}
+		}
+	}()
 
 	server := &http.Server{
 		Addr:              cfg.Address,

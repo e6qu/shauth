@@ -257,6 +257,27 @@ func TestEndSessionURLIdentifiesClientWithoutLocalSession(t *testing.T) {
 	}
 }
 
+func TestProviderLogoutBridgeUsesOnlyTheConfiguredIssuer(t *testing.T) {
+	t.Parallel()
+	issuer, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: Config{Issuer: issuer}}
+	request := httptest.NewRequest(http.MethodGet, "https://app.example.test/auth/shauth/logout/complete?next=https%3A%2F%2Fattacker.example&code=secret", nil)
+	response := httptest.NewRecorder()
+	server.providerLogoutComplete(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if location := response.Header().Get("Location"); location != "https://auth.example.test/oauth/logout/complete" {
+		t.Fatalf("bridge location = %q", location)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("provider logout bridge response was cacheable")
+	}
+}
+
 func TestSessionEncryptionAdditionalDataBindsIdentity(t *testing.T) {
 	t.Parallel()
 	base := Session{ID: "session", Subject: "subject", ProviderSessionID: "provider-session"}

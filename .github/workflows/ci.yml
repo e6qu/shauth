@@ -13,8 +13,13 @@ jobs:
   test:
     name: Shauth integration
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Enforce bounded GitHub Actions jobs
+        run: |
+          ./scripts/test-workflow-timeouts.sh
+          ./scripts/check-workflow-timeouts.sh
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26.5'
@@ -47,6 +52,7 @@ jobs:
           - architecture: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: docker build --file Dockerfile.validator --tag shauth-validator:pr .
@@ -60,6 +66,7 @@ jobs:
     if: github.event_name == 'push'
     name: Container amd64
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -97,6 +104,7 @@ jobs:
     if: github.event_name == 'push'
     name: Container arm64
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -135,6 +143,7 @@ jobs:
     name: Container manifest
     needs: [build-amd64, build-arm64]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -172,6 +181,7 @@ jobs:
     name: Retain 20 container releases
     needs: manifest
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write

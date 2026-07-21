@@ -13,9 +13,9 @@ func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 	valid := job{
 		ID: "run-id", ManagedAppID: "bleephub-id", AppSlug: "bleephub", AppName: "Bleephub", OIDCClientID: "bleephub",
 		LaunchURL: "https://bleephub.example.test/", ValidationURL: "https://bleephub.example.test/auth/validation",
-		SignedOutURL: "https://bleephub.example.test/ui/signed-out", Direction: "from_app",
+		SignedOutURL: "https://bleephub.example.test/ui/signed-out", LogoutBridgeURL: "https://bleephub.example.test/auth/shauth/logout/complete", Direction: "from_app",
 		ReleaseRevision: "0123456789ab", ShauthURL: "https://auth.example.test",
-		Witness: &witness{ManagedAppID: "sharecrop-id", AppSlug: "sharecrop", AppName: "Sharecrop", OIDCClientID: "sharecrop", LaunchURL: "https://sharecrop.example.test/", ValidationURL: "https://sharecrop.example.test/me", SignedOutURL: "https://sharecrop.example.test/signed-out", ReleaseRevision: "abcdef012345"},
+		Witness: &witness{ManagedAppID: "sharecrop-id", AppSlug: "sharecrop", AppName: "Sharecrop", OIDCClientID: "sharecrop", LaunchURL: "https://sharecrop.example.test/", ValidationURL: "https://sharecrop.example.test/me", SignedOutURL: "https://sharecrop.example.test/signed-out", LogoutBridgeURL: "https://sharecrop.example.test/auth/shauth/logout/complete", ReleaseRevision: "abcdef012345"},
 	}
 	if err := validateJob("https://auth.example.test", valid); err != nil {
 		t.Fatalf("valid job rejected: %v", err)
@@ -28,10 +28,15 @@ func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 		"insecure Shauth URL":         func(value *job) { value.ShauthURL = "http://auth.example.test" },
 		"different validation origin": func(value *job) { value.ValidationURL = "https://attacker.example.test/auth/validation" },
 		"different signed-out origin": func(value *job) { value.SignedOutURL = "https://attacker.example.test/signed-out" },
+		"missing logout bridge":       func(value *job) { value.LogoutBridgeURL = "" },
+		"different bridge origin":     func(value *job) { value.LogoutBridgeURL = "https://attacker.example.test/auth/shauth/logout/complete" },
+		"wrong bridge path":           func(value *job) { value.LogoutBridgeURL = "https://bleephub.example.test/signed-out" },
+		"bridge query":                func(value *job) { value.LogoutBridgeURL += "?next=https://attacker.example.test" },
 		"insecure external app": func(value *job) {
 			value.LaunchURL = "http://bleephub.example.test/"
 			value.ValidationURL = "http://bleephub.example.test/auth/validation"
 			value.SignedOutURL = "http://bleephub.example.test/ui/signed-out"
+			value.LogoutBridgeURL = "http://bleephub.example.test/auth/shauth/logout/complete"
 		},
 		"credentials in URL":       func(value *job) { value.LaunchURL = "https://user:secret@bleephub.example.test/" },
 		"fragment":                 func(value *job) { value.SignedOutURL += "#credential-form" },
@@ -45,6 +50,7 @@ func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 			value.Witness.LaunchURL = "https://bleephub.example.test/witness"
 			value.Witness.ValidationURL = "https://bleephub.example.test/witness/me"
 			value.Witness.SignedOutURL = "https://bleephub.example.test/witness/signed-out"
+			value.Witness.LogoutBridgeURL = "https://bleephub.example.test/auth/shauth/logout/complete"
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -63,9 +69,9 @@ func TestValidateJobAllowsLoopbackHTTP(t *testing.T) {
 	value := job{
 		ID: "run-id", ManagedAppID: "local-app-id", AppSlug: "local-app", AppName: "Local app", OIDCClientID: "local-app",
 		LaunchURL: "http://local-app.localhost:5556/", ValidationURL: "http://local-app.localhost:5556/me",
-		SignedOutURL: "http://local-app.localhost:5556/auth/signed-out", Direction: "from_shauth",
+		SignedOutURL: "http://local-app.localhost:5556/auth/signed-out", LogoutBridgeURL: "http://local-app.localhost:5556/auth/shauth/logout/complete", Direction: "from_shauth",
 		ReleaseRevision: "0123456789ab", ShauthURL: "http://localhost:8080",
-		Witness: &witness{ManagedAppID: "local-peer-id", AppSlug: "local-peer", AppName: "Local peer", OIDCClientID: "local-peer", LaunchURL: "http://local-peer.localhost:5558/", ValidationURL: "http://local-peer.localhost:5558/me", SignedOutURL: "http://local-peer.localhost:5558/auth/signed-out", ReleaseRevision: "abcdef012345"},
+		Witness: &witness{ManagedAppID: "local-peer-id", AppSlug: "local-peer", AppName: "Local peer", OIDCClientID: "local-peer", LaunchURL: "http://local-peer.localhost:5558/", ValidationURL: "http://local-peer.localhost:5558/me", SignedOutURL: "http://local-peer.localhost:5558/auth/signed-out", LogoutBridgeURL: "http://local-peer.localhost:5558/auth/shauth/logout/complete", ReleaseRevision: "abcdef012345"},
 	}
 	if err := validateJob("http://localhost:8080", value); err != nil {
 		t.Fatalf("loopback validation job rejected: %v", err)

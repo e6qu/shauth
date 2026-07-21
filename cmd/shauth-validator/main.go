@@ -35,6 +35,7 @@ type job struct {
 	LaunchURL       string   `json:"launch_url"`
 	ValidationURL   string   `json:"validation_url"`
 	SignedOutURL    string   `json:"signed_out_url"`
+	LogoutBridgeURL string   `json:"logout_bridge_url"`
 	Direction       string   `json:"direction"`
 	ReleaseRevision string   `json:"release_revision"`
 	ShauthURL       string   `json:"shauth_url"`
@@ -50,6 +51,7 @@ type witness struct {
 	LaunchURL       string `json:"launch_url"`
 	ValidationURL   string `json:"validation_url"`
 	SignedOutURL    string `json:"signed_out_url"`
+	LogoutBridgeURL string `json:"logout_bridge_url"`
 	ReleaseRevision string `json:"release_revision"`
 }
 
@@ -324,7 +326,7 @@ func validateJob(baseURL string, claimed job) error {
 	if err != nil || !validServiceURL(claimedProvider) || (claimedProvider.Path != "" && claimedProvider.Path != "/") || claimedProvider.RawQuery != "" || provider.Scheme != claimedProvider.Scheme || !strings.EqualFold(provider.Host, claimedProvider.Host) {
 		return fmt.Errorf("job Shauth origin does not match the configured Shauth origin")
 	}
-	appOrigin, err := validateApplicationCoordinates("application", claimed.LaunchURL, claimed.ValidationURL, claimed.SignedOutURL)
+	appOrigin, err := validateApplicationCoordinates("application", claimed.LaunchURL, claimed.ValidationURL, claimed.SignedOutURL, claimed.LogoutBridgeURL)
 	if err != nil {
 		return err
 	}
@@ -337,7 +339,7 @@ func validateJob(baseURL string, claimed job) error {
 	if claimed.Witness == nil {
 		return fmt.Errorf("global SSO logout requires a second managed app with a distinct OpenID Connect client and origin")
 	}
-	witnessOrigin, err := validateApplicationCoordinates("witness", claimed.Witness.LaunchURL, claimed.Witness.ValidationURL, claimed.Witness.SignedOutURL)
+	witnessOrigin, err := validateApplicationCoordinates("witness", claimed.Witness.LaunchURL, claimed.Witness.ValidationURL, claimed.Witness.SignedOutURL, claimed.Witness.LogoutBridgeURL)
 	if err != nil {
 		return err
 	}
@@ -378,9 +380,9 @@ func validateBootstrapURLs(baseURL string, bootstrapURLs []string) error {
 	return nil
 }
 
-func validateApplicationCoordinates(label, launch, validation, signedOut string) (*url.URL, error) {
+func validateApplicationCoordinates(label, launch, validation, signedOut, logoutBridge string) (*url.URL, error) {
 	var origin *url.URL
-	for coordinateLabel, raw := range map[string]string{"launch": launch, "validation": validation, "signed-out": signedOut} {
+	for coordinateLabel, raw := range map[string]string{"launch": launch, "validation": validation, "signed-out": signedOut, "logout bridge": logoutBridge} {
 		coordinate, err := url.Parse(raw)
 		if err != nil || !validServiceURL(coordinate) {
 			return nil, fmt.Errorf("job %s %s URL is invalid", label, coordinateLabel)
@@ -392,6 +394,10 @@ func validateApplicationCoordinates(label, launch, validation, signedOut string)
 		if coordinate.Scheme != origin.Scheme || !strings.EqualFold(coordinate.Host, origin.Host) {
 			return nil, fmt.Errorf("job %s URLs do not share one origin", label)
 		}
+	}
+	expectedLogoutBridge := origin.Scheme + "://" + origin.Host + "/auth/shauth/logout/complete"
+	if logoutBridge != expectedLogoutBridge {
+		return nil, fmt.Errorf("job %s logout bridge URL must be %s", label, expectedLogoutBridge)
 	}
 	return origin, nil
 }

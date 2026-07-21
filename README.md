@@ -98,7 +98,8 @@ the second enters through the app's public launch URL. Both checks authenticate,
 establish a second independent relying-party session through silent SSO, verify
 the app-owned signed-in page, perform application-initiated global OIDC logout,
 verify the exact app-local signed-out destination and its reload behavior, sign
-in again, establish another witness session, then perform provider-initiated
+out through the exact app-origin logout bridge, reject hostile bridge queries
+and completion replay, sign in again, establish another witness session, then perform provider-initiated
 logout from Shauth and verify that both relying parties and the Shauth browser
 session were revoked. A deployment
 without a second registered app on a distinct origin and OIDC client reports a
@@ -179,8 +180,11 @@ in the Shauth runtime secret and contains each confidential client secret,
 sign-in and post-logout redirect URIs, at least one front-channel or
 back-channel logout URI, launch URL, health URL, and optional monitoring URL.
 Every coordinate for one connected application uses the same scheme, host, and
-port, and its app-local `signed_out_url` exactly matches one of that client's
-registered `post_logout_redirect_uris`. Shauth verifies both invariants against
+port, and the client registers the exact app-origin
+`/auth/shauth/logout/complete` bridge as a `post_logout_redirect_uri`. The
+bridge returns to Shauth's `/oauth/logout/complete`; Shauth then uses its
+one-time durable correlation to reach the trusted app-local `signed_out_url`.
+Shauth verifies these invariants against
 its PostgreSQL catalog record and Ory Hydra's reconciled client before startup succeeds; bootstrap
 configuration cannot take over an administrator-owned slug or client ID. Each
 entry also supplies `release_revision`, `validation_url`, and `signed_out_url`;
