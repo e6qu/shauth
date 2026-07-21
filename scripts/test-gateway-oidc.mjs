@@ -7,6 +7,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { chromium } from "playwright";
+import { applicationSignOutControl } from "../validator/application-ui.mjs";
 
 const password = process.env.SHAUTH_BOOTSTRAP_ADMIN_PASSWORD;
 const primaryDatabase = process.env.SHAUTH_GATEWAY_PRIMARY_DATABASE;
@@ -97,7 +98,8 @@ try {
   assert.equal(await page.getByTestId("validation-email").textContent(), "admin@localhost.test");
   assert.equal(await page.getByTestId("validation-role").textContent(), "admin");
   assert.equal(await page.getByTestId("validation-release").textContent(), "222222222222");
-  await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await page.goto("http://gateway-integration.localhost:5556/");
+  await applicationSignOutControl(page, "admin", "primary application");
 
   const providerSessionID = queryGateway(primaryDatabase, "SELECT provider_session_id FROM oidc_gateway_sessions WHERE client_id='gateway-integration' AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1");
   assert.ok(providerSessionID, "gateway session did not persist its provider session identifier");
@@ -253,7 +255,7 @@ try {
 
   await page.goto("http://gateway-integration.localhost:5556/");
   await page.waitForURL("http://gateway-integration.localhost:5556/");
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await (await applicationSignOutControl(page, "admin", "primary application")).click();
   await waitForURL(page, "http://gateway-integration.localhost:5556/auth/signed-out", navigationTrace, browserErrors);
   await page.getByRole("heading", { name: "Signed out" }).waitFor();
   let signInControl = page.getByRole("link", { name: "Sign in with Shauth" });
@@ -386,7 +388,7 @@ async function exerciseLogoutCorrelationFailure(browserInstance, database) {
     await providerOnlyContext.clearCookies({ name: "shauth_session" });
     const callbackRequest = providerOnlyPage.waitForRequest((request) => new URL(request.url()).pathname === "/oauth/logout");
     await providerOnlyPage.goto("http://gateway-integration.localhost:5556/");
-    await providerOnlyPage.getByRole("button", { name: "Sign out", exact: true }).click();
+    await (await applicationSignOutControl(providerOnlyPage, "admin", "primary application")).click();
     const callbackURL = new URL((await callbackRequest).url());
     assert.equal(callbackURL.pathname, "/oauth/logout");
     await providerOnlyPage.waitForURL("http://gateway-integration.localhost:5556/auth/signed-out");
@@ -401,7 +403,7 @@ async function exerciseLogoutCorrelationFailure(browserInstance, database) {
     await signInPortalAndPrimaryRP(directProviderPage, directProviderContext);
     await directProviderContext.clearCookies({ name: "shauth_session" });
     await directProviderPage.goto("http://gateway-integration.localhost:5556/");
-    await directProviderPage.getByRole("button", { name: "Sign out", exact: true }).click();
+    await (await applicationSignOutControl(directProviderPage, "admin", "primary application")).click();
     await directProviderPage.waitForURL("http://gateway-integration.localhost:5556/auth/signed-out");
     assert.equal(await directProviderPage.getByRole("link", { name: "Sign in with Shauth", exact: true }).getAttribute("href"), "/auth/login");
   } finally {
@@ -420,7 +422,7 @@ async function exerciseCorrelationCreationFailure(browserInstance, database) {
     rejectLogoutCorrelationInserts();
     try {
       await page.goto("http://gateway-integration.localhost:5556/");
-      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+      await (await applicationSignOutControl(page, "admin", "primary application")).click();
       await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/oauth/logout");
       await page.getByText("OAuth logout could not be correlated with an exact provider session").waitFor();
     } finally {
@@ -446,7 +448,7 @@ async function exerciseCorrelationCreationFailure(browserInstance, database) {
     rejectLogoutCorrelationInserts();
     try {
       await page.goto("http://gateway-integration.localhost:5556/");
-      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+      await (await applicationSignOutControl(page, "admin", "primary application")).click();
       await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/oauth/logout");
       await page.getByText("OAuth logout could not be correlated with an exact provider session").waitFor();
     } finally {
@@ -571,7 +573,7 @@ async function createUpstream(port, title, releaseRevision) {
       "content-security-policy": "default-src 'self'; frame-ancestors 'self'",
       "x-frame-options": "SAMEORIGIN",
     });
-    response.end(`<!doctype html><html lang=en><title>${title}</title><h1>${title}</h1><dl><dt>Username</dt><dd data-testid=validation-username>${escapeHTML(username)}</dd><dt>Email</dt><dd data-testid=validation-email>${escapeHTML(email)}</dd><dt>Role</dt><dd data-testid=validation-role>${escapeHTML(role)}</dd><dt>Release</dt><dd data-testid=validation-release>${releaseRevision}</dd></dl><form method=post action=/auth/logout><button>Sign out</button></form></html>`);
+    response.end(`<!doctype html><html lang=en><title>${title}</title><h1>${title}</h1><details><summary data-shauth-user="${escapeHTML(username)}">${escapeHTML(username)}</summary><form method=post action=/auth/logout><button data-shauth-sign-out>Sign out</button></form></details><dl><dt>Username</dt><dd data-testid=validation-username>${escapeHTML(username)}</dd><dt>Email</dt><dd data-testid=validation-email>${escapeHTML(email)}</dd><dt>Role</dt><dd data-testid=validation-role>${escapeHTML(role)}</dd><dt>Release</dt><dd data-testid=validation-release>${releaseRevision}</dd></dl></html>`);
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);

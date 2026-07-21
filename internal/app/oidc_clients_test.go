@@ -196,6 +196,7 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 		PostLogoutRedirectURIs: []string{completionURL},
 		BackChannelLogoutURI:   "https://app.example.test/auth/backchannel-logout",
 	}
+	app.OIDCContractHash = oidcClientContractHash(client)
 	if err := validateManagedAppClient(app, client); err != nil {
 		t.Fatalf("matching registration rejected: %v", err)
 	}
@@ -235,6 +236,41 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 			mutate(&changedApp, &changedClient)
 			if err := validateManagedAppClient(changedApp, changedClient); err == nil {
 				t.Fatal("invalid managed app and OpenID Connect client registration was accepted")
+			}
+		})
+	}
+}
+
+func TestOIDCClientContractHashDetectsEveryBehavioralRegistrationUpdate(t *testing.T) {
+	base := oidcClient{
+		ID: "app-client", RedirectURIs: []string{"https://app.example.test/callback", "https://app.example.test/callback/secondary"},
+		PostLogoutRedirectURIs: []string{"https://app.example.test/auth/shauth/logout/complete"},
+		FrontChannelLogoutURI:  "https://app.example.test/frontchannel", BackChannelLogoutURI: "https://app.example.test/backchannel",
+		GrantTypes: []string{"authorization_code", "refresh_token"}, ResponseTypes: []string{"code"}, TokenEndpointAuth: "client_secret_post",
+	}
+	reordered := base
+	reordered.RedirectURIs = []string{base.RedirectURIs[1], base.RedirectURIs[0]}
+	reordered.GrantTypes = []string{base.GrantTypes[1], base.GrantTypes[0]}
+	if oidcClientContractHash(base) != oidcClientContractHash(reordered) {
+		t.Fatal("OIDC registration contract hash depended on set order")
+	}
+	for name, mutate := range map[string]func(*oidcClient){
+		"client ID": func(client *oidcClient) { client.ID += "-v2" },
+		"redirect URIs": func(client *oidcClient) {
+			client.RedirectURIs = append(client.RedirectURIs, "https://app.example.test/another")
+		},
+		"post-logout redirect URIs":     func(client *oidcClient) { client.PostLogoutRedirectURIs = nil },
+		"front-channel logout URI":      func(client *oidcClient) { client.FrontChannelLogoutURI += "/changed" },
+		"back-channel logout URI":       func(client *oidcClient) { client.BackChannelLogoutURI += "/changed" },
+		"grant types":                   func(client *oidcClient) { client.GrantTypes = []string{"authorization_code"} },
+		"response types":                func(client *oidcClient) { client.ResponseTypes = []string{"token"} },
+		"token endpoint authentication": func(client *oidcClient) { client.TokenEndpointAuth = "client_secret_basic" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			mutate(&changed)
+			if oidcClientContractHash(base) == oidcClientContractHash(changed) {
+				t.Fatal("behavioral registration update retained its contract hash")
 			}
 		})
 	}

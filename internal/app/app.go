@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -168,6 +169,45 @@ func validateManagedAppClient(app identity.ManagedApp, client oidcClient) error 
 		return fmt.Errorf("managed app and OpenID Connect client must use one application origin")
 	}
 	return nil
+}
+
+func oidcClientContractHash(client oidcClient) string {
+	redirectURIs := append([]string(nil), client.RedirectURIs...)
+	postLogoutRedirectURIs := append([]string(nil), client.PostLogoutRedirectURIs...)
+	grantTypes := append([]string(nil), client.GrantTypes...)
+	responseTypes := append([]string(nil), client.ResponseTypes...)
+	sort.Strings(redirectURIs)
+	sort.Strings(postLogoutRedirectURIs)
+	sort.Strings(grantTypes)
+	sort.Strings(responseTypes)
+	payload, err := json.Marshal(struct {
+		ID                     string   `json:"client_id"`
+		RedirectURIs           []string `json:"redirect_uris"`
+		PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
+		FrontChannelLogoutURI  string   `json:"frontchannel_logout_uri"`
+		BackChannelLogoutURI   string   `json:"backchannel_logout_uri"`
+		GrantTypes             []string `json:"grant_types"`
+		ResponseTypes          []string `json:"response_types"`
+		TokenEndpointAuth      string   `json:"token_endpoint_auth_method"`
+	}{client.ID, redirectURIs, postLogoutRedirectURIs, client.FrontChannelLogoutURI, client.BackChannelLogoutURI, grantTypes, responseTypes, client.TokenEndpointAuth})
+	if err != nil {
+		panic("marshal OpenID Connect client validation contract: " + err.Error())
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func registeredOIDCClient(input oidcClientInput) oidcClient {
+	return oidcClient{
+		ID:                     input.ID,
+		RedirectURIs:           input.RedirectURIs,
+		PostLogoutRedirectURIs: input.PostLogoutRedirectURIs,
+		FrontChannelLogoutURI:  input.FrontChannelLogoutURI,
+		BackChannelLogoutURI:   input.BackChannelLogoutURI,
+		GrantTypes:             []string{"authorization_code", "refresh_token"},
+		ResponseTypes:          []string{"code"},
+		TokenEndpointAuth:      "client_secret_post",
+	}
 }
 
 func managedAppLogoutBridgeURL(launchURL string) (string, error) {
@@ -1220,6 +1260,7 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape("register the OIDC client before adding its app"), http.StatusSeeOther)
 		return
 	}
+	app.OIDCContractHash = oidcClientContractHash(*registeredClient)
 	if err := identity.ValidateManagedApp(app); err != nil {
 		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
@@ -1942,11 +1983,11 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		if err := input.validate(); err != nil {
 			return fmt.Errorf("bootstrap app %q OAuth client: %w", bootstrap.Slug, err)
 		}
-		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, HealthURL: bootstrap.HealthURL, MonitoringURL: bootstrap.MonitoringURL, ValidationURL: bootstrap.ValidationURL, SignedOutURL: bootstrap.SignedOutURL, ReleaseRevision: bootstrap.ReleaseRevision}
+		registeredClient := registeredOIDCClient(input)
+		managedApp := identity.ManagedApp{Slug: bootstrap.Slug, Name: bootstrap.Name, Description: bootstrap.Description, LaunchURL: bootstrap.LaunchURL, OIDCClientID: bootstrap.OIDCClientID, OIDCContractHash: oidcClientContractHash(registeredClient), HealthURL: bootstrap.HealthURL, MonitoringURL: bootstrap.MonitoringURL, ValidationURL: bootstrap.ValidationURL, SignedOutURL: bootstrap.SignedOutURL, ReleaseRevision: bootstrap.ReleaseRevision}
 		if err := identity.ValidateManagedApp(managedApp); err != nil {
 			return fmt.Errorf("bootstrap managed app %q: %w", bootstrap.Slug, err)
 		}
-		registeredClient := oidcClient{ID: input.ID, RedirectURIs: input.RedirectURIs, PostLogoutRedirectURIs: input.PostLogoutRedirectURIs, FrontChannelLogoutURI: input.FrontChannelLogoutURI, BackChannelLogoutURI: input.BackChannelLogoutURI}
 		if err := validateManagedAppClient(managedApp, registeredClient); err != nil {
 			return fmt.Errorf("bootstrap app %q registration: %w", bootstrap.Slug, err)
 		}
@@ -2041,6 +2082,12 @@ func (s *Server) assertManagedAppRegistrations(ctx context.Context) error {
 		}
 		if err := validateManagedAppClient(app, client); err != nil {
 			return fmt.Errorf("managed app %q registration: %w", app.Slug, err)
+		}
+		contractHash := oidcClientContractHash(client)
+		if app.OIDCContractHash != contractHash {
+			if err := s.store.ReconcileManagedAppOIDCContract(ctx, app.ID, contractHash); err != nil {
+				return fmt.Errorf("managed app %q OIDC registration contract: %w", app.Slug, err)
+			}
 		}
 	}
 	return nil

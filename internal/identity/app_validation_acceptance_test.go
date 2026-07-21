@@ -109,6 +109,82 @@ func TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized(t *testing.T
 	}
 }
 
+func TestOIDCRegistrationContractChangeQueuesBothDirectionsForEveryApp(t *testing.T) {
+	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("SHAUTH_ACCEPTANCE_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	adminPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	defer adminPool.Close()
+	schema := "oidc_contract_" + strings.ReplaceAll(randomUUID(), "-", "")
+	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
+		CREATE SCHEMA %s;
+		CREATE TABLE %s.managed_apps (LIKE public.managed_apps INCLUDING ALL);
+		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
+		CREATE TABLE %s.app_validation_control (LIKE public.app_validation_control INCLUDING ALL);
+		INSERT INTO %s.app_validation_control(singleton) VALUES (TRUE)`, schema, schema, schema, schema, schema)); err != nil {
+		t.Fatalf("create isolated OIDC registration schema: %v", err)
+	}
+	defer func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect isolated OIDC registration schema: %v", err)
+	}
+	defer pool.Close()
+	store, err := NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, secondID := randomUUID(), randomUUID()
+	for _, app := range []struct{ id, slug, hash string }{
+		{firstID, "contract-alpha", strings.Repeat("a", 64)},
+		{secondID, "contract-beta", strings.Repeat("b", 64)},
+	} {
+		origin := "https://" + app.slug + ".example.test"
+		if _, err := pool.Exec(ctx, `INSERT INTO managed_apps(id,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,validation_url,signed_out_url,release_revision,created_at) VALUES($1::uuid,$2,$2,'OIDC contract acceptance',$3,$2,$4,$3||'/health',$3||'/validation',$3||'/signed-out','0123456789ab',now())`, app.id, app.slug, origin, app.hash); err != nil {
+			t.Fatalf("insert managed app: %v", err)
+		}
+	}
+	changedHash := strings.Repeat("c", 64)
+	if err := store.ReconcileManagedAppOIDCContract(ctx, firstID, changedHash); err != nil {
+		t.Fatalf("reconcile managed app OIDC contract: %v", err)
+	}
+	var storedHash string
+	if err := pool.QueryRow(ctx, `SELECT oidc_contract_hash FROM managed_apps WHERE id=$1::uuid`, firstID).Scan(&storedHash); err != nil {
+		t.Fatal(err)
+	}
+	if storedHash != changedHash {
+		t.Fatalf("stored OIDC registration contract hash = %q", storedHash)
+	}
+	var queued, fromShauth, fromApp int
+	if err := pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE direction='from_shauth'),count(*) FILTER (WHERE direction='from_app') FROM app_validation_runs WHERE status='queued'`).Scan(&queued, &fromShauth, &fromApp); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 4 || fromShauth != 2 || fromApp != 2 {
+		t.Fatalf("queued validations = %d (%d from Shauth, %d from app), want 4 (2, 2)", queued, fromShauth, fromApp)
+	}
+	if err := store.ReconcileManagedAppOIDCContract(ctx, firstID, changedHash); err != nil {
+		t.Fatalf("repeat OIDC registration reconciliation: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM app_validation_runs WHERE status='queued'`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 4 {
+		t.Fatalf("unchanged OIDC registration duplicated queued validations: %d", queued)
+	}
+}
+
 func insertAcceptanceValidationRun(t *testing.T, pool *pgxpool.Pool, status string, now time.Time) string {
 	t.Helper()
 	runID := randomUUID()

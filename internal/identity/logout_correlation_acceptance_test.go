@@ -380,7 +380,7 @@ func TestStaleProviderLogoutDoesNotRevokeFreshSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientID := "stale-client-" + strings.ReplaceAll(userID, "-", "")
-	if _, err := store.CreateManagedApp(ctx, ManagedApp{Slug: "stale-" + strings.ReplaceAll(userID, "-", "")[:12], Name: "Stale provider acceptance", Description: "Exact provider-only logout coverage.", LaunchURL: "https://stale.example.test/", OIDCClientID: clientID, HealthURL: "https://stale.example.test/healthz", ValidationURL: "https://stale.example.test/me", SignedOutURL: "https://stale.example.test/signed-out", ReleaseRevision: "0123456789ab"}); err != nil {
+	if _, err := store.CreateManagedApp(ctx, ManagedApp{Slug: "stale-" + strings.ReplaceAll(userID, "-", "")[:12], Name: "Stale provider acceptance", Description: "Exact provider-only logout coverage.", LaunchURL: "https://stale.example.test/", OIDCClientID: clientID, OIDCContractHash: testOIDCContractHash, HealthURL: "https://stale.example.test/healthz", ValidationURL: "https://stale.example.test/me", SignedOutURL: "https://stale.example.test/signed-out", ReleaseRevision: "0123456789ab"}); err != nil {
 		t.Fatal(err)
 	}
 	raw, grant, err := store.CreateLogoutCorrelationGrant(ctx, userID, "", oldProviderSID, clientID, now.Add(3*time.Second))

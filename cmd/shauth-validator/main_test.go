@@ -100,21 +100,23 @@ func TestSanitizeFailureRemovesSecretsAndOAuthArtifacts(t *testing.T) {
 func TestValidateBootstrapURLsPinsTokensToShauth(t *testing.T) {
 	first := strings.Repeat("a", 64)
 	second := strings.Repeat("b", 64)
+	third := strings.Repeat("c", 64)
 	valid := []string{
 		"https://auth.example.test/validator/bootstrap#" + first,
 		"https://auth.example.test/validator/bootstrap#" + second,
+		"https://auth.example.test/validator/bootstrap#" + third,
 	}
 	if err := validateBootstrapURLs("https://auth.example.test", valid); err != nil {
 		t.Fatalf("valid browser bootstrap URLs rejected: %v", err)
 	}
 	for name, candidate := range map[string][]string{
 		"wrong count":        valid[:1],
-		"wrong origin":       {valid[0], "https://attacker.example.test/validator/bootstrap#" + second},
-		"wrong path":         {valid[0], "https://auth.example.test/login#" + second},
-		"query":              {valid[0], "https://auth.example.test/validator/bootstrap?token=no#" + second},
-		"credentials":        {valid[0], "https://user:secret@auth.example.test/validator/bootstrap#" + second},
-		"invalid fragment":   {valid[0], "https://auth.example.test/validator/bootstrap#short"},
-		"duplicate fragment": {valid[0], valid[0]},
+		"wrong origin":       {valid[0], valid[1], "https://attacker.example.test/validator/bootstrap#" + third},
+		"wrong path":         {valid[0], valid[1], "https://auth.example.test/login#" + third},
+		"query":              {valid[0], valid[1], "https://auth.example.test/validator/bootstrap?token=no#" + third},
+		"credentials":        {valid[0], valid[1], "https://user:secret@auth.example.test/validator/bootstrap#" + third},
+		"invalid fragment":   {valid[0], valid[1], "https://auth.example.test/validator/bootstrap#short"},
+		"duplicate fragment": {valid[0], valid[1], valid[0]},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateBootstrapURLs("https://auth.example.test", candidate); err == nil {

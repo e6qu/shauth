@@ -27,6 +27,7 @@ random_secret() {
   openssl rand -base64 48 | tr -d '\n'
 }
 
+# shellcheck source=./scripts/process-wait.sh
 . "$root/scripts/process-wait.sh"
 
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
@@ -411,6 +412,7 @@ if [ "${SHAUTH_STACK_FOCUS:-}" = browser-global-logout ]; then
 fi
 bootstrap_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='bootstrap-app'")
 [ -n "$bootstrap_app_id" ]
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE oidc_contract_hash=repeat('0',64) OR oidc_contract_hash !~ '^[0-9a-f]{64}$'")" = 0 ]
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
 	--header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/apps' \
 	--data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/apps/${bootstrap_app_id}/delete"
