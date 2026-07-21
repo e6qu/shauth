@@ -122,7 +122,7 @@ variable "bootstrap_apps" {
   validation {
     condition = alltrue([
       for app in var.bootstrap_apps :
-      length(app.post_logout_redirect_uris) > 0 &&
+      length(app.post_logout_redirect_uris) == 1 &&
       can(regex("^https?://[^/]+", app.launch_url)) &&
       length(app.redirect_uris) > 0 &&
       alltrue([for uri in app.redirect_uris :
@@ -133,11 +133,11 @@ variable "bootstrap_apps" {
         can(regex("^https?://[^/]+", uri)) &&
         lower(regex("^https?://[^/]+", uri)) == lower(regex("^https?://[^/]+", app.launch_url))
       ]) &&
-      contains(app.post_logout_redirect_uris, "${regex("^https?://[^/]+", app.launch_url)}/auth/shauth/logout/complete") &&
+      try(app.post_logout_redirect_uris[0], "") == "${regex("^https?://[^/]+", app.launch_url)}/auth/shauth/logout/complete" &&
       can(regex("^([0-9a-f]{12,64}|sha256:[0-9a-f]{64})$", app.release_revision)) &&
       (trimspace(app.frontchannel_logout_uri) != "" || trimspace(app.backchannel_logout_uri) != "")
     ])
-    error_message = "Each bootstrap app must keep its launch, redirect, and post-logout redirect URIs on one exact origin, register that origin's exact /auth/shauth/logout/complete bridge URI, set an immutable release_revision, and set frontchannel_logout_uri, backchannel_logout_uri, or both."
+    error_message = "Each bootstrap app must keep its launch and redirect URIs on one exact origin, register only that origin's exact /auth/shauth/logout/complete bridge URI as its post-logout redirect, set an immutable release_revision, and set frontchannel_logout_uri, backchannel_logout_uri, or both."
   }
 }
 variable "monitoring_sources" {

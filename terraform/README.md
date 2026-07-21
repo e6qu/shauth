@@ -64,7 +64,8 @@ accessible `Sign out` control plus exact username, email, normalized role, and
 release-revision fields,
 and an app-local `signed_out_url` exposing an accessible `Sign in with Shauth`
 control. The client must register its exact app-origin
-`/auth/shauth/logout/complete` bridge in `post_logout_redirect_uris`; the bridge
+`/auth/shauth/logout/complete` bridge as the only value in
+`post_logout_redirect_uris`; the bridge
 returns to Shauth's one-time completion endpoint, which then redirects to the
 trusted app-local `signed_out_url`. Release revisions and both container images must use immutable
 lowercase hexadecimal commits/tags or `sha256` digests; moving labels are
