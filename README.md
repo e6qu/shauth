@@ -82,9 +82,41 @@ navigation are shown only to administrators, and the corresponding handlers
 enforce that role server-side.
 
 The signed-in Apps page is a catalog of real deployed services. Administrators
-register an app only after its Shauth OIDC client, launch URL, and published
-health endpoint exist. Users open services through their own startup paths;
-Shauth monitors standard HTTPS health endpoints without deployment control.
+register an app only after its Shauth OIDC client, launch URL, published health
+endpoint, immutable release revision, authenticated validation URL, and local
+signed-out URL exist. The validation URL exposes an accessible `Sign out`
+control and exact `validation-username`, `validation-email`,
+`validation-role`, and `validation-release` fields. The
+signed-out URL persists across reloads and exposes an accessible `Sign in with
+Shauth` control. Both coordinates use the app's own origin. Release revisions
+are immutable 12–64 character lowercase hexadecimal commits or `sha256`
+digests; moving labels such as `main` and `latest` are rejected.
+
+Shauth automatically queues two real Chromium checks when an app is registered
+or any of its release or endpoint coordinates change. The first enters through Shauth's Apps catalog;
+the second enters through the app's public launch URL. Both checks authenticate,
+establish a second independent relying-party session through silent SSO, verify
+the app-owned signed-in page, perform application-initiated global OIDC logout,
+verify the exact app-local signed-out destination and its reload behavior, sign
+out through the exact app-origin logout bridge, reject hostile bridge queries
+and completion replay, sign in again, establish another witness session, then perform provider-initiated
+logout from Shauth and verify that both relying parties and the Shauth browser
+session were revoked. A deployment
+without a second registered app on a distinct origin and OIDC client reports a
+red result because global SSO logout cannot truthfully be proven in isolation.
+The Apps and administration pages report `🟢 Passed`, `🔴 Failed`, or
+`🟡 Ongoing` for each direction and let any signed-in user rerun both checks.
+PostgreSQL serializes the global queue and enforces at least 30 seconds between
+check starts.
+
+The validation account is a dedicated, non-administrative Shauth identity with
+no password or federated login. A validator bearer token authorizes creation of
+small, bounded sets of short-lived, single-use browser bootstrap links. Shauth
+stores only SHA-256 token hashes; each raw token exists only in the worker and a
+URL fragment until a same-origin form atomically consumes it. The standalone
+validator never gives its reusable bearer token or a bootstrap token to a
+relying application, and redacts encoded credentials and OAuth artifacts from
+durable failures.
 
 ## Infrastructure monitoring contract
 
@@ -148,9 +180,23 @@ in the Shauth runtime secret and contains each confidential client secret,
 sign-in and post-logout redirect URIs, at least one front-channel or
 back-channel logout URI, launch URL, health URL, and optional monitoring URL.
 Every coordinate for one connected application uses the same scheme, host, and
-port. Shauth verifies that invariant against both its PostgreSQL catalog record
-and Ory Hydra's reconciled client before startup succeeds; bootstrap
-configuration cannot take over an administrator-owned slug or client ID.
+port, and the client registers the exact app-origin
+`/auth/shauth/logout/complete` bridge as a `post_logout_redirect_uri`. The
+bridge returns to Shauth's `/oauth/logout/complete`; Shauth then uses its
+one-time durable correlation to reach the trusted app-local `signed_out_url`.
+Shauth verifies these invariants against
+its PostgreSQL catalog record and Ory Hydra's reconciled client before startup succeeds; bootstrap
+configuration cannot take over an administrator-owned slug or client ID. Each
+entry also supplies `release_revision`, `validation_url`, and `signed_out_url`;
+changing any material registration coordinate queues both browser checks
+without coupling Shauth to the app's deployment platform.
+
+Each validation page exposes the exact authenticated username, email,
+normalized role, and immutable release revision through documented
+`data-testid` fields. The passwordless validation identity is entered only by
+short-lived, single-use Shauth browser bootstraps. A distinct read-only bearer
+credential protects `GET /api/v1/apps/validations`, the closed machine-readable
+status contract used by post-deployment acceptance gates.
 
 ## Native relying-party gateway
 
@@ -179,11 +225,21 @@ identity gateway weakening or replacing their policy.
 The gateway requires `OIDC_GATEWAY_ISSUER`, `OIDC_GATEWAY_CLIENT_ID`,
 `OIDC_GATEWAY_CLIENT_SECRET`, `OIDC_GATEWAY_PUBLIC_URL`,
 `OIDC_GATEWAY_UPSTREAM_URL`, `OIDC_GATEWAY_POST_LOGOUT_URL`,
-`OIDC_GATEWAY_COOKIE_SECRET`, and `DATABASE_URL`. The post-logout URL must use
-the application's public origin and must be registered on its Shauth client.
+`OIDC_GATEWAY_COOKIE_SECRET`, `DATABASE_URL`, and
+`APPLICATION_RELEASE_REVISION`. The release revision must be an immutable
+12-to-64-character lowercase hexadecimal revision or a `sha256:` container
+digest. The post-logout URL must use the application's public origin and must
+be registered on its Shauth client.
 `OIDC_GATEWAY_SESSION_MAX_AGE` defaults to eight hours. Production issuer,
 public, and post-logout coordinates require HTTPS; explicit insecure cookies
 are accepted only for loopback integration tests.
+
+The gateway owns `GET /auth/validation`. Anonymous requests redirect exactly
+to `/auth/signed-out`; authenticated requests expose the verified username,
+email, normalized role, and `APPLICATION_RELEASE_REVISION` through the common
+`validation-username`, `validation-email`, `validation-role`, and
+`validation-release` test markers. The validation page signs out through the
+same real relying-party logout flow used by the application UI.
 
 Each gateway deployment uses its relying party's distinct PostgreSQL database,
 not Shauth's identity database. `/shauth-gateway` applies its embedded,
@@ -192,16 +248,19 @@ startup fails if the dedicated database is unavailable or cannot be migrated.
 
 ## Deployment model
 
-The Terraform module deploys Shauth and Hydra in private Amazon ECS
-Fargate subnets. A public HTTPS entry point at `auth.dev.e6qu.dev` routes only
+The Terraform module deploys Shauth, Ory Hydra, and a standalone ARM64 browser
+validator in private Amazon ECS Fargate subnets. A public HTTPS entry point at
+`auth.dev.e6qu.dev` routes only
 the required identity endpoints. PostgreSQL is the durable source of truth.
 All services remain always-on in the `dev` environment.
 
 Runtime secret requirements: the Hydra system secret must remain stable across
-restarts. Terraform creates it, the database password, and the bootstrap-admin
-password with a cryptographically secure generator and stores them in AWS
-Secrets Manager. GitHub OAuth credentials remain in the separately managed
-AWS Secrets Manager secret supplied to the module.
+restarts. Terraform creates it and the bootstrap-admin password with a
+cryptographically secure generator and stores them in AWS Secrets Manager.
+The validator queue token lives in a separate validator secret; the
+outbound-only validator task has no task role and its execution role can read
+only that secret. GitHub OAuth credentials remain in the separately
+managed AWS Secrets Manager secret supplied to the module.
 
 Microsoft Entra ID is enabled only when `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`,
 and `ENTRA_CLIENT_SECRET` are all present. The tenant must be a specific UUID;

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -29,13 +30,17 @@ type Session struct {
 }
 
 type Store struct {
-	pool     *pgxpool.Pool
-	clientID string
-	issuer   string
-	aead     cipher.AEAD
+	pool              *pgxpool.Pool
+	clientID          string
+	issuer            string
+	aead              cipher.AEAD
+	tombstoneLifetime time.Duration
 }
 
-func NewStore(pool *pgxpool.Pool, clientID, issuer, secret string) (*Store, error) {
+func NewStore(pool *pgxpool.Pool, clientID, issuer, secret string, tombstoneLifetime time.Duration) (*Store, error) {
+	if tombstoneLifetime <= 0 {
+		return nil, fmt.Errorf("gateway logout tombstone lifetime must be positive")
+	}
 	key := sha256.Sum256([]byte(secret))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
@@ -45,7 +50,7 @@ func NewStore(pool *pgxpool.Pool, clientID, issuer, secret string) (*Store, erro
 	if err != nil {
 		return nil, fmt.Errorf("create gateway session AEAD: %w", err)
 	}
-	return &Store{pool: pool, clientID: clientID, issuer: issuer, aead: aead}, nil
+	return &Store{pool: pool, clientID: clientID, issuer: issuer, aead: aead, tombstoneLifetime: tombstoneLifetime}, nil
 }
 
 func (store *Store) Create(ctx context.Context, session Session, browserToken []byte, now time.Time) error {
@@ -55,11 +60,35 @@ func (store *Store) Create(ctx context.Context, session Session, browserToken []
 	}
 	ciphertext := append(nonce, store.aead.Seal(nil, nonce, []byte(session.IDToken), sessionAdditionalData(store.clientID, store.issuer, session))...)
 	tokenHash := sha256.Sum256(browserToken)
-	_, err := store.pool.Exec(ctx, `INSERT INTO oidc_gateway_sessions
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin gateway session creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := store.lockProviderSession(ctx, tx, session.ProviderSessionID); err != nil {
+		return err
+	}
+	if err := deleteExpiredLogoutTombstones(ctx, tx, now, 1000); err != nil {
+		return err
+	}
+	var tombstoned bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM oidc_gateway_logout_tombstones
+		WHERE client_id=$1 AND issuer=$2 AND provider_session_id=$3 AND expires_at>$4
+	)`, store.clientID, store.issuer, session.ProviderSessionID, now.UTC()).Scan(&tombstoned); err != nil {
+		return fmt.Errorf("read gateway logout tombstone: %w", err)
+	}
+	if tombstoned {
+		return fmt.Errorf("provider session was logged out before callback completion")
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO oidc_gateway_sessions
 		(id,client_id,token_hash,issuer,subject,provider_session_id,id_token_ciphertext,username,email,role,created_at,expires_at)
 		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, session.ID, store.clientID, tokenHash[:], store.issuer, session.Subject, session.ProviderSessionID, ciphertext, session.Username, session.Email, session.Role, now.UTC(), session.ExpiresAt.UTC())
 	if err != nil {
 		return fmt.Errorf("create gateway session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit gateway session creation: %w", err)
 	}
 	return nil
 }
@@ -96,8 +125,21 @@ func (store *Store) RevokeToken(ctx context.Context, browserToken []byte, now ti
 }
 
 func (store *Store) RevokeFrontchannelSession(ctx context.Context, sid string, now time.Time) error {
-	_, err := store.pool.Exec(ctx, `UPDATE oidc_gateway_sessions SET revoked_at=$4 WHERE client_id=$1 AND issuer=$2 AND provider_session_id=$3 AND revoked_at IS NULL`, store.clientID, store.issuer, sid, now.UTC())
-	return err
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := store.lockProviderSession(ctx, tx, sid); err != nil {
+		return err
+	}
+	if err := store.recordLogoutTombstone(ctx, tx, sid, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE oidc_gateway_sessions SET revoked_at=$4 WHERE client_id=$1 AND issuer=$2 AND provider_session_id=$3 AND revoked_at IS NULL`, store.clientID, store.issuer, sid, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (store *Store) RevokeProviderSession(ctx context.Context, sid, jti string, expiresAt, now time.Time) error {
@@ -106,6 +148,9 @@ func (store *Store) RevokeProviderSession(ctx context.Context, sid, jti string, 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := store.lockProviderSession(ctx, tx, sid); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM oidc_gateway_logout_tokens WHERE expires_at<=$1`, now.UTC()); err != nil {
 		return err
 	}
@@ -116,8 +161,50 @@ func (store *Store) RevokeProviderSession(ctx context.Context, sid, jti string, 
 		}
 		return fmt.Errorf("record logout token: %w", err)
 	}
+	if err := store.recordLogoutTombstone(ctx, tx, sid, now); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE oidc_gateway_sessions SET revoked_at=$4 WHERE client_id=$1 AND issuer=$2 AND provider_session_id=$3 AND revoked_at IS NULL`, store.clientID, store.issuer, sid, now.UTC()); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (store *Store) lockProviderSession(ctx context.Context, tx pgx.Tx, sid string) error {
+	if sid == "" {
+		return fmt.Errorf("provider session ID is required")
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2 || chr(31) || $3, 0))`, store.clientID, store.issuer, sid); err != nil {
+		return fmt.Errorf("lock gateway provider session: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) recordLogoutTombstone(ctx context.Context, tx pgx.Tx, sid string, now time.Time) error {
+	if err := deleteExpiredLogoutTombstones(ctx, tx, now, 1000); err != nil {
+		return err
+	}
+	expiresAt := now.UTC().Add(store.tombstoneLifetime)
+	_, err := tx.Exec(ctx, `INSERT INTO oidc_gateway_logout_tombstones(client_id,issuer,provider_session_id,created_at,expires_at)
+		VALUES ($1,$2,$3,$4,$5)
+		ON CONFLICT (client_id,issuer,provider_session_id) DO UPDATE
+		SET created_at=LEAST(oidc_gateway_logout_tombstones.created_at,EXCLUDED.created_at),
+		    expires_at=GREATEST(oidc_gateway_logout_tombstones.expires_at,EXCLUDED.expires_at)`, store.clientID, store.issuer, sid, now.UTC(), expiresAt)
+	if err != nil {
+		return fmt.Errorf("record gateway logout tombstone: %w", err)
+	}
+	return nil
+}
+
+func deleteExpiredLogoutTombstones(ctx context.Context, tx pgx.Tx, now time.Time, limit int) error {
+	_, err := tx.Exec(ctx, `WITH expired AS (
+		SELECT client_id,issuer,provider_session_id FROM oidc_gateway_logout_tombstones
+		WHERE expires_at<=$1 ORDER BY expires_at LIMIT $2
+	)
+	DELETE FROM oidc_gateway_logout_tombstones item USING expired
+	WHERE item.client_id=expired.client_id AND item.issuer=expired.issuer AND item.provider_session_id=expired.provider_session_id`, now.UTC(), limit)
+	if err != nil {
+		return fmt.Errorf("delete expired gateway logout tombstones: %w", err)
+	}
+	return nil
 }

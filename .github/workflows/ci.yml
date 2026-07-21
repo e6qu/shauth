@@ -13,8 +13,13 @@ jobs:
   test:
     name: Shauth integration
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Enforce bounded GitHub Actions jobs
+        run: |
+          ./scripts/test-workflow-timeouts.sh
+          ./scripts/check-workflow-timeouts.sh
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26.5'
@@ -35,10 +40,33 @@ jobs:
       - run: ./scripts/check-container-publication.sh
       - run: ./scripts/test-stack.sh
 
+  validator-image:
+    if: github.event_name == 'pull_request'
+    name: Validator image ${{ matrix.architecture }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --file Dockerfile.validator --tag shauth-validator:pr .
+      - name: Verify non-root Chromium runtime
+        run: |
+          test "$(docker image inspect shauth-validator:pr --format '{{.Config.User}}')" = node
+          docker run --rm --entrypoint node shauth-validator:pr --input-type=module --eval \
+            'import { chromium } from "playwright"; const browser = await chromium.launch({headless:true}); await browser.close();'
+
   build-amd64:
     if: github.event_name == 'push'
     name: Container amd64
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -62,11 +90,21 @@ jobs:
           tags: ghcr.io/e6qu/shauth:${{ steps.sha.outputs.short_sha }}-amd64
           provenance: false
           sbom: false
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.validator
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/e6qu/shauth-validator:${{ steps.sha.outputs.short_sha }}-amd64
+          provenance: false
+          sbom: false
 
   build-arm64:
     if: github.event_name == 'push'
     name: Container arm64
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -90,12 +128,22 @@ jobs:
           tags: ghcr.io/e6qu/shauth:${{ steps.sha.outputs.short_sha }}-arm64
           provenance: false
           sbom: false
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.validator
+          push: true
+          platforms: linux/arm64
+          tags: ghcr.io/e6qu/shauth-validator:${{ steps.sha.outputs.short_sha }}-arm64
+          provenance: false
+          sbom: false
 
   manifest:
     if: github.event_name == 'push'
     name: Container manifest
     needs: [build-amd64, build-arm64]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -112,10 +160,20 @@ jobs:
           --tag ghcr.io/e6qu/shauth:${{ needs.build-amd64.outputs.short_sha }}
           ghcr.io/e6qu/shauth:${{ needs.build-amd64.outputs.short_sha }}-amd64
           ghcr.io/e6qu/shauth:${{ needs.build-arm64.outputs.short_sha }}-arm64
+      - run: >-
+          docker buildx imagetools create
+          --tag ghcr.io/e6qu/shauth-validator:${{ needs.build-amd64.outputs.short_sha }}
+          ghcr.io/e6qu/shauth-validator:${{ needs.build-amd64.outputs.short_sha }}-amd64
+          ghcr.io/e6qu/shauth-validator:${{ needs.build-arm64.outputs.short_sha }}-arm64
       - name: Verify published OCI image shape
         run: >-
           ./scripts/verify-published-container.sh
           ghcr.io/e6qu/shauth
+          ${{ needs.build-amd64.outputs.short_sha }}
+      - name: Verify published validator OCI image shape
+        run: >-
+          ./scripts/verify-published-container.sh
+          ghcr.io/e6qu/shauth-validator
           ${{ needs.build-amd64.outputs.short_sha }}
 
   prune:
@@ -123,6 +181,7 @@ jobs:
     name: Retain 20 container releases
     needs: manifest
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -131,4 +190,6 @@ jobs:
       - name: Delete package versions outside the newest 20 releases
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/prune-ghcr-images.sh "${{ github.repository_owner }}" "${{ github.event.repository.name }}" 20
+        run: |
+          ./scripts/prune-ghcr-images.sh "${{ github.repository_owner }}" "${{ github.event.repository.name }}" 20
+          ./scripts/prune-ghcr-images.sh "${{ github.repository_owner }}" "shauth-validator" 20

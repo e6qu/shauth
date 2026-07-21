@@ -16,8 +16,9 @@ func TestLoadRequiresCompleteSecureCoordinates(t *testing.T) {
 		"OIDC_GATEWAY_CLIENT_SECRET":   "0123456789abcdef0123456789abcdef",
 		"OIDC_GATEWAY_PUBLIC_URL":      "https://console.example.test",
 		"OIDC_GATEWAY_UPSTREAM_URL":    "http://127.0.0.1:7681",
-		"OIDC_GATEWAY_POST_LOGOUT_URL": "https://console.example.test/auth/signed-out",
+		"OIDC_GATEWAY_POST_LOGOUT_URL": "https://console.example.test/auth/shauth/logout/complete",
 		"OIDC_GATEWAY_COOKIE_SECRET":   "abcdef0123456789abcdef0123456789",
+		"APPLICATION_RELEASE_REVISION": "0123456789ab",
 		"DATABASE_URL":                 "postgres://localhost/shauth",
 	}
 	getenv := func(name string) string { return base[name] }
@@ -39,13 +40,28 @@ func TestLoadRequiresCompleteSecureCoordinates(t *testing.T) {
 	}
 	base["OIDC_GATEWAY_ISSUER"] = "http://localhost:8080"
 	base["OIDC_GATEWAY_PUBLIC_URL"] = "http://localhost:4180"
-	base["OIDC_GATEWAY_POST_LOGOUT_URL"] = "http://localhost:4180/auth/signed-out"
+	base["OIDC_GATEWAY_POST_LOGOUT_URL"] = "http://localhost:4180/auth/shauth/logout/complete"
 	if _, err := Load(getenv); err != nil {
 		t.Fatalf("explicit loopback insecure-cookie mode was rejected: %v", err)
+	}
+	base["OIDC_GATEWAY_PUBLIC_URL"] = "http://127.0.0.2:4180"
+	base["OIDC_GATEWAY_POST_LOGOUT_URL"] = "http://127.0.0.2:4180/auth/shauth/logout/complete"
+	if _, err := Load(getenv); err != nil {
+		t.Fatalf("IPv4 loopback range was rejected: %v", err)
+	}
+	base["OIDC_GATEWAY_PUBLIC_URL"] = "http://app.localhost:4180"
+	base["OIDC_GATEWAY_POST_LOGOUT_URL"] = "http://app.localhost:4180/auth/shauth/logout/complete"
+	if _, err := Load(getenv); err != nil {
+		t.Fatalf("localhost subdomain was rejected: %v", err)
 	}
 	base["OIDC_GATEWAY_SESSION_MAX_AGE"] = "4m"
 	if _, err := Load(getenv); err == nil {
 		t.Fatal("too-short application session lifetime was accepted")
+	}
+	base["OIDC_GATEWAY_SESSION_MAX_AGE"] = "8h"
+	base["APPLICATION_RELEASE_REVISION"] = "main"
+	if _, err := Load(getenv); err == nil {
+		t.Fatal("mutable application release revision was accepted")
 	}
 }
 
@@ -82,19 +98,20 @@ func TestFrontchannelLogoutCanOnlyBeFramedByIssuer(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsProviderOriginAsPostLogoutDestination(t *testing.T) {
+func TestLoadRejectsNoncanonicalPostLogoutDestination(t *testing.T) {
 	values := map[string]string{
 		"OIDC_GATEWAY_ISSUER":          "https://auth.example.test",
 		"OIDC_GATEWAY_CLIENT_ID":       "console",
 		"OIDC_GATEWAY_CLIENT_SECRET":   "0123456789abcdef0123456789abcdef",
 		"OIDC_GATEWAY_PUBLIC_URL":      "https://console.example.test",
 		"OIDC_GATEWAY_UPSTREAM_URL":    "http://127.0.0.1:7681",
-		"OIDC_GATEWAY_POST_LOGOUT_URL": "https://auth.example.test/apps",
+		"OIDC_GATEWAY_POST_LOGOUT_URL": "https://console.example.test/auth/signed-out",
 		"OIDC_GATEWAY_COOKIE_SECRET":   "abcdef0123456789abcdef0123456789",
+		"APPLICATION_RELEASE_REVISION": "0123456789ab",
 		"DATABASE_URL":                 "postgres://localhost/shauth",
 	}
 	if _, err := Load(func(name string) string { return values[name] }); err == nil {
-		t.Fatal("provider-origin post-logout redirect was accepted")
+		t.Fatal("noncanonical post-logout redirect was accepted")
 	}
 }
 

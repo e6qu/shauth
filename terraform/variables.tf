@@ -35,7 +35,22 @@ variable "api_gateway_vpc_link_security_group_id" {
 variable "ecs_cluster_arn" { type = string }
 variable "hosted_zone_id" { type = string }
 variable "domain_name" { type = string }
-variable "container_image" { type = string }
+variable "container_image" {
+  type        = string
+  description = "Immutable Shauth image reference pinned by 12–64 character lowercase hexadecimal tag or sha256 digest."
+  validation {
+    condition     = can(regex("(@sha256:[0-9a-f]{64}|:[0-9a-f]{12,64})$", var.container_image))
+    error_message = "container_image must use an immutable 12–64 character lowercase hexadecimal tag or sha256 digest."
+  }
+}
+variable "validator_container_image" {
+  type        = string
+  description = "Immutable Shauth validator image reference pinned by 12–64 character lowercase hexadecimal tag or sha256 digest."
+  validation {
+    condition     = can(regex("(@sha256:[0-9a-f]{64}|:[0-9a-f]{12,64})$", var.validator_container_image))
+    error_message = "validator_container_image must use an immutable 12–64 character lowercase hexadecimal tag or sha256 digest."
+  }
+}
 variable "github_oauth_secret_arn" {
   type        = string
   description = "AWS Secrets Manager ARN for a JSON secret containing a client_secret key."
@@ -99,15 +114,30 @@ variable "bootstrap_apps" {
     backchannel_logout_uri    = optional(string, "")
     health_url                = string
     monitoring_url            = string
+    validation_url            = string
+    signed_out_url            = string
+    release_revision          = string
   }))
   default = []
   validation {
     condition = alltrue([
       for app in var.bootstrap_apps :
       length(app.post_logout_redirect_uris) > 0 &&
+      can(regex("^https?://[^/]+", app.launch_url)) &&
+      length(app.redirect_uris) > 0 &&
+      alltrue([for uri in app.redirect_uris :
+        can(regex("^https?://[^/]+", uri)) &&
+        lower(regex("^https?://[^/]+", uri)) == lower(regex("^https?://[^/]+", app.launch_url))
+      ]) &&
+      alltrue([for uri in app.post_logout_redirect_uris :
+        can(regex("^https?://[^/]+", uri)) &&
+        lower(regex("^https?://[^/]+", uri)) == lower(regex("^https?://[^/]+", app.launch_url))
+      ]) &&
+      contains(app.post_logout_redirect_uris, "${regex("^https?://[^/]+", app.launch_url)}/auth/shauth/logout/complete") &&
+      can(regex("^([0-9a-f]{12,64}|sha256:[0-9a-f]{64})$", app.release_revision)) &&
       (trimspace(app.frontchannel_logout_uri) != "" || trimspace(app.backchannel_logout_uri) != "")
     ])
-    error_message = "Each bootstrap app must set at least one post_logout_redirect_uris entry and frontchannel_logout_uri, backchannel_logout_uri, or both."
+    error_message = "Each bootstrap app must keep its launch, redirect, and post-logout redirect URIs on one exact origin, register that origin's exact /auth/shauth/logout/complete bridge URI, set an immutable release_revision, and set frontchannel_logout_uri, backchannel_logout_uri, or both."
   }
 }
 variable "monitoring_sources" {

@@ -3,56 +3,75 @@
 package app
 
 import (
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strings"
+	"reflect"
 	"testing"
-
-	"github.com/e6qu/shauth/internal/config"
+	"time"
 )
 
-func TestHydraLogoutWithoutShauthCookieAcceptsTrustedChallenge(t *testing.T) {
-	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		body := ""
-		switch r.URL.Path {
-		case "/admin/oauth2/auth/requests/logout":
-			if r.URL.Query().Get("logout_challenge") != "trusted-challenge" {
-				t.Fatalf("logout challenge = %q", r.URL.Query().Get("logout_challenge"))
-			}
-			body = `{"subject":"user-1"}`
-		case "/admin/oauth2/auth/requests/logout/accept":
-			body = `{"redirect_to":"https://client.example.test/signed-out"}`
-		default:
-			t.Fatalf("unexpected Hydra request %s", r.URL.String())
+func TestPreservedPublicLogoutSessions(t *testing.T) {
+	t.Run("Hydra session identifier", func(t *testing.T) {
+		actual, err := preservedPublicLogoutSessions("provider-session", []string{"provider-session", "browser-session"})
+		if err != nil {
+			t.Fatalf("preserve session: %v", err)
 		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
-	})}
-	hydraURL, err := url.Parse("http://hydra.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := &Server{config: configWithHydraAdminURL(hydraURL), httpClient: httpClient}
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "https://auth.example.test/oauth/logout?logout_challenge=trusted-challenge", nil)
+		if !reflect.DeepEqual(actual, []string{"provider-session"}) {
+			t.Fatalf("preserved sessions = %#v", actual)
+		}
+	})
 
-	server.hydraLogout(recorder, request)
+	t.Run("different Hydra session identifier", func(t *testing.T) {
+		if _, err := preservedPublicLogoutSessions("other-session", []string{"browser-session"}); err == nil {
+			t.Fatal("provider logout for a different browser session was accepted")
+		}
+	})
 
-	if recorder.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want %d; body=%q", recorder.Code, http.StatusSeeOther, recorder.Body.String())
+	t.Run("omitted Hydra session identifier", func(t *testing.T) {
+		browserSessions := []string{"browser-session-a", "browser-session-b"}
+		actual, err := preservedPublicLogoutSessions("", browserSessions)
+		if err != nil {
+			t.Fatalf("preserve browser sessions: %v", err)
+		}
+		if !reflect.DeepEqual(actual, browserSessions) {
+			t.Fatalf("preserved sessions = %#v", actual)
+		}
+		actual[0] = "changed"
+		if browserSessions[0] != "browser-session-a" {
+			t.Fatal("preserved sessions alias the store result")
+		}
+	})
+
+	t.Run("uncorrelated request", func(t *testing.T) {
+		if _, err := preservedPublicLogoutSessions("", nil); err == nil {
+			t.Fatal("uncorrelated public logout was accepted")
+		}
+	})
+}
+
+func TestLogoutCompletionWithoutCookieIgnoresQueryAndDoesNotLoop(t *testing.T) {
+	server := &Server{}
+	request := httptest.NewRequest(http.MethodGet, "https://auth.example.test/oauth/logout/complete?next=https%3A%2F%2Fattacker.example&redirect_uri=https%3A%2F%2Fattacker.example", nil)
+	response := httptest.NewRecorder()
+	server.logoutComplete(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", response.Code)
 	}
-	if location := recorder.Header().Get("Location"); location != "https://client.example.test/signed-out" {
-		t.Fatalf("Location = %q", location)
+	if location := response.Header().Get("Location"); location != "/signed-out" {
+		t.Fatalf("missing-cookie destination = %q", location)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("logout completion response was cacheable")
 	}
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return function(request)
-}
-
-func configWithHydraAdminURL(adminURL *url.URL) config.Config {
-	return config.Config{HydraAdminURL: adminURL}
+func TestLogoutRecoveryDelayIsBounded(t *testing.T) {
+	for _, test := range []struct {
+		attempt int
+		want    time.Duration
+	}{{-1, 5 * time.Second}, {1, 5 * time.Second}, {2, 10 * time.Second}, {6, 160 * time.Second}, {100, 160 * time.Second}} {
+		if got := logoutRecoveryDelay(test.attempt); got != test.want {
+			t.Fatalf("attempt %d: delay = %s, want %s", test.attempt, got, test.want)
+		}
+	}
 }

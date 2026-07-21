@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+FROM golang:1.26.5-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/shauth-validator ./cmd/shauth-validator
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shauth-validator ./cmd/shauth-validator
+
+FROM node:24-bookworm-slim
+WORKDIR /opt/shauth-validator
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+COPY package.json package-lock.json ./
+RUN npm ci && npx playwright install --with-deps chromium && npm cache clean --force
+COPY validator/validate.mjs validator/security.mjs ./
+COPY --from=build /out/shauth-validator /usr/local/bin/shauth-validator
+ENV SHAUTH_VALIDATOR_SCRIPT=/opt/shauth-validator/validate.mjs
+RUN chown -R node:node /ms-playwright /opt/shauth-validator
+USER node
+ENTRYPOINT ["/usr/local/bin/shauth-validator"]

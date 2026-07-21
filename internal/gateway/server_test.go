@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,59 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestValidationPagePublishesClosedIdentityAndLogoutContract(t *testing.T) {
+	t.Parallel()
+	var rendered bytes.Buffer
+	if err := validationPage.Execute(&rendered, struct {
+		Username string
+		Email    string
+		Role     string
+		Release  string
+	}{"shauth-validator", "shauth-validator@example.test", "developer", "0123456789ab"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`data-testid="validation-username">shauth-validator</dd>`,
+		`data-testid="validation-email">shauth-validator@example.test</dd>`,
+		`data-testid="validation-role">developer</dd>`,
+		`data-testid="validation-release"><code>0123456789ab</code></dd>`,
+		`method="post" action="/auth/logout"`,
+		`>Sign out</button>`,
+	} {
+		if !strings.Contains(rendered.String(), expected) {
+			t.Fatalf("validation page omitted %q", expected)
+		}
+	}
+}
+
+func TestAnonymousValidationReturnsToAppLocalSignedOutPage(t *testing.T) {
+	t.Parallel()
+	server := &Server{}
+	request := httptest.NewRequest(http.MethodGet, "https://app.example.test/auth/validation", nil)
+	response := httptest.NewRecorder()
+	server.validation(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/auth/signed-out" {
+		t.Fatalf("anonymous validation response = %d %q", response.Code, response.Header().Get("Location"))
+	}
+}
+
+func TestRevokedApplicationCookieReturnsToAppLocalSignedOutPage(t *testing.T) {
+	t.Parallel()
+	server := &Server{config: Config{InsecureCookie: true}}
+	request := httptest.NewRequest(http.MethodGet, "http://app.example.test/", nil)
+	request.AddCookie(&http.Cookie{Name: server.sessionCookieName(), Value: "invalid-session"})
+	response := httptest.NewRecorder()
+	server.requireSession(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("revoked application cookie reached the protected upstream")
+	})).ServeHTTP(response, request)
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/auth/signed-out" {
+		t.Fatalf("revoked application cookie response = %d %q", response.Code, response.Header().Get("Location"))
+	}
+	if values := response.Header().Values("Set-Cookie"); len(values) != 1 || !strings.Contains(values[0], "Max-Age=0") {
+		t.Fatalf("revoked application cookie was not cleared: %q", values)
+	}
+}
 
 func TestGatewaySecurityHeadersDoNotOverrideUpstreamFramingPolicy(t *testing.T) {
 	t.Parallel()
@@ -200,6 +254,27 @@ func TestEndSessionURLIdentifiesClientWithoutLocalSession(t *testing.T) {
 				t.Fatalf("id_token_hint = %q, want %q", target.Query().Get("id_token_hint"), idToken)
 			}
 		})
+	}
+}
+
+func TestProviderLogoutBridgeUsesOnlyTheConfiguredIssuer(t *testing.T) {
+	t.Parallel()
+	issuer, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{config: Config{Issuer: issuer}}
+	request := httptest.NewRequest(http.MethodGet, "https://app.example.test/auth/shauth/logout/complete?next=https%3A%2F%2Fattacker.example&code=secret", nil)
+	response := httptest.NewRecorder()
+	server.providerLogoutComplete(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if location := response.Header().Get("Location"); location != "https://auth.example.test/oauth/logout/complete" {
+		t.Fatalf("bridge location = %q", location)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("provider logout bridge response was cacheable")
 	}
 }
 

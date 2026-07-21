@@ -35,7 +35,8 @@ services:
       URLS_LOGIN: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/login
       URLS_CONSENT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/consent
       URLS_LOGOUT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/logout
-      URLS_POST_LOGOUT_REDIRECT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/
+      URLS_ERROR: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/error
+      URLS_POST_LOGOUT_REDIRECT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/signed-out
       SECRETS_SYSTEM_0: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET}
     depends_on:
       postgres:
@@ -46,6 +47,9 @@ services:
     entrypoint: ["/hydra"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "gateway-integration.localhost:host-gateway"
+      - "gateway-secondary.localhost:host-gateway"
+      - "gateway-tertiary.localhost:host-gateway"
     command: serve all --dev --config /etc/config/hydra.yaml
     environment: *hydra-environment
     depends_on:
@@ -73,6 +77,10 @@ services:
 
       SHAUTH_BOOTSTRAP_ADMIN_EMAIL: ${SHAUTH_BOOTSTRAP_ADMIN_EMAIL:-admin@localhost.test}
       SHAUTH_BOOTSTRAP_ADMIN_PASSWORD: ${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD:?set SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}
+      SHAUTH_VALIDATION_USERNAME: shauth-validator
+      SHAUTH_VALIDATION_EMAIL: shauth-validator@localhost.test
+      SHAUTH_VALIDATOR_TOKEN: ${SHAUTH_VALIDATOR_TOKEN:?set SHAUTH_VALIDATOR_TOKEN}
+      SHAUTH_VALIDATION_STATUS_TOKEN: ${SHAUTH_VALIDATION_STATUS_TOKEN:?set SHAUTH_VALIDATION_STATUS_TOKEN}
       SHAUTH_BOOTSTRAP_APPS_JSON: ${SHAUTH_BOOTSTRAP_APPS_JSON:-[]}
       SHAUTH_SES_REGION: eu-west-1
       SHAUTH_INVITATION_EMAIL_FROM: no-reply@localhost.test

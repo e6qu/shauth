@@ -93,7 +93,7 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 	if err != nil || endSessionURL.Scheme != config.Issuer.Scheme || endSessionURL.Host != config.Issuer.Host {
 		return nil, fmt.Errorf("OpenID Connect end_session_endpoint did not use the configured issuer origin")
 	}
-	store, err := NewStore(pool, config.ClientID, config.Issuer.String(), config.CookieSecret)
+	store, err := NewStore(pool, config.ClientID, config.Issuer.String(), config.CookieSecret, config.SessionMaxAge)
 	if err != nil {
 		return nil, err
 	}
@@ -163,9 +163,11 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", server.login)
 	mux.HandleFunc("GET /auth/callback", server.callback)
 	mux.HandleFunc("GET /auth/session", server.session)
+	mux.HandleFunc("GET /auth/validation", server.validation)
 	mux.HandleFunc("GET /auth/signed-out", server.signedOut)
 	mux.HandleFunc("GET /auth/gateway.css", gatewayStyles)
 	mux.HandleFunc("POST /auth/logout", server.logout)
+	mux.HandleFunc("GET /auth/shauth/logout/complete", server.providerLogoutComplete)
 	mux.HandleFunc("GET /auth/frontchannel-logout", server.frontchannelLogout)
 	mux.HandleFunc("POST /auth/backchannel-logout", server.backchannelLogout)
 	mux.HandleFunc("GET /auth/healthz", func(response http.ResponseWriter, _ *http.Request) {
@@ -291,6 +293,24 @@ func (server *Server) session(response http.ResponseWriter, request *http.Reques
 	writeJSON(response, http.StatusOK, map[string]string{"subject": session.Subject, "username": session.Username, "email": session.Email, "role": session.Role})
 }
 
+func (server *Server) validation(response http.ResponseWriter, request *http.Request) {
+	session, _, err := server.currentSession(request)
+	if err != nil {
+		http.Redirect(response, request, "/auth/signed-out", http.StatusSeeOther)
+		return
+	}
+	response.Header().Set("Content-Type", "text/html; charset=utf-8")
+	response.Header().Set("Cache-Control", "no-store")
+	if err := validationPage.Execute(response, struct {
+		Username string
+		Email    string
+		Role     string
+		Release  string
+	}{session.Username, session.Email, session.Role, server.config.ReleaseRevision}); err != nil {
+		log.Printf("render OIDC gateway validation page: %v", err)
+	}
+}
+
 func (server *Server) logout(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
 	if !server.sameOrigin(request) {
@@ -321,6 +341,12 @@ func (server *Server) endSessionURL(idToken string) string {
 	query.Set("post_logout_redirect_uri", server.config.PostLogoutURL.String())
 	target.RawQuery = query.Encode()
 	return target.String()
+}
+
+func (server *Server) providerLogoutComplete(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
+	target := server.config.Issuer.ResolveReference(&url.URL{Path: "/oauth/logout/complete"})
+	http.Redirect(response, request, target.String(), http.StatusSeeOther)
 }
 
 func (server *Server) backchannelLogout(response http.ResponseWriter, request *http.Request) {
@@ -371,6 +397,11 @@ func (server *Server) requireSession(next http.Handler) http.Handler {
 		session, _, err := server.currentSession(request)
 		if err != nil {
 			if request.Method == http.MethodGet || request.Method == http.MethodHead {
+				if _, cookieErr := request.Cookie(server.sessionCookieName()); cookieErr == nil {
+					server.clearCookie(response, server.sessionCookieName())
+					http.Redirect(response, request, "/auth/signed-out", http.StatusFound)
+					return
+				}
 				target := "/auth/login?return_to=" + url.QueryEscape(request.URL.RequestURI())
 				http.Redirect(response, request, target, http.StatusFound)
 				return

@@ -1,5 +1,6 @@
 output "url" { value = "https://${var.domain_name}" }
 output "runtime_secret_arn" { value = aws_secretsmanager_secret.runtime.arn }
+output "validation_status_secret_arn" { value = aws_secretsmanager_secret.validation_status.arn }
 output "service_security_group_id" { value = aws_security_group.task.id }
 output "api_gateway_vpc_link_id" { value = local.api_gateway_vpc_link_id }
 output "api_gateway_vpc_link_security_group_id" { value = local.api_gateway_vpc_link_security_group_id }

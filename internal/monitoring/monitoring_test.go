@@ -19,6 +19,9 @@ func TestValidateSources(t *testing.T) {
 	if err := ValidateSources(valid); err != nil {
 		t.Fatalf("ValidateSources(valid) error = %v", err)
 	}
+	if err := ValidateSources([]Source{{Name: "local", URL: "http://monitoring.localhost:8080/v1/observations", BearerToken: testToken}}); err != nil {
+		t.Fatalf("ValidateSources(localhost subdomain) error = %v", err)
+	}
 	for name, sources := range map[string][]Source{
 		"duplicate name": append(valid, valid[0]),
 		"insecure URL":   {{Name: "development", URL: "http://monitoring.dev.e6qu.dev/v1/observations", BearerToken: testToken}},

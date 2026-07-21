@@ -19,12 +19,16 @@ Amazon ECS and API Gateway registrations, then removes the retired service.
 The module waits for the Amazon ECS service to reach steady state before
 Terraform retires the previous Cloud Map service.
 
-Pass a pinned multi-architecture image manifest such as
-`ghcr.io/e6qu/shauth:0123456789ab`, and the ARN of the GitHub OAuth client
+Pass pinned multi-architecture image manifests such as
+`ghcr.io/e6qu/shauth:0123456789ab` and
+`ghcr.io/e6qu/shauth-validator:0123456789ab`, and the ARN of the GitHub OAuth client
 secret stored in AWS Secrets Manager, together with the separate Secrets
 Manager ARNs for the Shauth and Ory Hydra database URLs created by `fck-rds`.
-The module creates a separate runtime secret containing generated Hydra and
-bootstrap-admin secrets.
+The module creates a runtime secret containing generated Hydra and
+bootstrap-admin secrets. It creates a second validator-only secret containing
+the independent worker queue token. The validation identity has no password;
+the worker exchanges its queue credential for hashed, short-lived, single-use
+browser bootstrap links.
 The supplied Shauth image also provides the patched `/hydra` binary; the task
 uses that same immutable image for Hydra and both database migration entry
 points. The provider is fully built before deployment.
@@ -54,7 +58,36 @@ standard HTTP and remains independent of deployment platforms and log systems.
 Each `bootstrap_apps` client also supplies its sign-in redirect URIs, allowed
 post-logout redirect URIs, and at least one front-channel or back-channel
 logout URI. These coordinates let Ory Hydra propagate one Shauth logout to
-every correlated relying-application session.
+every correlated relying-application session. Each app also supplies an
+immutable `release_revision`, an authenticated `validation_url` exposing an
+accessible `Sign out` control plus exact username, email, normalized role, and
+release-revision fields,
+and an app-local `signed_out_url` exposing an accessible `Sign in with Shauth`
+control. The client must register its exact app-origin
+`/auth/shauth/logout/complete` bridge in `post_logout_redirect_uris`; the bridge
+returns to Shauth's one-time completion endpoint, which then redirects to the
+trusted app-local `signed_out_url`. Release revisions and both container images must use immutable
+lowercase hexadecimal commits/tags or `sha256` digests; moving labels are
+rejected. Any release or endpoint-coordinate change queues real browser checks
+through both the Shauth catalog and the app's direct launch URL.
+
+The ARM64 validator is a standalone outbound-only Amazon ECS service, not a
+sidecar and not an authentication proxy. PostgreSQL leases one check globally
+and enforces a 30-second start cooldown. Each check uses a second registered
+application on a distinct origin to prove global session revocation; without a
+real witness application the result is red. The validator task has no AWS task
+role, no ingress, and an execution role limited to its dedicated secret. The
+validation identity has no reusable password. The worker exchanges its
+dedicated validator credential for short-lived, single-use Shauth browser
+bootstraps; only their hashes are stored, and neither credential crosses an
+application origin. Managed applications receive and validate ordinary OIDC
+artifacts and never receive or directly accept validator credentials.
+
+The module creates a separate `${var.name}/validation-status-reader` secret.
+Its read-only bearer token authorizes `GET /api/v1/apps/validations`, which
+returns the latest durable result for both directions of every registered app
+without exposing browser sessions, OIDC artifacts, or validator-control
+credentials.
 
 `monitoring_sources` supplies deployment-neutral, authenticated HTTPS
 coordinates that publish the `e6qu.monitoring/v1` observation contract. The

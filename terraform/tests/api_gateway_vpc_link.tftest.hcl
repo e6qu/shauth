@@ -17,6 +17,7 @@ variables {
   hosted_zone_id                = "Z0123456789ABC"
   domain_name                   = "auth.test.example.com"
   container_image               = "ghcr.io/e6qu/shauth@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  validator_container_image     = "ghcr.io/e6qu/shauth-validator@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   github_oauth_secret_arn       = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:github"
   github_client_id              = "test-client"
   bootstrap_admin_email         = "admin@test.example.com"
@@ -120,4 +121,91 @@ run "reject_existing_coordinates_while_owning_vpc_link" {
   }
 
   expect_failures = [var.create_api_gateway_vpc_link]
+}
+
+run "reject_unregistered_shauth_completion_url" {
+  command = plan
+
+  variables {
+    bootstrap_apps = [{
+      slug                      = "example-app"
+      name                      = "Example app"
+      description               = "Exact post-logout redirect validation."
+      launch_url                = "https://app.example.test/"
+      oidc_client_id            = "example-app"
+      oidc_client_secret        = "0123456789abcdef0123456789abcdef"
+      redirect_uris             = ["https://app.example.test/auth/callback"]
+      post_logout_redirect_uris = ["https://app.example.test/auth/other-signed-out"]
+      backchannel_logout_uri    = "https://app.example.test/auth/backchannel-logout"
+      health_url                = "https://app.example.test/healthz"
+      monitoring_url            = ""
+      validation_url            = "https://app.example.test/auth/validation"
+      signed_out_url            = "https://app.example.test/auth/signed-out"
+      release_revision          = "0123456789ab"
+    }]
+  }
+
+  plan_options {
+    refresh = false
+  }
+
+  expect_failures = [var.bootstrap_apps]
+}
+
+run "reject_cross_origin_shauth_logout_bridge" {
+  command = plan
+
+  variables {
+    bootstrap_apps = [{
+      slug                      = "example-app"
+      name                      = "Example app"
+      description               = "Exact post-logout redirect origin validation."
+      launch_url                = "https://app.example.test/"
+      oidc_client_id            = "example-app"
+      oidc_client_secret        = "0123456789abcdef0123456789abcdef"
+      redirect_uris             = ["https://app.example.test/auth/callback"]
+      post_logout_redirect_uris = ["https://attacker.example.test/auth/shauth/logout/complete"]
+      backchannel_logout_uri    = "https://app.example.test/auth/backchannel-logout"
+      health_url                = "https://app.example.test/healthz"
+      monitoring_url            = ""
+      validation_url            = "https://app.example.test/auth/validation"
+      signed_out_url            = "https://app.example.test/auth/signed-out"
+      release_revision          = "0123456789ab"
+    }]
+  }
+
+  plan_options {
+    refresh = false
+  }
+
+  expect_failures = [var.bootstrap_apps]
+}
+
+run "reject_cross_origin_oidc_redirect" {
+  command = plan
+
+  variables {
+    bootstrap_apps = [{
+      slug                      = "example-app"
+      name                      = "Example app"
+      description               = "Exact sign-in redirect origin validation."
+      launch_url                = "https://app.example.test/"
+      oidc_client_id            = "example-app"
+      oidc_client_secret        = "0123456789abcdef0123456789abcdef"
+      redirect_uris             = ["https://attacker.example.test/auth/callback"]
+      post_logout_redirect_uris = ["https://app.example.test/auth/shauth/logout/complete"]
+      backchannel_logout_uri    = "https://app.example.test/auth/backchannel-logout"
+      health_url                = "https://app.example.test/healthz"
+      monitoring_url            = ""
+      validation_url            = "https://app.example.test/auth/validation"
+      signed_out_url            = "https://app.example.test/auth/signed-out"
+      release_revision          = "0123456789ab"
+    }]
+  }
+
+  plan_options {
+    refresh = false
+  }
+
+  expect_failures = [var.bootstrap_apps]
 }
