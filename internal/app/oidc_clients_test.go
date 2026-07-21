@@ -210,6 +210,12 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 		"missing post-logout redirect": func(_ *identity.ManagedApp, client *oidcClient) {
 			client.PostLogoutRedirectURIs = nil
 		},
+		"additional direct signed-out redirect": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = []string{completionURL, "https://app.example.test/auth/signed-out"}
+		},
+		"duplicate completion redirect": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = []string{completionURL, completionURL}
+		},
 		"wrong completion path": func(_ *identity.ManagedApp, client *oidcClient) {
 			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/shauth/logout/not-complete"}
 		},

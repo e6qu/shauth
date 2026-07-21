@@ -181,6 +181,35 @@ run "reject_cross_origin_shauth_logout_bridge" {
   expect_failures = [var.bootstrap_apps]
 }
 
+run "reject_additional_post_logout_redirect" {
+  command = plan
+
+  variables {
+    bootstrap_apps = [{
+      slug                      = "example-app"
+      name                      = "Example app"
+      description               = "The completion bridge is the sole post-logout redirect."
+      launch_url                = "https://app.example.test/"
+      oidc_client_id            = "example-app"
+      oidc_client_secret        = "0123456789abcdef0123456789abcdef"
+      redirect_uris             = ["https://app.example.test/auth/callback"]
+      post_logout_redirect_uris = ["https://app.example.test/auth/shauth/logout/complete", "https://app.example.test/auth/signed-out"]
+      backchannel_logout_uri    = "https://app.example.test/auth/backchannel-logout"
+      health_url                = "https://app.example.test/healthz"
+      monitoring_url            = ""
+      validation_url            = "https://app.example.test/auth/validation"
+      signed_out_url            = "https://app.example.test/auth/signed-out"
+      release_revision          = "0123456789ab"
+    }]
+  }
+
+  plan_options {
+    refresh = false
+  }
+
+  expect_failures = [var.bootstrap_apps]
+}
+
 run "reject_cross_origin_oidc_redirect" {
   command = plan
 

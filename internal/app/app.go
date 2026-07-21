@@ -157,15 +157,8 @@ func validateManagedAppClient(app identity.ManagedApp, client oidcClient) error 
 	if err != nil {
 		return err
 	}
-	registeredCompletionURL := false
-	for _, registered := range client.PostLogoutRedirectURIs {
-		if registered == bridgeURL {
-			registeredCompletionURL = true
-			break
-		}
-	}
-	if !registeredCompletionURL {
-		return fmt.Errorf("managed app must register its exact Shauth logout bridge URI")
+	if len(client.PostLogoutRedirectURIs) != 1 || client.PostLogoutRedirectURIs[0] != bridgeURL {
+		return fmt.Errorf("managed app must register only its exact Shauth logout bridge URI")
 	}
 	clientOrigin, err := oidcClientOrigin(client.RedirectURIs, client.PostLogoutRedirectURIs, client.FrontChannelLogoutURI, client.BackChannelLogoutURI)
 	if err != nil {

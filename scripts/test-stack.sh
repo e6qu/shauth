@@ -5,6 +5,7 @@ set -eu
 unset CDPATH
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+export GOWORK=off
 
 case ${SHAUTH_STACK_FOCUS:-} in
 	''|logout-correlation|browser-global-logout) ;;
@@ -20,7 +21,7 @@ esac
 ./scripts/check-gateway-test-coordinates.sh
 npm ci
 node node_modules/playwright/cli.js install --with-deps chromium
-npm run test:validator-security
+npm run test:validator
 
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
@@ -769,6 +770,58 @@ if curl --fail --silent \
 	echo 'revoked OIDC refresh token was accepted' >&2
 	exit 1
 fi
+
+# A managed application has one trusted completion bridge. Registering a
+# direct signed-out page alongside it lets an RP bypass Shauth's one-time
+# completion correlation, so startup rejects the complete invalid bootstrap
+# before it can mutate Ory Hydra or PostgreSQL.
+valid_bootstrap_apps_json=$SHAUTH_BOOTSTRAP_APPS_JSON
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '%s' "$valid_bootstrap_apps_json" | node -e '
+let body = "";
+process.stdin.on("data", value => body += value);
+process.stdin.on("end", () => {
+  const apps = JSON.parse(body);
+  const target = apps.find(app => app.slug === "gateway-integration");
+  if (!target) throw new Error("gateway-integration bootstrap app is unavailable");
+  target.post_logout_redirect_uris.push("http://gateway-integration.localhost:5556/auth/signed-out");
+  process.stdout.write(JSON.stringify(apps));
+});')
+export SHAUTH_BOOTSTRAP_APPS_JSON
+compose up --force-recreate --no-deps --detach shauth
+attempt=0
+shauth_status=running
+while [ "$attempt" -lt 30 ]; do
+	shauth_container=$(compose ps --all --quiet shauth)
+	shauth_status=$(docker inspect --format '{{.State.Status}}' "$shauth_container")
+	[ "$shauth_status" = exited ] && break
+	attempt=$((attempt + 1))
+	sleep 1
+done
+if [ "$shauth_status" != exited ] || [ "$(docker inspect --format '{{.State.ExitCode}}' "$shauth_container")" -eq 0 ]; then
+	echo 'Shauth accepted an additional managed-app post-logout redirect' >&2
+	exit 1
+fi
+compose logs --no-color shauth | grep -q 'must register only its exact Shauth logout bridge URI'
+client_registration=$(curl --fail --silent --show-error http://localhost:4445/admin/clients/gateway-integration)
+printf '%s' "$client_registration" | node -e '
+let body = "";
+process.stdin.on("data", value => body += value);
+process.stdin.on("end", () => {
+  const client = JSON.parse(body);
+  const expected = ["http://gateway-integration.localhost:5556/auth/shauth/logout/complete"];
+  if (JSON.stringify(client.post_logout_redirect_uris) !== JSON.stringify(expected)) {
+    throw new Error("invalid bootstrap mutated Ory Hydra: " + JSON.stringify(client.post_logout_redirect_uris));
+  }
+});'
+SHAUTH_BOOTSTRAP_APPS_JSON=$valid_bootstrap_apps_json
+export SHAUTH_BOOTSTRAP_APPS_JSON
+compose up --force-recreate --no-deps --detach shauth
+attempt=0
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1; do
+	attempt=$((attempt + 1))
+	sleep 1
+done
+[ "$attempt" -lt 30 ]
 
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 -c "INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at) VALUES ('00000000-0000-4000-8000-000000000001','protected-app','Protected app','Administrator-owned app.','https://protected.dev.e6qu.dev','protected-client','https://protected.dev.e6qu.dev/health',NULL,'https://protected.dev.e6qu.dev/','https://protected.dev.e6qu.dev/signed-out','777777777777',now())" >/dev/null
 protected_client_secret=$(random_secret)

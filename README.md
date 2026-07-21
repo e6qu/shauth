@@ -181,7 +181,7 @@ sign-in and post-logout redirect URIs, at least one front-channel or
 back-channel logout URI, launch URL, health URL, and optional monitoring URL.
 Every coordinate for one connected application uses the same scheme, host, and
 port, and the client registers the exact app-origin
-`/auth/shauth/logout/complete` bridge as a `post_logout_redirect_uri`. The
+`/auth/shauth/logout/complete` bridge as its only `post_logout_redirect_uri`. The
 bridge returns to Shauth's `/oauth/logout/complete`; Shauth then uses its
 one-time durable correlation to reach the trusted app-local `signed_out_url`.
 Shauth verifies these invariants against

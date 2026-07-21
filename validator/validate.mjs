@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { chromium } from "playwright";
+import { waitForApplicationReady, waitForRegisteredURL } from "./readiness.mjs";
 import { boundedFailureWithLatestTrace, installCredentialBoundary, redactCredentialMaterial } from "./security.mjs";
 
 const input = await new Promise((resolve, reject) => {
@@ -59,25 +60,6 @@ function assertAuthorizationClient(providerTrace, start, expectedClientID, failu
   if (observed.length === 0) throw new Error(`${failure}; no Shauth authorization request was observed`);
   if (observed.some((clientID) => clientID !== expectedClientID)) {
     throw new Error(`${failure}; expected OpenID Connect client ${expectedClientID}`);
-  }
-}
-
-async function waitForRegisteredURL(page, predicate, failure) {
-  try {
-    await page.waitForURL(predicate, { timeout: 30_000 });
-  } catch {
-    const coordinate = new URL(page.url());
-    throw new Error(`${failure}; browser stopped at ${coordinate.origin}${coordinate.pathname}`);
-  }
-}
-
-async function waitForApplicationReady(page, registeredURL, failure) {
-  await waitForRegisteredURL(page, (value) => sameOrigin(value.toString(), registeredURL), failure);
-  try {
-    await page.waitForLoadState("networkidle", { timeout: 30_000 });
-  } catch {
-    const coordinate = new URL(page.url());
-    throw new Error(`${failure}; application did not become browser-ready at ${coordinate.origin}${coordinate.pathname}`);
   }
 }
 
