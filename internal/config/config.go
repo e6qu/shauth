@@ -32,11 +32,15 @@ type Config struct {
 	EntraClientSecret      string
 	BootstrapAdminEmail    string
 	BootstrapAdminPassword string
+	ValidationUsername     string
+	ValidationEmail        string
 	AllowInsecureCookies   bool
 	SESRegion              string
 	InvitationEmailFrom    string
 	BootstrapApps          []BootstrapApp
 	MonitoringSources      []monitoring.Source
+	ValidatorToken         string
+	ValidationStatusToken  string
 }
 
 // BootstrapApp is a confidential OpenID Connect client and its corresponding
@@ -55,6 +59,9 @@ type BootstrapApp struct {
 	BackChannelLogoutURI   string   `json:"backchannel_logout_uri"`
 	HealthURL              string   `json:"health_url"`
 	MonitoringURL          string   `json:"monitoring_url"`
+	ValidationURL          string   `json:"validation_url"`
+	SignedOutURL           string   `json:"signed_out_url"`
+	ReleaseRevision        string   `json:"release_revision"`
 }
 
 // Load reads and validates the complete production configuration.
@@ -87,15 +94,28 @@ func Load(getenv func(string) string) (Config, error) {
 		EntraClientSecret:      getenv("ENTRA_CLIENT_SECRET"),
 		BootstrapAdminEmail:    getenv("SHAUTH_BOOTSTRAP_ADMIN_EMAIL"),
 		BootstrapAdminPassword: getenv("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"),
+		ValidationUsername:     getenv("SHAUTH_VALIDATION_USERNAME"),
+		ValidationEmail:        getenv("SHAUTH_VALIDATION_EMAIL"),
 		AllowInsecureCookies:   getenv("SHAUTH_ALLOW_INSECURE_COOKIES") == "true",
 		SESRegion:              getenv("SHAUTH_SES_REGION"),
 		InvitationEmailFrom:    getenv("SHAUTH_INVITATION_EMAIL_FROM"),
+		ValidatorToken:         getenv("SHAUTH_VALIDATOR_TOKEN"),
+		ValidationStatusToken:  getenv("SHAUTH_VALIDATION_STATUS_TOKEN"),
 	}
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_EMAIL and SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must be set together")
 	}
 	if config.BootstrapAdminPassword != "" && len(config.BootstrapAdminPassword) < 14 {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must have at least 14 characters")
+	}
+	validationValues := 0
+	for _, value := range []string{config.ValidationUsername, config.ValidationEmail, config.ValidatorToken} {
+		if value != "" {
+			validationValues++
+		}
+	}
+	if validationValues != 0 && validationValues != 3 {
+		return Config{}, fmt.Errorf("SHAUTH_VALIDATION_USERNAME, SHAUTH_VALIDATION_EMAIL, and SHAUTH_VALIDATOR_TOKEN must be set together")
 	}
 	entraValues := 0
 	for _, value := range []string{config.EntraTenantID, config.EntraClientID, config.EntraClientSecret} {
@@ -127,6 +147,15 @@ func Load(getenv func(string) string) (Config, error) {
 		if err := monitoring.ValidateSources(config.MonitoringSources); err != nil {
 			return Config{}, fmt.Errorf("SHAUTH_MONITORING_SOURCES_JSON: %w", err)
 		}
+	}
+	if config.ValidatorToken != "" && len(config.ValidatorToken) < 32 {
+		return Config{}, fmt.Errorf("SHAUTH_VALIDATOR_TOKEN must contain at least 32 characters")
+	}
+	if config.ValidationStatusToken != "" && len(config.ValidationStatusToken) < 32 {
+		return Config{}, fmt.Errorf("SHAUTH_VALIDATION_STATUS_TOKEN must contain at least 32 characters")
+	}
+	if config.ValidatorToken != "" && config.ValidationStatusToken != "" && config.ValidatorToken == config.ValidationStatusToken {
+		return Config{}, fmt.Errorf("SHAUTH_VALIDATION_STATUS_TOKEN must differ from SHAUTH_VALIDATOR_TOKEN")
 	}
 	for name, value := range map[string]string{
 		"DATABASE_URL":                 config.DatabaseURL,

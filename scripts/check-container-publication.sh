@@ -16,21 +16,33 @@ expect_count() {
 }
 
 expect_count 1 '    runs-on: ubuntu-24.04-arm'
-expect_count 1 '          platforms: linux/amd64'
-expect_count 1 '          platforms: linux/arm64'
+expect_count 2 '          platforms: linux/amd64'
+expect_count 2 '          platforms: linux/arm64'
 expect_count 1 "          tags: ghcr.io/e6qu/shauth:${gha}{{ steps.sha.outputs.short_sha }}-amd64"
 expect_count 1 "          tags: ghcr.io/e6qu/shauth:${gha}{{ steps.sha.outputs.short_sha }}-arm64"
-expect_count 2 '          provenance: false'
-expect_count 2 '          sbom: false'
+expect_count 1 "          tags: ghcr.io/e6qu/shauth-validator:${gha}{{ steps.sha.outputs.short_sha }}-amd64"
+expect_count 1 "          tags: ghcr.io/e6qu/shauth-validator:${gha}{{ steps.sha.outputs.short_sha }}-arm64"
+expect_count 4 '          provenance: false'
+expect_count 4 '          sbom: false'
 expect_count 1 "          --tag ghcr.io/e6qu/shauth:${gha}{{ needs.build-amd64.outputs.short_sha }}"
 expect_count 1 "          ghcr.io/e6qu/shauth:${gha}{{ needs.build-amd64.outputs.short_sha }}-amd64"
 expect_count 1 "          ghcr.io/e6qu/shauth:${gha}{{ needs.build-arm64.outputs.short_sha }}-arm64"
-expect_count 1 '          ./scripts/verify-published-container.sh'
-expect_count 1 "        run: ./scripts/prune-ghcr-images.sh \"${gha}{{ github.repository_owner }}\" \"${gha}{{ github.event.repository.name }}\" 20"
+expect_count 1 "          --tag ghcr.io/e6qu/shauth-validator:${gha}{{ needs.build-amd64.outputs.short_sha }}"
+expect_count 1 "          ghcr.io/e6qu/shauth-validator:${gha}{{ needs.build-amd64.outputs.short_sha }}-amd64"
+expect_count 1 "          ghcr.io/e6qu/shauth-validator:${gha}{{ needs.build-arm64.outputs.short_sha }}-arm64"
+expect_count 2 '          ./scripts/verify-published-container.sh'
+expect_count 1 "          ./scripts/prune-ghcr-images.sh \"${gha}{{ github.repository_owner }}\" \"${gha}{{ github.event.repository.name }}\" 20"
+expect_count 1 "          ./scripts/prune-ghcr-images.sh \"${gha}{{ github.repository_owner }}\" \"shauth-validator\" 20"
 
 image_reference_count="$(grep -Fo 'ghcr.io/e6qu/shauth:' "$workflow" | wc -l | tr -d ' ')"
 if [[ "$image_reference_count" != 5 ]]; then
 	echo "publication workflow contained $image_reference_count Shauth tag references; expected exactly the generic and two direct image publications" >&2
+	exit 1
+fi
+
+validator_reference_count="$(grep -Fo 'ghcr.io/e6qu/shauth-validator:' "$workflow" | wc -l | tr -d ' ')"
+if [[ "$validator_reference_count" != 5 ]]; then
+	echo "publication workflow contained $validator_reference_count Shauth validator tag references; expected exactly the generic and two direct image publications" >&2
 	exit 1
 fi
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +27,11 @@ const (
 	RoleDeveloper Role = "developer"
 	RoleAdmin     Role = "admin"
 )
+
+var immutableReleaseRevisionPattern = regexp.MustCompile(`^([0-9a-f]{12,64}|sha256:[0-9a-f]{64})$`)
+var browserBootstrapTokenPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+const validationBrowserBootstrapLifetime = 10 * time.Minute
 
 type User struct {
 	ID                string
@@ -64,16 +70,60 @@ type GitHubRoleMapping struct {
 	CreatedAt time.Time
 }
 type ManagedApp struct {
-	ID            string
-	Slug          string
-	Name          string
-	Description   string
-	LaunchURL     string
-	OIDCClientID  string
-	HealthURL     string
-	MonitoringURL string
-	CreatedAt     time.Time
+	ID              string
+	Slug            string
+	Name            string
+	Description     string
+	LaunchURL       string
+	OIDCClientID    string
+	HealthURL       string
+	MonitoringURL   string
+	ValidationURL   string
+	SignedOutURL    string
+	ReleaseRevision string
+	CreatedAt       time.Time
 }
+
+type AppValidationRun struct {
+	ID                     string
+	ManagedAppID           string
+	AppSlug                string
+	AppName                string
+	OIDCClientID           string
+	LaunchURL              string
+	ValidationURL          string
+	SignedOutURL           string
+	Direction              string
+	ReleaseRevision        string
+	ValidationContractHash string
+	Status                 string
+	RequestedAt            time.Time
+	StartedAt              *time.Time
+	CompletedAt            *time.Time
+	DurationMilliseconds   *int64
+	Failure                string
+	Witness                *AppValidationWitness
+}
+
+type AppValidationWitness struct {
+	ManagedAppID    string `json:"managed_app_id"`
+	AppSlug         string `json:"app_slug"`
+	AppName         string `json:"app_name"`
+	OIDCClientID    string `json:"oidc_client_id"`
+	LaunchURL       string `json:"launch_url"`
+	ValidationURL   string `json:"validation_url"`
+	SignedOutURL    string `json:"signed_out_url"`
+	ReleaseRevision string `json:"release_revision"`
+}
+
+const (
+	ValidationFromShauth = "from_shauth"
+	ValidationFromApp    = "from_app"
+	ValidationQueued     = "queued"
+	ValidationRunning    = "running"
+	ValidationPassed     = "passed"
+	ValidationFailed     = "failed"
+)
 
 type Store struct{ pool *pgxpool.Pool }
 
@@ -235,9 +285,20 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 	if err := ValidateManagedApp(app); err != nil {
 		return ManagedApp{}, err
 	}
-	err := s.pool.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ManagedApp{}, fmt.Errorf("begin create managed app: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11,now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL, app.ValidationURL, app.SignedOutURL, app.ReleaseRevision).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("create managed app: %w", err)
+	}
+	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
+		return ManagedApp{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ManagedApp{}, fmt.Errorf("commit create managed app: %w", err)
 	}
 	return app, nil
 }
@@ -249,26 +310,90 @@ func (s *Store) ReconcileBootstrapManagedApp(ctx context.Context, app ManagedApp
 	if err := ValidateManagedApp(app); err != nil {
 		return ManagedApp{}, err
 	}
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,created_at)
-		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),now())
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ManagedApp{}, fmt.Errorf("begin reconcile bootstrap managed app: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var previous ManagedApp
+	previousErr := tx.QueryRow(ctx, `SELECT name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision FROM managed_apps WHERE slug=$1 FOR UPDATE`, app.Slug).
+		Scan(&previous.Name, &previous.Description, &previous.LaunchURL, &previous.OIDCClientID, &previous.HealthURL, &previous.MonitoringURL, &previous.ValidationURL, &previous.SignedOutURL, &previous.ReleaseRevision)
+	if previousErr != nil && !errors.Is(previousErr, pgx.ErrNoRows) {
+		return ManagedApp{}, fmt.Errorf("read bootstrap managed app revision: %w", previousErr)
+	}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at)
+		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11,now())
 		ON CONFLICT (slug) DO UPDATE SET
 			name=EXCLUDED.name,
 			description=EXCLUDED.description,
 			launch_url=EXCLUDED.launch_url,
 			health_url=EXCLUDED.health_url,
-			monitoring_url=EXCLUDED.monitoring_url
+			monitoring_url=EXCLUDED.monitoring_url,
+			validation_url=EXCLUDED.validation_url,
+			signed_out_url=EXCLUDED.signed_out_url,
+			release_revision=EXCLUDED.release_revision
 		WHERE managed_apps.oidc_client_id=EXCLUDED.oidc_client_id
-		RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at`,
-		randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL).
-		Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt)
+		RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at`,
+		randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL, app.ValidationURL, app.SignedOutURL, app.ReleaseRevision).
+		Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ManagedApp{}, fmt.Errorf("managed app slug %q belongs to another OpenID Connect client", app.Slug)
 	}
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("reconcile bootstrap managed app: %w", err)
 	}
+	if errors.Is(previousErr, pgx.ErrNoRows) || !sameManagedAppValidationContract(previous, app) {
+		if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
+			return ManagedApp{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ManagedApp{}, fmt.Errorf("commit reconcile bootstrap managed app: %w", err)
+	}
 	return app, nil
+}
+
+func sameManagedAppValidationContract(left, right ManagedApp) bool {
+	return left.Name == right.Name &&
+		left.Description == right.Description &&
+		left.LaunchURL == right.LaunchURL &&
+		left.OIDCClientID == right.OIDCClientID &&
+		left.HealthURL == right.HealthURL &&
+		left.MonitoringURL == right.MonitoringURL &&
+		left.ValidationURL == right.ValidationURL &&
+		left.SignedOutURL == right.SignedOutURL &&
+		left.ReleaseRevision == right.ReleaseRevision
+}
+
+func managedAppValidationContractHash(app ManagedApp, witness *ManagedApp) string {
+	fields := []string{
+		app.Slug,
+		app.Name,
+		app.Description,
+		app.LaunchURL,
+		app.OIDCClientID,
+		app.HealthURL,
+		app.MonitoringURL,
+		app.ValidationURL,
+		app.SignedOutURL,
+		app.ReleaseRevision,
+	}
+	if witness != nil {
+		fields = append(fields,
+			witness.ID,
+			witness.Slug,
+			witness.Name,
+			witness.OIDCClientID,
+			witness.LaunchURL,
+			witness.ValidationURL,
+			witness.SignedOutURL,
+			witness.ReleaseRevision,
+		)
+	}
+	contract := strings.Join(fields, "\x00")
+	digest := sha256.Sum256([]byte(contract))
+	return hex.EncodeToString(digest[:])
 }
 
 // ValidateBootstrapManagedAppOwnership reports whether the catalog already
@@ -306,11 +431,14 @@ func normalizeManagedApp(app ManagedApp) ManagedApp {
 	app.OIDCClientID = strings.TrimSpace(app.OIDCClientID)
 	app.HealthURL = strings.TrimSpace(app.HealthURL)
 	app.MonitoringURL = strings.TrimSpace(app.MonitoringURL)
+	app.ValidationURL = strings.TrimSpace(app.ValidationURL)
+	app.SignedOutURL = strings.TrimSpace(app.SignedOutURL)
+	app.ReleaseRevision = strings.TrimSpace(app.ReleaseRevision)
 	return app
 }
 
 func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at FROM managed_apps ORDER BY name`)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list managed apps: %w", err)
 	}
@@ -318,7 +446,7 @@ func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
 	var apps []ManagedApp
 	for rows.Next() {
 		var app ManagedApp
-		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt); err != nil {
+		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan managed app: %w", err)
 		}
 		apps = append(apps, app)
@@ -338,7 +466,7 @@ func (s *Store) IsManagedOIDCClient(ctx context.Context, clientID string) (bool,
 
 func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 	var app ManagedApp
-	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.CreatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("get managed app: %w", err)
 	}
@@ -346,12 +474,23 @@ func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 }
 
 func (s *Store) DeleteManagedApp(ctx context.Context, id string) error {
-	result, err := s.pool.Exec(ctx, `DELETE FROM managed_apps WHERE id=$1::uuid`, id)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete managed app: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `DELETE FROM managed_apps WHERE id=$1::uuid`, id)
 	if err != nil {
 		return fmt.Errorf("delete managed app: %w", err)
 	}
 	if result.RowsAffected() != 1 {
 		return fmt.Errorf("managed app not found")
+	}
+	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete managed app: %w", err)
 	}
 	return nil
 }
@@ -362,6 +501,316 @@ func (s *Store) ManagedAppUsesOIDCClient(ctx context.Context, clientID string) (
 		return false, fmt.Errorf("query managed app OAuth client: %w", err)
 	}
 	return exists, nil
+}
+
+func loadManagedAppsForValidation(ctx context.Context, tx pgx.Tx) ([]ManagedApp, error) {
+	rows, err := tx.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision FROM managed_apps ORDER BY slug FOR UPDATE`)
+	if err != nil {
+		return nil, fmt.Errorf("lock managed app validation contracts: %w", err)
+	}
+	defer rows.Close()
+	var apps []ManagedApp
+	for rows.Next() {
+		var app ManagedApp
+		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision); err != nil {
+			return nil, fmt.Errorf("scan managed app validation contract: %w", err)
+		}
+		apps = append(apps, app)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list managed app validation contracts: %w", err)
+	}
+	return apps, nil
+}
+
+func validationWitness(target ManagedApp, apps []ManagedApp) *ManagedApp {
+	targetURL, _ := url.Parse(target.LaunchURL)
+	targetIndex := -1
+	for index := range apps {
+		if apps[index].ID == target.ID {
+			targetIndex = index
+			break
+		}
+	}
+	for offset := 1; offset < len(apps); offset++ {
+		index := (targetIndex + offset) % len(apps)
+		candidate := &apps[index]
+		candidateURL, _ := url.Parse(candidate.LaunchURL)
+		if candidate.ID != target.ID && candidate.OIDCClientID != target.OIDCClientID && !sameURLOrigin(targetURL, candidateURL) {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func enqueueAppValidation(ctx context.Context, tx pgx.Tx, app ManagedApp, witness *ManagedApp, requestedBy *string, now time.Time) error {
+	contractHash := managedAppValidationContractHash(app, witness)
+	var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision any
+	if witness != nil {
+		witnessID, witnessSlug, witnessName = witness.ID, witness.Slug, witness.Name
+		witnessClientID, witnessLaunchURL = witness.OIDCClientID, witness.LaunchURL
+		witnessValidationURL, witnessSignedOutURL, witnessRevision = witness.ValidationURL, witness.SignedOutURL, witness.ReleaseRevision
+	}
+	for _, direction := range []string{ValidationFromShauth, ValidationFromApp} {
+		var requester any
+		if requestedBy != nil {
+			requester = *requestedBy
+		}
+		_, err := tx.Exec(ctx, `
+			DELETE FROM app_validation_runs WHERE managed_app_id=$1::uuid AND direction=$2 AND status='queued' AND validation_contract_hash<>$3`,
+			app.ID, direction, contractHash)
+		if err != nil {
+			return fmt.Errorf("remove superseded %s application validation: %w", direction, err)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO app_validation_runs(
+				id,managed_app_id,app_slug,app_name,oidc_client_id,launch_url,validation_url,signed_out_url,
+				direction,release_revision,validation_contract_hash,
+				witness_managed_app_id,witness_app_slug,witness_app_name,witness_oidc_client_id,witness_launch_url,witness_validation_url,witness_signed_out_url,witness_release_revision,
+				status,requested_by,requested_at)
+			VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::uuid,$13,$14,$15,$16,$17,$18,$19,'queued',$20::uuid,$21)
+			ON CONFLICT (managed_app_id,direction,validation_contract_hash)
+			WHERE status IN ('queued','running') DO NOTHING`,
+			randomUUID(), app.ID, app.Slug, app.Name, app.OIDCClientID, app.LaunchURL, app.ValidationURL, app.SignedOutURL,
+			direction, app.ReleaseRevision, contractHash,
+			witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision,
+			requester, now)
+		if err != nil {
+			return fmt.Errorf("enqueue %s application validation: %w", direction, err)
+		}
+	}
+	return nil
+}
+
+func enqueueAllAppValidations(ctx context.Context, tx pgx.Tx, requestedBy *string, now time.Time) error {
+	apps, err := loadManagedAppsForValidation(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, app := range apps {
+		if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), requestedBy, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EnqueueAppValidations schedules both catalog-entry and direct-entry browser
+// checks. Duplicate pending checks for the exact same application contract
+// collapse into one queue entry per direction.
+func (s *Store) EnqueueAppValidations(ctx context.Context, appID, requestedBy string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin enqueue application validations: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	apps, err := loadManagedAppsForValidation(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, app := range apps {
+		if app.ID == appID {
+			if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), &requestedBy, now.UTC()); err != nil {
+				return err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit enqueue application validations: %w", err)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("managed app not found")
+}
+
+// LatestAppValidationRuns returns the most recent durable result for each app
+// and direction, including queued and running work.
+func (s *Store) LatestAppValidationRuns(ctx context.Context) (map[string]map[string]AppValidationRun, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (r.managed_app_id,r.direction)
+			r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.validation_contract_hash,r.status,
+			r.requested_at,r.started_at,r.completed_at,r.duration_milliseconds,r.failure,
+			r.witness_managed_app_id::text,r.witness_app_slug,r.witness_app_name,r.witness_oidc_client_id,r.witness_launch_url,r.witness_validation_url,r.witness_signed_out_url,r.witness_release_revision
+		FROM app_validation_runs r
+		ORDER BY r.managed_app_id,r.direction,r.requested_at DESC,r.id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list application validation results: %w", err)
+	}
+	defer rows.Close()
+	results := map[string]map[string]AppValidationRun{}
+	for rows.Next() {
+		var run AppValidationRun
+		var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision *string
+		if err := rows.Scan(&run.ID, &run.ManagedAppID, &run.AppSlug, &run.AppName, &run.OIDCClientID, &run.LaunchURL, &run.ValidationURL, &run.SignedOutURL, &run.Direction, &run.ReleaseRevision, &run.ValidationContractHash, &run.Status, &run.RequestedAt, &run.StartedAt, &run.CompletedAt, &run.DurationMilliseconds, &run.Failure,
+			&witnessID, &witnessSlug, &witnessName, &witnessClientID, &witnessLaunchURL, &witnessValidationURL, &witnessSignedOutURL, &witnessRevision); err != nil {
+			return nil, fmt.Errorf("scan application validation result: %w", err)
+		}
+		if witnessID != nil {
+			run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
+		}
+		if results[run.ManagedAppID] == nil {
+			results[run.ManagedAppID] = map[string]AppValidationRun{}
+		}
+		results[run.ManagedAppID][run.Direction] = run
+	}
+	return results, rows.Err()
+}
+
+// LatestAppValidationRunsForApp returns the most recent durable result for one
+// app in each direction without scanning other app histories.
+func (s *Store) LatestAppValidationRunsForApp(ctx context.Context, appID string) (map[string]AppValidationRun, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT ON (r.direction)
+			r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.validation_contract_hash,r.status,
+			r.requested_at,r.started_at,r.completed_at,r.duration_milliseconds,r.failure,
+			r.witness_managed_app_id::text,r.witness_app_slug,r.witness_app_name,r.witness_oidc_client_id,r.witness_launch_url,r.witness_validation_url,r.witness_signed_out_url,r.witness_release_revision
+		FROM app_validation_runs r
+		WHERE r.managed_app_id=$1::uuid
+		ORDER BY r.direction,r.requested_at DESC,r.id DESC`, appID)
+	if err != nil {
+		return nil, fmt.Errorf("list application validation results: %w", err)
+	}
+	defer rows.Close()
+	results := map[string]AppValidationRun{}
+	for rows.Next() {
+		var run AppValidationRun
+		var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision *string
+		if err := rows.Scan(&run.ID, &run.ManagedAppID, &run.AppSlug, &run.AppName, &run.OIDCClientID, &run.LaunchURL, &run.ValidationURL, &run.SignedOutURL, &run.Direction, &run.ReleaseRevision, &run.ValidationContractHash, &run.Status, &run.RequestedAt, &run.StartedAt, &run.CompletedAt, &run.DurationMilliseconds, &run.Failure,
+			&witnessID, &witnessSlug, &witnessName, &witnessClientID, &witnessLaunchURL, &witnessValidationURL, &witnessSignedOutURL, &witnessRevision); err != nil {
+			return nil, fmt.Errorf("scan application validation result: %w", err)
+		}
+		if witnessID != nil {
+			run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
+		}
+		results[run.Direction] = run
+	}
+	return results, rows.Err()
+}
+
+// ClaimAppValidation leases exactly one queued check. PostgreSQL serializes all
+// workers globally and enforces at least 30 seconds between check starts.
+func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppValidationRun, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin claim application validation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var activeRunID *string
+	var nextStart time.Time
+	if err := tx.QueryRow(ctx, `SELECT active_run_id::text,next_start_at FROM app_validation_control WHERE singleton=TRUE FOR UPDATE`).Scan(&activeRunID, &nextStart); err != nil {
+		return nil, fmt.Errorf("lock application validation queue: %w", err)
+	}
+	if activeRunID != nil {
+		var lease time.Time
+		if err := tx.QueryRow(ctx, `SELECT lease_expires_at FROM app_validation_runs WHERE id=$1::uuid`, *activeRunID).Scan(&lease); err != nil {
+			return nil, fmt.Errorf("read active application validation lease: %w", err)
+		}
+		if lease.After(now) {
+			return nil, tx.Commit(ctx)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, now.UTC()); err != nil {
+			return nil, fmt.Errorf("expire abandoned application validation: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE`); err != nil {
+			return nil, fmt.Errorf("clear abandoned application validation: %w", err)
+		}
+	}
+	if nextStart.After(now) {
+		return nil, tx.Commit(ctx)
+	}
+	var run AppValidationRun
+	var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision *string
+	err = tx.QueryRow(ctx, `
+		SELECT r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.status,r.requested_at,
+			r.witness_managed_app_id::text,r.witness_app_slug,r.witness_app_name,r.witness_oidc_client_id,r.witness_launch_url,r.witness_validation_url,r.witness_signed_out_url,r.witness_release_revision
+		FROM app_validation_runs r
+		WHERE r.status='queued' ORDER BY r.requested_at,r.id LIMIT 1 FOR UPDATE OF r SKIP LOCKED`).
+		Scan(&run.ID, &run.ManagedAppID, &run.AppSlug, &run.AppName, &run.OIDCClientID, &run.LaunchURL, &run.ValidationURL, &run.SignedOutURL, &run.Direction, &run.ReleaseRevision, &run.Status, &run.RequestedAt,
+			&witnessID, &witnessSlug, &witnessName, &witnessClientID, &witnessLaunchURL, &witnessValidationURL, &witnessSignedOutURL, &witnessRevision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, tx.Commit(ctx)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select application validation: %w", err)
+	}
+	if witnessID != nil {
+		run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
+	}
+	started := now.UTC()
+	lease := started.Add(10 * time.Minute)
+	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='running',started_at=$2,lease_expires_at=$3 WHERE id=$1::uuid`, run.ID, started, lease); err != nil {
+		return nil, fmt.Errorf("lease application validation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=$1::uuid,next_start_at=$2 WHERE singleton=TRUE`, run.ID, started.Add(30*time.Second)); err != nil {
+		return nil, fmt.Errorf("advance application validation cooldown: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit claim application validation: %w", err)
+	}
+	run.Status, run.StartedAt = ValidationRunning, &started
+	return &run, nil
+}
+
+func (s *Store) CompleteAppValidation(ctx context.Context, runID, status, failure string, now time.Time) error {
+	if status != ValidationPassed && status != ValidationFailed {
+		return fmt.Errorf("application validation result must be passed or failed")
+	}
+	if len(failure) > 1000 {
+		failure = failure[:1000]
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin complete application validation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	command, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status=$2,completed_at=$3,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($3-started_at))*1000)::bigint,failure=$4 WHERE id=$1::uuid AND status='running'`, runID, status, now.UTC(), strings.TrimSpace(failure))
+	if err != nil {
+		return fmt.Errorf("complete application validation: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("active application validation not found")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, runID); err != nil {
+		return fmt.Errorf("release application validation queue: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit application validation result: %w", err)
+	}
+	return nil
+}
+
+// ExpireAbandonedAppValidation records a durable failure when a worker did not
+// complete its leased browser check. A later worker can then claim the queue.
+func (s *Store) ExpireAbandonedAppValidation(ctx context.Context, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin expire application validation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var activeRunID *string
+	if err := tx.QueryRow(ctx, `SELECT active_run_id::text FROM app_validation_control WHERE singleton=TRUE FOR UPDATE`).Scan(&activeRunID); err != nil {
+		return fmt.Errorf("lock application validation queue: %w", err)
+	}
+	if activeRunID == nil {
+		return tx.Commit(ctx)
+	}
+	var lease time.Time
+	if err := tx.QueryRow(ctx, `SELECT lease_expires_at FROM app_validation_runs WHERE id=$1::uuid AND status='running'`, *activeRunID).Scan(&lease); err != nil {
+		return fmt.Errorf("read active application validation lease: %w", err)
+	}
+	if lease.After(now) {
+		return tx.Commit(ctx)
+	}
+	completed := now.UTC()
+	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, completed); err != nil {
+		return fmt.Errorf("expire abandoned application validation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
+		return fmt.Errorf("release abandoned application validation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit expired application validation: %w", err)
+	}
+	return nil
 }
 
 func validateGitHubRoleMapping(kind, target string, role Role) error {
@@ -390,6 +839,9 @@ func ValidateManagedApp(app ManagedApp) error {
 	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" {
 		return fmt.Errorf("app name, description, and OIDC client ID are required")
 	}
+	if !immutableReleaseRevisionPattern.MatchString(app.ReleaseRevision) {
+		return fmt.Errorf("app release revision must be a 12–64 character lowercase hexadecimal commit or a sha256 digest")
+	}
 	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
 	if err != nil || !validManagedAppURL(launchURL) {
 		return fmt.Errorf("app launch URL must use HTTPS unless it targets loopback")
@@ -400,6 +852,15 @@ func ValidateManagedApp(app ManagedApp) error {
 	}
 	if !sameURLOrigin(launchURL, healthURL) {
 		return fmt.Errorf("app launch and health URLs must use one application origin")
+	}
+	for label, raw := range map[string]string{"validation": app.ValidationURL, "signed-out": app.SignedOutURL} {
+		coordinate, err := url.ParseRequestURI(raw)
+		if err != nil || !validManagedAppURL(coordinate) {
+			return fmt.Errorf("app %s URL must use HTTPS unless it targets loopback", label)
+		}
+		if !sameURLOrigin(launchURL, coordinate) {
+			return fmt.Errorf("app launch and %s URLs must use one application origin", label)
+		}
 	}
 	if app.MonitoringURL != "" {
 		monitoringURL, err := url.ParseRequestURI(app.MonitoringURL)
@@ -425,7 +886,7 @@ func validManagedAppURL(value *url.URL) bool {
 		return true
 	}
 	host := strings.Trim(strings.ToLower(value.Hostname()), "[]")
-	return value.Scheme == "http" && (host == "localhost" || host == "::1" || net.ParseIP(host).IsLoopback())
+	return value.Scheme == "http" && (host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "::1" || net.ParseIP(host).IsLoopback())
 }
 
 func normalizeGitHubTarget(kind, target string) string {
@@ -470,12 +931,130 @@ func (s *Store) EnsureBootstrapAdmin(ctx context.Context, email, password string
 	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,created_at)
 	VALUES ($1::uuid,$2,$3,TRUE,$4,'admin',now())
 	ON CONFLICT (email) DO UPDATE SET password_hash=EXCLUDED.password_hash,email_verified=TRUE,role='admin',disabled_at=NULL
+	WHERE users.is_validation=FALSE
 	RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, randomUUID(), username, email, hash).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, fmt.Errorf("bootstrap administrator email belongs to the validation account")
+	}
 	if err != nil {
 		return User{}, fmt.Errorf("ensure bootstrap admin: %w", err)
 	}
 	return user, nil
+}
+
+// EnsureValidationUser provisions the dedicated real browser-validation
+// account. It has the developer role and no administrative privileges.
+func (s *Store) EnsureValidationUser(ctx context.Context, username, email string) (User, error) {
+	if username == "" && email == "" {
+		return User{}, nil
+	}
+	username = strings.TrimSpace(username)
+	email = strings.ToLower(strings.TrimSpace(email))
+	if username == "" || email == "" {
+		return User{}, fmt.Errorf("validation username and email are required")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return User{}, fmt.Errorf("begin validation user provisioning: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('shauth-validation-identity'))`); err != nil {
+		return User{}, fmt.Errorf("lock validation user provisioning: %w", err)
+	}
+	var existingID string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM users WHERE is_validation=TRUE FOR UPDATE`).Scan(&existingID)
+	var user User
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		err = tx.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,is_validation,created_at)
+			VALUES ($1::uuid,$2,$3,TRUE,NULL,'developer',TRUE,now())
+			RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, randomUUID(), username, email).
+			Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	case err == nil:
+		err = tx.QueryRow(ctx, `UPDATE users
+			SET username=$2,email=$3,password_hash=NULL,github_id=NULL,github_login=NULL,entra_tenant_id=NULL,entra_object_id=NULL,email_verified=TRUE,role='developer',disabled_at=NULL
+			WHERE id=$1::uuid AND is_validation=TRUE
+			RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, existingID, username, email).
+			Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	default:
+		return User{}, fmt.Errorf("find validation user: %w", err)
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("ensure validation user: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, fmt.Errorf("commit validation user provisioning: %w", err)
+	}
+	return user, nil
+}
+
+// CreateValidationBrowserBootstraps creates short-lived, single-use browser
+// session grants for the dedicated validation identity. Only SHA-256 hashes are
+// persisted; the raw tokens are returned once to the authenticated worker.
+func (s *Store) CreateValidationBrowserBootstraps(ctx context.Context, nextPaths []string, now time.Time) ([]string, error) {
+	if len(nextPaths) == 0 || len(nextPaths) > 3 {
+		return nil, fmt.Errorf("one to three validation browser bootstraps are required")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin validation browser bootstrap creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var userID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE is_validation=TRUE AND disabled_at IS NULL AND role='developer'`).Scan(&userID); err != nil {
+		return nil, fmt.Errorf("find validation identity: %w", err)
+	}
+	created := now.UTC()
+	if _, err := tx.Exec(ctx, `DELETE FROM validation_browser_bootstraps WHERE expires_at<$1 OR consumed_at<$2`, created, created.Add(-24*time.Hour)); err != nil {
+		return nil, fmt.Errorf("remove expired validation browser bootstraps: %w", err)
+	}
+	rawTokens := make([]string, 0, len(nextPaths))
+	for _, nextPath := range nextPaths {
+		raw, err := randomToken()
+		if err != nil {
+			return nil, err
+		}
+		hash := sha256.Sum256([]byte(raw))
+		if _, err := tx.Exec(ctx, `INSERT INTO validation_browser_bootstraps (id,token_hash,validation_user_id,next_path,created_at,expires_at) VALUES ($1::uuid,$2,$3::uuid,$4,$5,$6)`, randomUUID(), hash[:], userID, nextPath, created, created.Add(validationBrowserBootstrapLifetime)); err != nil {
+			return nil, fmt.Errorf("create validation browser bootstrap: %w", err)
+		}
+		rawTokens = append(rawTokens, raw)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit validation browser bootstraps: %w", err)
+	}
+	return rawTokens, nil
+}
+
+// ConsumeValidationBrowserBootstrap atomically exchanges one unexpired token
+// for the validation identity and its prevalidated local destination.
+func (s *Store) ConsumeValidationBrowserBootstrap(ctx context.Context, raw string, now time.Time) (User, string, error) {
+	if !browserBootstrapTokenPattern.MatchString(raw) {
+		return User{}, "", fmt.Errorf("validation browser bootstrap is unavailable")
+	}
+	hash := sha256.Sum256([]byte(raw))
+	var user User
+	var nextPath string
+	err := s.pool.QueryRow(ctx, `UPDATE validation_browser_bootstraps bootstrap
+		SET consumed_at=$2
+		FROM users
+		WHERE bootstrap.token_hash=$1
+		  AND bootstrap.consumed_at IS NULL
+		  AND bootstrap.expires_at>$2
+		  AND users.id=bootstrap.validation_user_id
+		  AND users.is_validation=TRUE
+		  AND users.disabled_at IS NULL
+		  AND users.role='developer'
+		RETURNING users.id::text,users.username,users.email,users.email_verified,COALESCE(users.github_login,''),users.role,users.disabled_at,users.created_at,bootstrap.next_path`, hash[:], now.UTC()).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &nextPath)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, "", fmt.Errorf("validation browser bootstrap is unavailable")
+	}
+	if err != nil {
+		return User{}, "", fmt.Errorf("consume validation browser bootstrap: %w", err)
+	}
+	return user, nextPath, nil
 }
 
 func (s *Store) CreateInvitation(ctx context.Context, email string, role Role, invitedBy string, now time.Time) (string, Invitation, error) {
@@ -536,7 +1115,7 @@ func (s *Store) insertUser(ctx context.Context, id, username, email string, emai
 func (s *Store) AuthenticatePassword(ctx context.Context, username, password string) (User, error) {
 	var user User
 	var hash []byte
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at,password_hash FROM users WHERE username=$1`, strings.TrimSpace(username)).
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at,password_hash FROM users WHERE username=$1 AND is_validation=FALSE`, strings.TrimSpace(username)).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &hash)
 	if err != nil || user.DisabledAt != nil || len(hash) == 0 || bcrypt.CompareHashAndPassword(hash, []byte(password)) != nil {
 		return User{}, fmt.Errorf("invalid username or password")
@@ -592,7 +1171,7 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return User{}, fmt.Errorf("find Microsoft Entra ID user: %w", err)
 	}
-	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND entra_tenant_id IS NULL AND disabled_at IS NULL RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
+	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND entra_tenant_id IS NULL AND disabled_at IS NULL AND is_validation=FALSE RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		return user, nil
@@ -746,13 +1325,48 @@ func (s *Store) UserHydraLoginSessionIDs(ctx context.Context, userID string) ([]
 	}
 	return sessionIDs, nil
 }
-func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL`, id, now.UTC())
+
+func (s *Store) ActiveUserHydraLoginSessionIDs(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT h.hydra_session_id
+	FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
+	WHERE s.user_id=$1::uuid AND s.revoked_at IS NULL
+	ORDER BY h.hydra_session_id`, userID)
 	if err != nil {
+		return nil, fmt.Errorf("list active user Ory Hydra login sessions: %w", err)
+	}
+	defer rows.Close()
+	var sessionIDs []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return nil, fmt.Errorf("scan active user Ory Hydra login session: %w", err)
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list active user Ory Hydra login sessions: %w", err)
+	}
+	return sessionIDs, nil
+}
+
+func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin session revocation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var familyID string
+	if err := tx.QueryRow(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL RETURNING refresh_family_id::text`, id, now.UTC()).Scan(&familyID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("active session not found")
+		}
 		return fmt.Errorf("revoke session: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("active session not found")
+	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at=$2 WHERE family_id=$1::uuid AND revoked_at IS NULL`, familyID, now.UTC()); err != nil {
+		return fmt.Errorf("revoke session refresh tokens: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit session revocation: %w", err)
 	}
 	return nil
 }
@@ -765,7 +1379,15 @@ func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 	return userID, nil
 }
 func (s *Store) RevokeUserSessions(ctx context.Context, userID string, now time.Time) error {
-	_, err := s.pool.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE user_id=$1::uuid AND revoked_at IS NULL`, userID, now.UTC())
+	_, err := s.pool.Exec(ctx, `WITH revoked AS (
+		UPDATE sessions
+		SET revoked_at=$2
+		WHERE user_id=$1::uuid AND revoked_at IS NULL
+		RETURNING refresh_family_id
+	)
+	UPDATE refresh_tokens
+	SET revoked_at=$2
+	WHERE family_id IN (SELECT refresh_family_id FROM revoked) AND revoked_at IS NULL`, userID, now.UTC())
 	if err != nil {
 		return fmt.Errorf("revoke user sessions: %w", err)
 	}

@@ -3,6 +3,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -18,7 +19,7 @@ func TestLoadReadsBootstrapApps(t *testing.T) {
 		"SHAUTH_PUBLIC_URL": "https://auth.dev.e6qu.dev", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.dev.e6qu.dev",
-		"SHAUTH_BOOTSTRAP_APPS_JSON": `[{"slug":"intraktible","name":"Intraktible","description":"Decision platform","launch_url":"https://intraktible.dev.e6qu.dev","health_url":"https://intraktible.dev.e6qu.dev/health","oidc_client_id":"intraktible-dev","oidc_client_secret":"0123456789abcdef0123456789abcdef","redirect_uris":["https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/callback"],"post_logout_redirect_uris":["https://intraktible.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/frontchannel-logout","backchannel_logout_uri":"https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/backchannel-logout"}]`,
+		"SHAUTH_BOOTSTRAP_APPS_JSON": `[{"slug":"intraktible","name":"Intraktible","description":"Decision platform","launch_url":"https://intraktible.dev.e6qu.dev","health_url":"https://intraktible.dev.e6qu.dev/health","oidc_client_id":"intraktible-dev","oidc_client_secret":"0123456789abcdef0123456789abcdef","redirect_uris":["https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/callback"],"post_logout_redirect_uris":["https://intraktible.dev.e6qu.dev/"],"frontchannel_logout_uri":"https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/frontchannel-logout","backchannel_logout_uri":"https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/backchannel-logout","release_revision":"0123456789ab"}]`,
 	}
 	config, err := Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -87,6 +88,59 @@ func TestLoadAcceptsCompleteConfiguration(t *testing.T) {
 	}
 	if config.Address != ":8080" {
 		t.Fatalf("Address = %q, want default", config.Address)
+	}
+}
+
+func TestLoadAcceptsPasswordlessValidationConfiguration(t *testing.T) {
+	values := map[string]string{
+		"SHAUTH_PUBLIC_URL":              "https://auth.dev.e6qu.dev",
+		"HYDRA_ADMIN_URL":                "http://hydra:4445",
+		"HYDRA_PUBLIC_INTERNAL_URL":      "http://hydra:4444",
+		"DATABASE_URL":                   "postgres://shauth:password@postgres/shauth",
+		"GITHUB_CLIENT_ID":               "client-id",
+		"GITHUB_CLIENT_SECRET":           "client-secret",
+		"GITHUB_DEVELOPER_TEAM":          "e6qu-org/e6qu-org-members",
+		"GITHUB_ADMIN_TEAM":              "e6qu-org/e6qu-org-admins",
+		"SHAUTH_SES_REGION":              "eu-west-1",
+		"SHAUTH_INVITATION_EMAIL_FROM":   "no-reply@auth.dev.e6qu.dev",
+		"SHAUTH_VALIDATION_USERNAME":     "shauth-validator",
+		"SHAUTH_VALIDATION_EMAIL":        "shauth-validator@example.invalid",
+		"SHAUTH_VALIDATOR_TOKEN":         strings.Repeat("v", 48),
+		"SHAUTH_VALIDATION_STATUS_TOKEN": strings.Repeat("s", 48),
+	}
+	cfg, err := Load(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ValidationUsername != values["SHAUTH_VALIDATION_USERNAME"] || cfg.ValidationEmail != values["SHAUTH_VALIDATION_EMAIL"] || cfg.ValidatorToken != values["SHAUTH_VALIDATOR_TOKEN"] || cfg.ValidationStatusToken != values["SHAUTH_VALIDATION_STATUS_TOKEN"] {
+		t.Fatalf("validation configuration = %#v", cfg)
+	}
+	values["SHAUTH_VALIDATION_STATUS_TOKEN"] = values["SHAUTH_VALIDATOR_TOKEN"]
+	if _, err := Load(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("Load() accepted one credential for validator control and status reading")
+	}
+	values["SHAUTH_VALIDATION_STATUS_TOKEN"] = "short"
+	if _, err := Load(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("Load() accepted a short validation status credential")
+	}
+}
+
+func TestLoadRejectsPartialPasswordlessValidationConfiguration(t *testing.T) {
+	values := map[string]string{
+		"SHAUTH_PUBLIC_URL":            "https://auth.dev.e6qu.dev",
+		"HYDRA_ADMIN_URL":              "http://hydra:4445",
+		"HYDRA_PUBLIC_INTERNAL_URL":    "http://hydra:4444",
+		"DATABASE_URL":                 "postgres://shauth:password@postgres/shauth",
+		"GITHUB_CLIENT_ID":             "client-id",
+		"GITHUB_CLIENT_SECRET":         "client-secret",
+		"GITHUB_DEVELOPER_TEAM":        "e6qu-org/e6qu-org-members",
+		"GITHUB_ADMIN_TEAM":            "e6qu-org/e6qu-org-admins",
+		"SHAUTH_SES_REGION":            "eu-west-1",
+		"SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.dev.e6qu.dev",
+		"SHAUTH_VALIDATION_USERNAME":   "shauth-validator",
+	}
+	if _, err := Load(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("Load() accepted a partial validation configuration")
 	}
 }
 

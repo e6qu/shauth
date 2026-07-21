@@ -163,6 +163,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", server.login)
 	mux.HandleFunc("GET /auth/callback", server.callback)
 	mux.HandleFunc("GET /auth/session", server.session)
+	mux.HandleFunc("GET /auth/validation", server.validation)
 	mux.HandleFunc("GET /auth/signed-out", server.signedOut)
 	mux.HandleFunc("GET /auth/gateway.css", gatewayStyles)
 	mux.HandleFunc("POST /auth/logout", server.logout)
@@ -291,6 +292,24 @@ func (server *Server) session(response http.ResponseWriter, request *http.Reques
 	writeJSON(response, http.StatusOK, map[string]string{"subject": session.Subject, "username": session.Username, "email": session.Email, "role": session.Role})
 }
 
+func (server *Server) validation(response http.ResponseWriter, request *http.Request) {
+	session, _, err := server.currentSession(request)
+	if err != nil {
+		http.Redirect(response, request, "/auth/signed-out", http.StatusSeeOther)
+		return
+	}
+	response.Header().Set("Content-Type", "text/html; charset=utf-8")
+	response.Header().Set("Cache-Control", "no-store")
+	if err := validationPage.Execute(response, struct {
+		Username string
+		Email    string
+		Role     string
+		Release  string
+	}{session.Username, session.Email, session.Role, server.config.ReleaseRevision}); err != nil {
+		log.Printf("render OIDC gateway validation page: %v", err)
+	}
+}
+
 func (server *Server) logout(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
 	if !server.sameOrigin(request) {
@@ -371,6 +390,11 @@ func (server *Server) requireSession(next http.Handler) http.Handler {
 		session, _, err := server.currentSession(request)
 		if err != nil {
 			if request.Method == http.MethodGet || request.Method == http.MethodHead {
+				if _, cookieErr := request.Cookie(server.sessionCookieName()); cookieErr == nil {
+					server.clearCookie(response, server.sessionCookieName())
+					http.Redirect(response, request, "/auth/signed-out", http.StatusFound)
+					return
+				}
 				target := "/auth/login?return_to=" + url.QueryEscape(request.URL.RequestURI())
 				http.Redirect(response, request, target, http.StatusFound)
 				return

@@ -116,7 +116,7 @@ func ValidateSources(sources []Source) error {
 			return fmt.Errorf("monitoring source %q URL must be absolute and contain no user information or fragment", source.Name)
 		}
 		host := strings.Trim(strings.ToLower(endpoint.Hostname()), "[]")
-		if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (host == "localhost" || host == "::1" || net.ParseIP(host).IsLoopback())) {
+		if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && (host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "::1" || net.ParseIP(host).IsLoopback())) {
 			return fmt.Errorf("monitoring source %q URL must use HTTPS unless it targets loopback", source.Name)
 		}
 		if len(source.BearerToken) < 32 || strings.IndexFunc(source.BearerToken, func(character rune) bool {

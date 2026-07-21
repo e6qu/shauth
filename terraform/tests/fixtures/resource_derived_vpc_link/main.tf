@@ -41,6 +41,7 @@ module "shauth" {
   hosted_zone_id                         = "Z0123456789ABC"
   domain_name                            = "auth.test.example.com"
   container_image                        = "ghcr.io/e6qu/shauth@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  validator_container_image              = "ghcr.io/e6qu/shauth-validator@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   github_oauth_secret_arn                = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:github"
   github_client_id                       = "test-client"
   bootstrap_admin_email                  = "admin@test.example.com"

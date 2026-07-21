@@ -26,6 +26,10 @@ locals {
     { name = "SHAUTH_SES_REGION", value = var.region },
     { name = "SHAUTH_INVITATION_EMAIL_FROM", value = var.invitation_email_from },
     { name = "SHAUTH_RUNTIME_CONFIG_VERSION", value = aws_secretsmanager_secret_version.runtime.version_id },
+    { name = "SHAUTH_VALIDATOR_CONFIG_VERSION", value = aws_secretsmanager_secret_version.validator.version_id },
+    { name = "SHAUTH_VALIDATION_STATUS_CONFIG_VERSION", value = aws_secretsmanager_secret_version.validation_status.version_id },
+    { name = "SHAUTH_VALIDATION_USERNAME", value = "shauth-validator" },
+    { name = "SHAUTH_VALIDATION_EMAIL", value = "shauth-validator@${local.invitation_email_domain}" },
     ], local.entra_enabled ? [
     { name = "ENTRA_TENANT_ID", value = var.entra_tenant_id },
     { name = "ENTRA_CLIENT_ID", value = var.entra_client_id },
@@ -36,6 +40,8 @@ locals {
     { name = "SHAUTH_BOOTSTRAP_ADMIN_PASSWORD", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_ADMIN_PASSWORD::" },
     { name = "SHAUTH_BOOTSTRAP_APPS_JSON", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_BOOTSTRAP_APPS_JSON::" },
     { name = "SHAUTH_MONITORING_SOURCES_JSON", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_MONITORING_SOURCES_JSON::" },
+    { name = "SHAUTH_VALIDATOR_TOKEN", valueFrom = "${aws_secretsmanager_secret.validator.arn}:SHAUTH_VALIDATOR_TOKEN::" },
+    { name = "SHAUTH_VALIDATION_STATUS_TOKEN", valueFrom = "${aws_secretsmanager_secret.validation_status.arn}:SHAUTH_VALIDATION_STATUS_TOKEN::" },
     ], local.entra_enabled ? [
     { name = "ENTRA_CLIENT_SECRET", valueFrom = "${var.entra_oauth_secret_arn}:client_secret::" },
   ] : [])
@@ -75,6 +81,19 @@ resource "aws_security_group" "task" {
   tags = local.tags
 }
 
+resource "aws_security_group" "validator" {
+  name_prefix = "${var.name}-validator-"
+  description = "Outbound-only browser validation worker"
+  vpc_id      = var.vpc_id
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = local.tags
+}
+
 resource "aws_security_group" "api_link" {
   count       = local.owns_api_gateway_vpc_link ? 1 : 0
   name_prefix = "${var.name}-api-link-"
@@ -96,6 +115,14 @@ resource "random_password" "bootstrap" {
   length  = 40
   special = false
 }
+resource "random_password" "validator_token" {
+  length  = 64
+  special = false
+}
+resource "random_password" "validation_status_token" {
+  length  = 64
+  special = false
+}
 
 resource "aws_secretsmanager_secret" "runtime" {
   name                    = "${var.name}/runtime"
@@ -110,6 +137,32 @@ resource "aws_secretsmanager_secret_version" "runtime" {
     SHAUTH_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap.result
     SHAUTH_BOOTSTRAP_APPS_JSON      = jsonencode(var.bootstrap_apps)
     SHAUTH_MONITORING_SOURCES_JSON  = jsonencode(var.monitoring_sources)
+  })
+}
+
+resource "aws_secretsmanager_secret" "validator" {
+  name                    = "${var.name}/validator"
+  recovery_window_in_days = 7
+  tags                    = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "validator" {
+  secret_id = aws_secretsmanager_secret.validator.id
+  secret_string = jsonencode({
+    SHAUTH_VALIDATOR_TOKEN = random_password.validator_token.result
+  })
+}
+
+resource "aws_secretsmanager_secret" "validation_status" {
+  name                    = "${var.name}/validation-status-reader"
+  recovery_window_in_days = 7
+  tags                    = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "validation_status" {
+  secret_id = aws_secretsmanager_secret.validation_status.id
+  secret_string = jsonencode({
+    SHAUTH_VALIDATION_STATUS_TOKEN = random_password.validation_status_token.result
   })
 }
 
@@ -156,11 +209,37 @@ resource "aws_iam_role_policy_attachment" "execution" {
   role       = aws_iam_role.execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
+
+resource "aws_iam_role" "validator_execution" {
+  name_prefix        = "${var.name}-validator-execution-"
+  assume_role_policy = data.aws_iam_policy_document.task_assume.json
+  tags               = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "validator_execution" {
+  role       = aws_iam_role.validator_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+data "aws_iam_policy_document" "validator_secrets" {
+  statement {
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [aws_secretsmanager_secret.validator.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "validator_secrets" {
+  name   = "read-validation-secrets"
+  role   = aws_iam_role.validator_execution.id
+  policy = data.aws_iam_policy_document.validator_secrets.json
+}
 data "aws_iam_policy_document" "secrets" {
   statement {
     actions = ["secretsmanager:GetSecretValue"]
     resources = concat([
       aws_secretsmanager_secret.runtime.arn,
+      aws_secretsmanager_secret.validator.arn,
+      aws_secretsmanager_secret.validation_status.arn,
       var.github_oauth_secret_arn,
       var.database_url_secret_arn,
       var.hydra_database_url_secret_arn,
@@ -235,7 +314,7 @@ resource "aws_ecs_task_definition" "this" {
   container_definitions = jsonencode([
     { name = "shauth-migrate", image = var.container_image, essential = false, entryPoint = ["/shauth-migrate"], environment = [{ name = "SHAUTH_MIGRATIONS_DIR", value = "/migrations" }], secrets = [{ name = "DATABASE_URL", valueFrom = var.database_url_secret_arn }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "migrate" } } },
     { name = "hydra-migrate", image = var.container_image, essential = false, entryPoint = ["/hydra"], command = ["migrate", "sql", "up", "--read-from-env", "--yes"], dependsOn = [{ containerName = "shauth-migrate", condition = "SUCCESS" }], secrets = [{ name = "DSN", valueFrom = var.hydra_database_url_secret_arn }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra-migrate" } } },
-    { name = "hydra", image = var.container_image, essential = true, entryPoint = ["/hydra"], command = ["serve", "all"], dependsOn = [{ containerName = "hydra-migrate", condition = "SUCCESS" }], environment = [{ name = "URLS_SELF_ISSUER", value = local.public_url }, { name = "URLS_LOGIN", value = "${local.public_url}/oauth/login" }, { name = "URLS_CONSENT", value = "${local.public_url}/oauth/consent" }, { name = "URLS_LOGOUT", value = "${local.public_url}/oauth/logout" }, { name = "URLS_POST_LOGOUT_REDIRECT", value = "${local.public_url}/" }, { name = "URLS_ERROR", value = "${local.public_url}/oauth/error" }, { name = "TTL_ACCESS_TOKEN", value = "15m" }, { name = "TTL_REFRESH_TOKEN", value = "720h" }, { name = "TTL_ID_TOKEN", value = "15m" }, { name = "TTL_AUTH_CODE", value = "10m" }], secrets = [{ name = "DSN", valueFrom = var.hydra_database_url_secret_arn }, { name = "SECRETS_SYSTEM_0", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_SYSTEM_SECRET::" }], portMappings = [{ containerPort = 4444, protocol = "tcp" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra" } } },
+    { name = "hydra", image = var.container_image, essential = true, entryPoint = ["/hydra"], command = ["serve", "all"], dependsOn = [{ containerName = "hydra-migrate", condition = "SUCCESS" }], environment = [{ name = "URLS_SELF_ISSUER", value = local.public_url }, { name = "URLS_LOGIN", value = "${local.public_url}/oauth/login" }, { name = "URLS_CONSENT", value = "${local.public_url}/oauth/consent" }, { name = "URLS_LOGOUT", value = "${local.public_url}/oauth/logout" }, { name = "URLS_POST_LOGOUT_REDIRECT", value = "${local.public_url}/signed-out" }, { name = "URLS_ERROR", value = "${local.public_url}/oauth/error" }, { name = "TTL_ACCESS_TOKEN", value = "15m" }, { name = "TTL_REFRESH_TOKEN", value = "720h" }, { name = "TTL_ID_TOKEN", value = "15m" }, { name = "TTL_AUTH_CODE", value = "10m" }], secrets = [{ name = "DSN", valueFrom = var.hydra_database_url_secret_arn }, { name = "SECRETS_SYSTEM_0", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_SYSTEM_SECRET::" }], portMappings = [{ containerPort = 4444, protocol = "tcp" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra" } } },
     { name = "shauth", image = var.container_image, essential = true, dependsOn = [{ containerName = "hydra", condition = "START" }], portMappings = [{ containerPort = 8080, protocol = "tcp" }], healthCheck = { command = ["CMD", "/shauth-healthcheck"], interval = 30, timeout = 5, retries = 3, startPeriod = 30 }, environment = local.shauth_environment, secrets = local.shauth_secrets, logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "shauth" } } }
   ])
   tags = local.tags
@@ -260,6 +339,57 @@ resource "aws_ecs_service" "this" {
   wait_for_steady_state = true
   lifecycle { ignore_changes = [desired_count] }
   tags = local.tags
+}
+
+resource "aws_ecs_task_definition" "validator" {
+  family                   = "${var.name}-validator"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 512
+  memory                   = 1024
+  execution_role_arn       = aws_iam_role.validator_execution.arn
+  runtime_platform {
+    cpu_architecture        = "ARM64"
+    operating_system_family = "LINUX"
+  }
+  container_definitions = jsonencode([{
+    name      = "shauth-validator"
+    image     = var.validator_container_image
+    essential = true
+    environment = [
+      { name = "SHAUTH_URL", value = local.public_url },
+      { name = "SHAUTH_VALIDATION_USERNAME", value = "shauth-validator" },
+      { name = "SHAUTH_VALIDATION_EMAIL", value = "shauth-validator@${local.invitation_email_domain}" },
+      { name = "SHAUTH_VALIDATOR_CONFIG_VERSION", value = aws_secretsmanager_secret_version.validator.version_id },
+    ]
+    secrets = [
+      { name = "SHAUTH_VALIDATOR_TOKEN", valueFrom = "${aws_secretsmanager_secret.validator.arn}:SHAUTH_VALIDATOR_TOKEN::" },
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.this.name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "validator"
+      }
+    }
+  }])
+  tags = local.tags
+}
+
+resource "aws_ecs_service" "validator" {
+  name            = "${var.name}-validator"
+  cluster         = var.ecs_cluster_arn
+  task_definition = aws_ecs_task_definition.validator.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+  network_configuration {
+    subnets          = var.private_subnet_ids
+    security_groups  = [aws_security_group.validator.id]
+    assign_public_ip = false
+  }
+  wait_for_steady_state = true
+  tags                  = local.tags
 }
 
 resource "aws_apigatewayv2_vpc_link" "this" {

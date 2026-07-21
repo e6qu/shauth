@@ -5,7 +5,8 @@
   "scripts": {
     "test:browser": "node scripts/test-browser-oidc.mjs",
     "test:gateway": "node scripts/test-gateway-oidc.mjs",
-    "test:oidc-unverified": "node scripts/test-unverified-oidc.mjs"
+    "test:oidc-unverified": "node scripts/test-unverified-oidc.mjs",
+    "test:validator-security": "node --test validator/security.test.mjs"
   },
   "allowScripts": {
     "fsevents@2.3.2": true

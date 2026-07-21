@@ -32,9 +32,24 @@ func main() {
 	if _, err := store.EnsureBootstrapAdmin(context.Background(), cfg.BootstrapAdminEmail, cfg.BootstrapAdminPassword); err != nil {
 		log.Fatalf("bootstrap administrator: %v", err)
 	}
+	if _, err := store.EnsureValidationUser(context.Background(), cfg.ValidationUsername, cfg.ValidationEmail); err != nil {
+		log.Fatalf("bootstrap validation account: %v", err)
+	}
 	if err := store.EnsureInitialGitHubRoleMappings(context.Background(), cfg.GitHubDeveloperTeam, cfg.GitHubAdminTeam); err != nil {
 		log.Fatalf("bootstrap GitHub role mappings: %v", err)
 	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for observedAt := range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			err := store.ExpireAbandonedAppValidation(ctx, observedAt)
+			cancel()
+			if err != nil {
+				log.Printf("expire abandoned application validation: %v", err)
+			}
+		}
+	}()
 	serverApp, err := app.New(cfg, store)
 	if err != nil {
 		log.Fatal(err)

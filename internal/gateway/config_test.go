@@ -18,6 +18,7 @@ func TestLoadRequiresCompleteSecureCoordinates(t *testing.T) {
 		"OIDC_GATEWAY_UPSTREAM_URL":    "http://127.0.0.1:7681",
 		"OIDC_GATEWAY_POST_LOGOUT_URL": "https://console.example.test/auth/signed-out",
 		"OIDC_GATEWAY_COOKIE_SECRET":   "abcdef0123456789abcdef0123456789",
+		"APPLICATION_RELEASE_REVISION": "0123456789ab",
 		"DATABASE_URL":                 "postgres://localhost/shauth",
 	}
 	getenv := func(name string) string { return base[name] }
@@ -43,9 +44,24 @@ func TestLoadRequiresCompleteSecureCoordinates(t *testing.T) {
 	if _, err := Load(getenv); err != nil {
 		t.Fatalf("explicit loopback insecure-cookie mode was rejected: %v", err)
 	}
+	base["OIDC_GATEWAY_PUBLIC_URL"] = "http://127.0.0.2:4180"
+	base["OIDC_GATEWAY_POST_LOGOUT_URL"] = "http://127.0.0.2:4180/auth/signed-out"
+	if _, err := Load(getenv); err != nil {
+		t.Fatalf("IPv4 loopback range was rejected: %v", err)
+	}
+	base["OIDC_GATEWAY_PUBLIC_URL"] = "http://app.localhost:4180"
+	base["OIDC_GATEWAY_POST_LOGOUT_URL"] = "http://app.localhost:4180/auth/signed-out"
+	if _, err := Load(getenv); err != nil {
+		t.Fatalf("localhost subdomain was rejected: %v", err)
+	}
 	base["OIDC_GATEWAY_SESSION_MAX_AGE"] = "4m"
 	if _, err := Load(getenv); err == nil {
 		t.Fatal("too-short application session lifetime was accepted")
+	}
+	base["OIDC_GATEWAY_SESSION_MAX_AGE"] = "8h"
+	base["APPLICATION_RELEASE_REVISION"] = "main"
+	if _, err := Load(getenv); err == nil {
+		t.Fatal("mutable application release revision was accepted")
 	}
 }
 
@@ -91,6 +107,7 @@ func TestLoadRejectsProviderOriginAsPostLogoutDestination(t *testing.T) {
 		"OIDC_GATEWAY_UPSTREAM_URL":    "http://127.0.0.1:7681",
 		"OIDC_GATEWAY_POST_LOGOUT_URL": "https://auth.example.test/apps",
 		"OIDC_GATEWAY_COOKIE_SECRET":   "abcdef0123456789abcdef0123456789",
+		"APPLICATION_RELEASE_REVISION": "0123456789ab",
 		"DATABASE_URL":                 "postgres://localhost/shauth",
 	}
 	if _, err := Load(func(name string) string { return values[name] }); err == nil {

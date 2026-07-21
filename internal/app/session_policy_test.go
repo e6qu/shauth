@@ -3,14 +3,10 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
-	"io"
 	"math"
-	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -52,38 +48,6 @@ func TestNextHydraPageToken(t *testing.T) {
 	}
 	if token != "client-1000" {
 		t.Fatalf("next page token = %q", token)
-	}
-}
-
-func TestListHydraClientsReadsEveryPage(t *testing.T) {
-	requests := 0
-	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		requests++
-		if request.URL.Query().Get("page_size") != "1000" {
-			t.Fatalf("page_size = %q", request.URL.Query().Get("page_size"))
-		}
-		header := make(http.Header)
-		body := `[{"client_id":"first"}]`
-		if requests == 1 {
-			header.Set("Link", `</admin/clients?page_size=1000&page_token=second>; rel="next"`)
-		} else {
-			if token := request.URL.Query().Get("page_token"); token != "second" {
-				t.Fatalf("page_token = %q", token)
-			}
-			body = `[{"client_id":"second"}]`
-		}
-		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
-	})}
-	adminURL, err := url.Parse("http://hydra.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	clients, err := listHydraClients[oidcClient](context.Background(), client, adminURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(clients) != 2 || clients[0].ID != "first" || clients[1].ID != "second" {
-		t.Fatalf("clients = %#v", clients)
 	}
 }
 

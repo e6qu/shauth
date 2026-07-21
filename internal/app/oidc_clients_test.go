@@ -90,9 +90,9 @@ func TestOIDCClientInputAllowsLoopbackHTTP(t *testing.T) {
 		ID:                     "local-client",
 		Name:                   "Local client",
 		Secret:                 "0123456789abcdef0123456789abcdef",
-		RedirectURIs:           []string{"http://127.0.0.1:8080/callback", "http://127.0.0.1:8080/second-callback"},
-		PostLogoutRedirectURIs: []string{"http://127.0.0.1:8080/"},
-		BackChannelLogoutURI:   "http://127.0.0.1:8080/backchannel-logout",
+		RedirectURIs:           []string{"http://app.localhost:8080/callback", "http://app.localhost:8080/second-callback"},
+		PostLogoutRedirectURIs: []string{"http://app.localhost:8080/"},
+		BackChannelLogoutURI:   "http://app.localhost:8080/backchannel-logout",
 	}
 	if err := input.validate(); err != nil {
 		t.Fatalf("validate loopback client: %v", err)
@@ -180,20 +180,53 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 	}
 }
 
-func TestManagedAppAndOIDCClientUseOneOrigin(t *testing.T) {
-	app := identity.ManagedApp{LaunchURL: "https://app.example.test/ui", OIDCClientID: "app-client"}
+func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
+	app := identity.ManagedApp{
+		LaunchURL:    "https://app.example.test/ui",
+		OIDCClientID: "app-client",
+		SignedOutURL: "https://app.example.test/auth/signed-out",
+	}
 	client := oidcClient{
 		ID:                     "app-client",
 		RedirectURIs:           []string{"https://app.example.test/auth/callback"},
-		PostLogoutRedirectURIs: []string{"https://app.example.test/auth/signed-out"},
+		PostLogoutRedirectURIs: []string{"https://app.example.test/other-signed-out", app.SignedOutURL},
 		BackChannelLogoutURI:   "https://app.example.test/auth/backchannel-logout",
 	}
 	if err := validateManagedAppClient(app, client); err != nil {
 		t.Fatalf("matching registration rejected: %v", err)
 	}
-	app.LaunchURL = "https://other.example.test/ui"
-	if err := validateManagedAppClient(app, client); err == nil {
-		t.Fatal("managed app origin mismatch was accepted")
+
+	for name, mutate := range map[string]func(*identity.ManagedApp, *oidcClient){
+		"missing client": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.ID = ""
+		},
+		"application origin mismatch": func(app *identity.ManagedApp, _ *oidcClient) {
+			app.LaunchURL = "https://other.example.test/ui"
+		},
+		"missing post-logout redirect": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = nil
+		},
+		"same-origin wrong path": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/other-signed-out"}
+		},
+		"trailing slash mismatch": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/signed-out/"}
+		},
+		"path normalization mismatch": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = []string{"https://app.example.test/auth/../auth/signed-out"}
+		},
+		"host spelling mismatch": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.PostLogoutRedirectURIs = []string{"https://APP.example.test/auth/signed-out"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changedApp := app
+			changedClient := client
+			mutate(&changedApp, &changedClient)
+			if err := validateManagedAppClient(changedApp, changedClient); err == nil {
+				t.Fatal("invalid managed app and OpenID Connect client registration was accepted")
+			}
+		})
 	}
 }
 
