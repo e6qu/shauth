@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { chromium } from "playwright";
+import { applicationSignOutControl, assertApplicationIdentity } from "./application-ui.mjs";
 import { waitForApplicationReady, waitForRegisteredURL } from "./readiness.mjs";
 import { boundedFailureWithLatestTrace, installCredentialBoundary, redactCredentialMaterial } from "./security.mjs";
 
@@ -15,7 +16,7 @@ const job = JSON.parse(input);
 const username = process.env.SHAUTH_VALIDATION_USERNAME;
 const email = process.env.SHAUTH_VALIDATION_EMAIL;
 if (!username || !email) throw new Error("validation account identity is unavailable");
-if (!Array.isArray(job.bootstrap_urls) || job.bootstrap_urls.length !== 2) throw new Error("validation browser bootstraps are unavailable");
+if (!Array.isArray(job.bootstrap_urls) || job.bootstrap_urls.length !== 3) throw new Error("validation browser bootstraps are unavailable");
 const expectedLogoutBridgeURL = new URL("/auth/shauth/logout/complete", job.launch_url).toString();
 if (job.logout_bridge_url !== expectedLogoutBridgeURL) throw new Error("application validation logout bridge is invalid");
 if (job.witness) {
@@ -48,11 +49,6 @@ function formatFailure(stage, detail, trace) {
 function signInControl(page) {
   return page.getByRole("link", { name: "Sign in with Shauth", exact: true })
     .or(page.getByRole("button", { name: "Sign in with Shauth", exact: true })).first();
-}
-
-function signOutControl(page) {
-  return page.getByRole("button", { name: "Sign out", exact: true })
-    .or(page.getByRole("link", { name: "Sign out", exact: true })).first();
 }
 
 function assertAuthorizationClient(providerTrace, start, expectedClientID, failure) {
@@ -95,6 +91,14 @@ async function assertValidationIdentity(page, appSlug) {
       throw new Error(`${appSlug} ${testID} did not match its validation contract`);
     }
   }
+}
+
+async function assertLaunchUI(page, app) {
+  await page.goto(app.launch_url, { waitUntil: "domcontentloaded" });
+  if (!sameOrigin(page.url(), app.launch_url)) throw new Error(`${app.app_slug} launch UI escaped its registered origin`);
+  await waitForApplicationReady(page, app.launch_url, `${app.app_slug} launch UI did not become browser-ready`);
+  await assertApplicationIdentity(page, username, app.app_slug);
+  return applicationSignOutControl(page, username, app.app_slug);
 }
 
 async function completeAuthorizationAtShauth(page, authorizationURL) {
@@ -170,7 +174,7 @@ async function establishWitnessSession(context, providerTrace) {
   await witnessPage.goto(job.witness.validation_url, { waitUntil: "domcontentloaded" });
   assertExactCoordinate(witnessPage, job.witness.validation_url, `${job.witness.app_slug} witness did not expose its exact authenticated validation URL`);
   await assertValidationIdentity(witnessPage, job.witness.app_slug);
-  await signOutControl(witnessPage).waitFor({ state: "visible", timeout: 30_000 });
+  await assertLaunchUI(witnessPage, job.witness);
   return witnessPage;
 }
 
@@ -212,12 +216,12 @@ async function assertAppSignedInAndGlobalLogout(page, context, providerTrace) {
   await page.goto(job.validation_url, { waitUntil: "domcontentloaded" });
   assertExactCoordinate(page, job.validation_url, `${job.app_slug} did not expose its exact authenticated validation URL`);
   await assertValidationIdentity(page, job.app_slug);
-  await signOutControl(page).waitFor({ state: "visible", timeout: 30_000 });
+  let launchSignOut = await assertLaunchUI(page, job);
   const witnessPage = await establishWitnessSession(context, providerTrace);
   validationStage = `sign out ${job.app_slug} through Shauth`;
   const logoutCount = providerTrace.logout;
   const logoutBridgeCount = providerTrace.logoutBridgeURLs.length;
-  await signOutControl(page).click();
+  await launchSignOut.click();
   await waitForRegisteredURL(page, (value) => value.toString() === job.signed_out_url, `${job.app_slug} global logout did not return to its exact local signed-out page`);
   if (providerTrace.logout <= logoutCount) throw new Error(`${job.app_slug} sign out did not use Shauth global logout`);
   const traversedLogoutBridges = providerTrace.logoutBridgeURLs.slice(logoutBridgeCount);
@@ -263,7 +267,7 @@ async function assertAppSignedInAndGlobalLogout(page, context, providerTrace) {
   await page.goto(job.validation_url, { waitUntil: "domcontentloaded" });
   assertExactCoordinate(page, job.validation_url, `${job.app_slug} did not restore its authenticated validation page`);
   await assertValidationIdentity(page, job.app_slug);
-  await signOutControl(page).waitFor({ state: "visible", timeout: 30_000 });
+  await assertLaunchUI(page, job);
   const providerLogoutWitnessPage = await establishWitnessSession(context, providerTrace);
   validationStage = `sign out at Shauth with an active ${job.app_slug} session`;
   const providerLogoutPage = await context.newPage();
@@ -287,6 +291,38 @@ async function assertAppSignedInAndGlobalLogout(page, context, providerTrace) {
   await signInControl(page).waitFor({ state: "visible", timeout: 30_000 });
   await assertWitnessRevoked(providerLogoutWitnessPage);
   await providerLogoutWitnessPage.close();
+
+  validationStage = `reauthenticate ${job.app_slug} after Shauth provider logout`;
+  const providerReauthenticationCount = providerTrace.authorizationClientIDs.length;
+  await signInControl(page).click();
+  await waitForShauthLogin(page);
+  const providerReauthenticationURL = page.url();
+  assertAuthorizationClient(providerTrace, providerReauthenticationCount, job.oidc_client_id, `${job.app_slug} provider-logout reauthentication used the wrong Shauth registration`);
+  await consumeBootstrap(page, "/");
+  await completeAuthorizationAtShauth(page, providerReauthenticationURL);
+  await page.goto(job.validation_url, { waitUntil: "domcontentloaded" });
+  assertExactCoordinate(page, job.validation_url, `${job.app_slug} did not restore its validation identity after provider logout`);
+  await assertValidationIdentity(page, job.app_slug);
+  launchSignOut = await assertLaunchUI(page, job);
+  const repeatWitnessPage = await establishWitnessSession(context, providerTrace);
+
+  validationStage = `repeat ${job.app_slug} global revocation after provider reauthentication`;
+  const repeatLogoutCount = providerTrace.logout;
+  const repeatBridgeCount = providerTrace.logoutBridgeURLs.length;
+  await launchSignOut.click();
+  await waitForRegisteredURL(page, (value) => value.toString() === job.signed_out_url, `${job.app_slug} repeated global logout did not return to its exact local signed-out page`);
+  if (providerTrace.logout <= repeatLogoutCount) throw new Error(`${job.app_slug} repeated sign out did not use Shauth global logout`);
+  const repeatedBridges = providerTrace.logoutBridgeURLs.slice(repeatBridgeCount);
+  if (repeatedBridges.length !== 1 || repeatedBridges[0] !== job.logout_bridge_url) {
+    throw new Error(`${job.app_slug} repeated sign out did not traverse its exact logout bridge once`);
+  }
+  await signInControl(page).waitFor({ state: "visible", timeout: 30_000 });
+  await assertWitnessRevoked(repeatWitnessPage);
+  await repeatWitnessPage.close();
+  const repeatedProviderPage = await context.newPage();
+  await repeatedProviderPage.goto(`${job.shauth_url.replace(/\/$/, "")}/apps`, { waitUntil: "domcontentloaded" });
+  await waitForShauthLogin(repeatedProviderPage);
+  await repeatedProviderPage.close();
 }
 
 const browser = await chromium.launch({ headless: true });

@@ -94,7 +94,7 @@ func main() {
 			}
 			continue
 		}
-		nextPaths := []string{"/", "/"}
+		nextPaths := []string{"/", "/", "/"}
 		if claimed.Direction == "from_shauth" {
 			nextPaths[0] = "/apps"
 		}
@@ -359,7 +359,7 @@ func validateJob(baseURL string, claimed job) error {
 }
 
 func validateBootstrapURLs(baseURL string, bootstrapURLs []string) error {
-	if len(bootstrapURLs) != 2 {
+	if len(bootstrapURLs) != 3 {
 		return fmt.Errorf("Shauth returned an invalid number of browser bootstraps")
 	}
 	provider, err := url.Parse(baseURL)

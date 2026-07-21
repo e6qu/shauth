@@ -84,8 +84,10 @@ enforce that role server-side.
 The signed-in Apps page is a catalog of real deployed services. Administrators
 register an app only after its Shauth OIDC client, launch URL, published health
 endpoint, immutable release revision, authenticated validation URL, and local
-signed-out URL exist. The validation URL exposes an accessible `Sign out`
-control and exact `validation-username`, `validation-email`,
+signed-out URL exist. The normal launch UI exposes the visible authenticated
+identity as `data-shauth-user="<username>"` and its real logout action as
+`data-shauth-sign-out`; the identity control may reveal the logout action when
+clicked. The separate validation URL exposes exact `validation-username`, `validation-email`,
 `validation-role`, and `validation-release` fields. The
 signed-out URL persists across reloads and exposes an accessible `Sign in with
 Shauth` control. Both coordinates use the app's own origin. Release revisions
@@ -93,7 +95,7 @@ are immutable 12–64 character lowercase hexadecimal commits or `sha256`
 digests; moving labels such as `main` and `latest` are rejected.
 
 Shauth automatically queues two real Chromium checks when an app is registered
-or any of its release or endpoint coordinates change. The first enters through Shauth's Apps catalog;
+or any of its release, endpoint, or OpenID Connect registration coordinates change. The first enters through Shauth's Apps catalog;
 the second enters through the app's public launch URL. Both checks authenticate,
 establish a second independent relying-party session through silent SSO, verify
 the app-owned signed-in page, perform application-initiated global OIDC logout,
@@ -101,7 +103,9 @@ verify the exact app-local signed-out destination and its reload behavior, sign
 out through the exact app-origin logout bridge, reject hostile bridge queries
 and completion replay, sign in again, establish another witness session, then perform provider-initiated
 logout from Shauth and verify that both relying parties and the Shauth browser
-session were revoked. A deployment
+session were revoked. The validator then signs in again after provider logout
+and repeats application-initiated global revocation, proving that logout did
+not leave a permanently broken or partially authenticated account. A deployment
 without a second registered app on a distinct origin and OIDC client reports a
 red result because global SSO logout cannot truthfully be proven in isolation.
 The Apps and administration pages report `🟢 Passed`, `🔴 Failed`, or
@@ -193,7 +197,8 @@ without coupling Shauth to the app's deployment platform.
 
 Each validation page exposes the exact authenticated username, email,
 normalized role, and immutable release revision through documented
-`data-testid` fields. The passwordless validation identity is entered only by
+`data-testid` fields, while the product launch page remains authoritative for
+the user-visible identity and logout controls. The passwordless validation identity is entered only by
 short-lived, single-use Shauth browser bootstraps. A distinct read-only bearer
 credential protects `GET /api/v1/apps/validations`, the closed machine-readable
 status contract used by post-deployment acceptance gates.

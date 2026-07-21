@@ -4,27 +4,32 @@ package identity
 
 import "testing"
 
+const testOIDCContractHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestValidateManagedApp(t *testing.T) {
 	valid := ManagedApp{
-		Slug:            "bleephub-dev",
-		Name:            "Bleephub",
-		Description:     "A real deployed service.",
-		LaunchURL:       "https://bleephub.dev.e6qu.dev",
-		OIDCClientID:    "bleephub-dev",
-		HealthURL:       "https://bleephub.dev.e6qu.dev/health",
-		MonitoringURL:   "https://bleephub.dev.e6qu.dev/monitoring",
-		ValidationURL:   "https://bleephub.dev.e6qu.dev/ui/",
-		SignedOutURL:    "https://bleephub.dev.e6qu.dev/ui/signed-out",
-		ReleaseRevision: "0123456789ab",
+		Slug:             "bleephub-dev",
+		Name:             "Bleephub",
+		Description:      "A real deployed service.",
+		LaunchURL:        "https://bleephub.dev.e6qu.dev",
+		OIDCClientID:     "bleephub-dev",
+		OIDCContractHash: testOIDCContractHash,
+		HealthURL:        "https://bleephub.dev.e6qu.dev/health",
+		MonitoringURL:    "https://bleephub.dev.e6qu.dev/monitoring",
+		ValidationURL:    "https://bleephub.dev.e6qu.dev/ui/",
+		SignedOutURL:     "https://bleephub.dev.e6qu.dev/ui/signed-out",
+		ReleaseRevision:  "0123456789ab",
 	}
 	if err := ValidateManagedApp(valid); err != nil {
 		t.Fatalf("ValidateManagedApp(valid) error = %v", err)
 	}
 
 	for name, app := range map[string]ManagedApp{
-		"uppercase slug":     withManagedApp(valid, func(app *ManagedApp) { app.Slug = "Bleephub" }),
-		"invalid launch URL": withManagedApp(valid, func(app *ManagedApp) { app.LaunchURL = "http://bleephub.dev.e6qu.dev" }),
-		"invalid health URL": withManagedApp(valid, func(app *ManagedApp) { app.HealthURL = "http://bleephub.dev.e6qu.dev/health" }),
+		"uppercase slug":             withManagedApp(valid, func(app *ManagedApp) { app.Slug = "Bleephub" }),
+		"missing OIDC contract hash": withManagedApp(valid, func(app *ManagedApp) { app.OIDCContractHash = "" }),
+		"invalid OIDC contract hash": withManagedApp(valid, func(app *ManagedApp) { app.OIDCContractHash = "ABC" }),
+		"invalid launch URL":         withManagedApp(valid, func(app *ManagedApp) { app.LaunchURL = "http://bleephub.dev.e6qu.dev" }),
+		"invalid health URL":         withManagedApp(valid, func(app *ManagedApp) { app.HealthURL = "http://bleephub.dev.e6qu.dev/health" }),
 		"health origin mismatch": withManagedApp(valid, func(app *ManagedApp) {
 			app.HealthURL = "https://health.example.test/health"
 		}),
@@ -57,15 +62,16 @@ func TestValidateManagedApp(t *testing.T) {
 
 func TestValidateManagedAppAllowsLoopbackHTTPForLocalIntegration(t *testing.T) {
 	app := ManagedApp{
-		Slug:            "local-app",
-		Name:            "Local app",
-		Description:     "A real local integration service.",
-		LaunchURL:       "http://gateway.localhost:5556/",
-		OIDCClientID:    "local-app",
-		HealthURL:       "http://gateway.localhost:5556/healthz",
-		ValidationURL:   "http://gateway.localhost:5556/me",
-		SignedOutURL:    "http://gateway.localhost:5556/auth/signed-out",
-		ReleaseRevision: "0123456789ab",
+		Slug:             "local-app",
+		Name:             "Local app",
+		Description:      "A real local integration service.",
+		LaunchURL:        "http://gateway.localhost:5556/",
+		OIDCClientID:     "local-app",
+		OIDCContractHash: testOIDCContractHash,
+		HealthURL:        "http://gateway.localhost:5556/healthz",
+		ValidationURL:    "http://gateway.localhost:5556/me",
+		SignedOutURL:     "http://gateway.localhost:5556/auth/signed-out",
+		ReleaseRevision:  "0123456789ab",
 	}
 	if err := ValidateManagedApp(app); err != nil {
 		t.Fatalf("ValidateManagedApp(loopback) error = %v", err)
@@ -76,17 +82,21 @@ func TestManagedAppValidationContractDetectsEveryMaterialUpdate(t *testing.T) {
 	base := ManagedApp{
 		Name: "Bleephub", Description: "Git hosting", LaunchURL: "https://bleephub.example.test/",
 		OIDCClientID: "bleephub", HealthURL: "https://bleephub.example.test/health",
-		MonitoringURL: "https://bleephub.example.test/monitoring", ValidationURL: "https://bleephub.example.test/me",
+		OIDCContractHash: testOIDCContractHash,
+		MonitoringURL:    "https://bleephub.example.test/monitoring", ValidationURL: "https://bleephub.example.test/me",
 		SignedOutURL: "https://bleephub.example.test/signed-out", ReleaseRevision: "0123456789ab",
 	}
 	if !sameManagedAppValidationContract(base, base) {
 		t.Fatal("identical validation contracts differed")
 	}
 	for name, mutate := range map[string]func(*ManagedApp){
-		"name":             func(app *ManagedApp) { app.Name = "Bleephub renamed" },
-		"description":      func(app *ManagedApp) { app.Description = "Updated" },
-		"launch URL":       func(app *ManagedApp) { app.LaunchURL += "ui" },
-		"OIDC client":      func(app *ManagedApp) { app.OIDCClientID += "-v2" },
+		"name":        func(app *ManagedApp) { app.Name = "Bleephub renamed" },
+		"description": func(app *ManagedApp) { app.Description = "Updated" },
+		"launch URL":  func(app *ManagedApp) { app.LaunchURL += "ui" },
+		"OIDC client": func(app *ManagedApp) { app.OIDCClientID += "-v2" },
+		"OIDC registration": func(app *ManagedApp) {
+			app.OIDCContractHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		},
 		"health URL":       func(app *ManagedApp) { app.HealthURL += "z" },
 		"monitoring URL":   func(app *ManagedApp) { app.MonitoringURL += "/details" },
 		"validation URL":   func(app *ManagedApp) { app.ValidationURL += "/details" },
@@ -104,7 +114,7 @@ func TestManagedAppValidationContractDetectsEveryMaterialUpdate(t *testing.T) {
 			}
 		})
 	}
-	witness := ManagedApp{ID: "witness-id", Slug: "sharecrop", Name: "Sharecrop", OIDCClientID: "sharecrop", LaunchURL: "https://sharecrop.example.test/", ValidationURL: "https://sharecrop.example.test/me", SignedOutURL: "https://sharecrop.example.test/signed-out", ReleaseRevision: "0123456789ab"}
+	witness := ManagedApp{ID: "witness-id", Slug: "sharecrop", Name: "Sharecrop", OIDCClientID: "sharecrop", OIDCContractHash: testOIDCContractHash, LaunchURL: "https://sharecrop.example.test/", ValidationURL: "https://sharecrop.example.test/me", SignedOutURL: "https://sharecrop.example.test/signed-out", ReleaseRevision: "0123456789ab"}
 	if managedAppValidationContractHash(base, nil) == managedAppValidationContractHash(base, &witness) {
 		t.Fatal("adding a global logout witness retained the queue fingerprint")
 	}
@@ -112,6 +122,11 @@ func TestManagedAppValidationContractDetectsEveryMaterialUpdate(t *testing.T) {
 	updatedWitness.ReleaseRevision = "abcdef012345"
 	if managedAppValidationContractHash(base, &witness) == managedAppValidationContractHash(base, &updatedWitness) {
 		t.Fatal("witness deployment update retained the queue fingerprint")
+	}
+	updatedWitness = witness
+	updatedWitness.OIDCContractHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if managedAppValidationContractHash(base, &witness) == managedAppValidationContractHash(base, &updatedWitness) {
+		t.Fatal("witness OIDC registration update retained the queue fingerprint")
 	}
 }
 

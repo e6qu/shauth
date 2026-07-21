@@ -31,6 +31,7 @@ const (
 
 var immutableReleaseRevisionPattern = regexp.MustCompile(`^([0-9a-f]{12,64}|sha256:[0-9a-f]{64})$`)
 var browserBootstrapTokenPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var oidcContractHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const validationBrowserBootstrapLifetime = 10 * time.Minute
 const LogoutCorrelationLifetime = 2 * time.Minute
@@ -87,18 +88,19 @@ type GitHubRoleMapping struct {
 	CreatedAt time.Time
 }
 type ManagedApp struct {
-	ID              string
-	Slug            string
-	Name            string
-	Description     string
-	LaunchURL       string
-	OIDCClientID    string
-	HealthURL       string
-	MonitoringURL   string
-	ValidationURL   string
-	SignedOutURL    string
-	ReleaseRevision string
-	CreatedAt       time.Time
+	ID               string
+	Slug             string
+	Name             string
+	Description      string
+	LaunchURL        string
+	OIDCClientID     string
+	OIDCContractHash string
+	HealthURL        string
+	MonitoringURL    string
+	ValidationURL    string
+	SignedOutURL     string
+	ReleaseRevision  string
+	CreatedAt        time.Time
 }
 
 type AppValidationRun struct {
@@ -309,7 +311,7 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 		return ManagedApp{}, fmt.Errorf("begin create managed app: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	err = tx.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11,now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL, app.ValidationURL, app.SignedOutURL, app.ReleaseRevision).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
+	err = tx.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10,$11,$12,now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.OIDCContractHash, app.HealthURL, app.MonitoringURL, app.ValidationURL, app.SignedOutURL, app.ReleaseRevision).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("create managed app: %w", err)
 	}
@@ -335,27 +337,28 @@ func (s *Store) ReconcileBootstrapManagedApp(ctx context.Context, app ManagedApp
 	}
 	defer tx.Rollback(ctx)
 	var previous ManagedApp
-	previousErr := tx.QueryRow(ctx, `SELECT name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision FROM managed_apps WHERE slug=$1 FOR UPDATE`, app.Slug).
-		Scan(&previous.Name, &previous.Description, &previous.LaunchURL, &previous.OIDCClientID, &previous.HealthURL, &previous.MonitoringURL, &previous.ValidationURL, &previous.SignedOutURL, &previous.ReleaseRevision)
+	previousErr := tx.QueryRow(ctx, `SELECT name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision FROM managed_apps WHERE slug=$1 FOR UPDATE`, app.Slug).
+		Scan(&previous.Name, &previous.Description, &previous.LaunchURL, &previous.OIDCClientID, &previous.OIDCContractHash, &previous.HealthURL, &previous.MonitoringURL, &previous.ValidationURL, &previous.SignedOutURL, &previous.ReleaseRevision)
 	if previousErr != nil && !errors.Is(previousErr, pgx.ErrNoRows) {
 		return ManagedApp{}, fmt.Errorf("read bootstrap managed app revision: %w", previousErr)
 	}
 	err = tx.QueryRow(ctx, `
-		INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at)
-		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11,now())
+		INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at)
+		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10,$11,$12,now())
 		ON CONFLICT (slug) DO UPDATE SET
 			name=EXCLUDED.name,
 			description=EXCLUDED.description,
 			launch_url=EXCLUDED.launch_url,
+			oidc_contract_hash=EXCLUDED.oidc_contract_hash,
 			health_url=EXCLUDED.health_url,
 			monitoring_url=EXCLUDED.monitoring_url,
 			validation_url=EXCLUDED.validation_url,
 			signed_out_url=EXCLUDED.signed_out_url,
 			release_revision=EXCLUDED.release_revision
 		WHERE managed_apps.oidc_client_id=EXCLUDED.oidc_client_id
-		RETURNING id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at`,
-		randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.HealthURL, app.MonitoringURL, app.ValidationURL, app.SignedOutURL, app.ReleaseRevision).
-		Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
+		RETURNING id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at`,
+		randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.OIDCContractHash, app.HealthURL, app.MonitoringURL, app.ValidationURL, app.SignedOutURL, app.ReleaseRevision).
+		Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ManagedApp{}, fmt.Errorf("managed app slug %q belongs to another OpenID Connect client", app.Slug)
 	}
@@ -373,11 +376,52 @@ func (s *Store) ReconcileBootstrapManagedApp(ctx context.Context, app ManagedApp
 	return app, nil
 }
 
+// ReconcileManagedAppOIDCContract records the live authorization-provider
+// registration and invalidates both validation directions when it changes.
+func (s *Store) ReconcileManagedAppOIDCContract(ctx context.Context, appID, contractHash string) error {
+	if !oidcContractHashPattern.MatchString(contractHash) {
+		return fmt.Errorf("managed app OIDC registration contract hash is invalid")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin managed app OIDC registration reconciliation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	apps, err := loadManagedAppsForValidation(ctx, tx)
+	if err != nil {
+		return err
+	}
+	previous := ""
+	for _, app := range apps {
+		if app.ID == appID {
+			previous = app.OIDCContractHash
+			break
+		}
+	}
+	if previous == "" {
+		return fmt.Errorf("managed app not found")
+	}
+	if previous == contractHash {
+		return tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE managed_apps SET oidc_contract_hash=$2 WHERE id=$1::uuid`, appID, contractHash); err != nil {
+		return fmt.Errorf("update managed app OIDC registration contract: %w", err)
+	}
+	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit managed app OIDC registration reconciliation: %w", err)
+	}
+	return nil
+}
+
 func sameManagedAppValidationContract(left, right ManagedApp) bool {
 	return left.Name == right.Name &&
 		left.Description == right.Description &&
 		left.LaunchURL == right.LaunchURL &&
 		left.OIDCClientID == right.OIDCClientID &&
+		left.OIDCContractHash == right.OIDCContractHash &&
 		left.HealthURL == right.HealthURL &&
 		left.MonitoringURL == right.MonitoringURL &&
 		left.ValidationURL == right.ValidationURL &&
@@ -392,6 +436,7 @@ func managedAppValidationContractHash(app ManagedApp, witness *ManagedApp) strin
 		app.Description,
 		app.LaunchURL,
 		app.OIDCClientID,
+		app.OIDCContractHash,
 		app.HealthURL,
 		app.MonitoringURL,
 		app.ValidationURL,
@@ -404,6 +449,7 @@ func managedAppValidationContractHash(app ManagedApp, witness *ManagedApp) strin
 			witness.Slug,
 			witness.Name,
 			witness.OIDCClientID,
+			witness.OIDCContractHash,
 			witness.LaunchURL,
 			witness.ValidationURL,
 			witness.SignedOutURL,
@@ -448,6 +494,7 @@ func normalizeManagedApp(app ManagedApp) ManagedApp {
 	app.Description = strings.TrimSpace(app.Description)
 	app.LaunchURL = strings.TrimSpace(app.LaunchURL)
 	app.OIDCClientID = strings.TrimSpace(app.OIDCClientID)
+	app.OIDCContractHash = strings.TrimSpace(app.OIDCContractHash)
 	app.HealthURL = strings.TrimSpace(app.HealthURL)
 	app.MonitoringURL = strings.TrimSpace(app.MonitoringURL)
 	app.ValidationURL = strings.TrimSpace(app.ValidationURL)
@@ -457,7 +504,7 @@ func normalizeManagedApp(app ManagedApp) ManagedApp {
 }
 
 func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps ORDER BY name`)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list managed apps: %w", err)
 	}
@@ -465,7 +512,7 @@ func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
 	var apps []ManagedApp
 	for rows.Next() {
 		var app ManagedApp
-		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt); err != nil {
+		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan managed app: %w", err)
 		}
 		apps = append(apps, app)
@@ -485,7 +532,7 @@ func (s *Store) IsManagedOIDCClient(ctx context.Context, clientID string) (bool,
 
 func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 	var app ManagedApp
-	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("get managed app: %w", err)
 	}
@@ -523,7 +570,7 @@ func (s *Store) ManagedAppUsesOIDCClient(ctx context.Context, clientID string) (
 }
 
 func loadManagedAppsForValidation(ctx context.Context, tx pgx.Tx) ([]ManagedApp, error) {
-	rows, err := tx.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision FROM managed_apps ORDER BY slug FOR UPDATE`)
+	rows, err := tx.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision FROM managed_apps ORDER BY slug FOR UPDATE`)
 	if err != nil {
 		return nil, fmt.Errorf("lock managed app validation contracts: %w", err)
 	}
@@ -531,7 +578,7 @@ func loadManagedAppsForValidation(ctx context.Context, tx pgx.Tx) ([]ManagedApp,
 	var apps []ManagedApp
 	for rows.Next() {
 		var app ManagedApp
-		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision); err != nil {
+		if err := rows.Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision); err != nil {
 			return nil, fmt.Errorf("scan managed app validation contract: %w", err)
 		}
 		apps = append(apps, app)
@@ -885,6 +932,9 @@ func ValidateManagedApp(app ManagedApp) error {
 	}
 	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" {
 		return fmt.Errorf("app name, description, and OIDC client ID are required")
+	}
+	if !oidcContractHashPattern.MatchString(app.OIDCContractHash) {
+		return fmt.Errorf("app OIDC registration contract hash must be a lowercase SHA-256 digest")
 	}
 	if !immutableReleaseRevisionPattern.MatchString(app.ReleaseRevision) {
 		return fmt.Errorf("app release revision must be a 12–64 character lowercase hexadecimal commit or a sha256 digest")

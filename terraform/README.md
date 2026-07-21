@@ -59,9 +59,10 @@ Each `bootstrap_apps` client also supplies its sign-in redirect URIs, allowed
 post-logout redirect URIs, and at least one front-channel or back-channel
 logout URI. These coordinates let Ory Hydra propagate one Shauth logout to
 every correlated relying-application session. Each app also supplies an
-immutable `release_revision`, an authenticated `validation_url` exposing an
-accessible `Sign out` control plus exact username, email, normalized role, and
-release-revision fields,
+immutable `release_revision`, a normal launch UI exposing
+`data-shauth-user="<username>"` and an actionable `data-shauth-sign-out`
+control, an authenticated `validation_url` exposing exact username, email,
+normalized role, and release-revision fields,
 and an app-local `signed_out_url` exposing an accessible `Sign in with Shauth`
 control. The client must register its exact app-origin
 `/auth/shauth/logout/complete` bridge as the only value in
@@ -69,7 +70,7 @@ control. The client must register its exact app-origin
 returns to Shauth's one-time completion endpoint, which then redirects to the
 trusted app-local `signed_out_url`. Release revisions and both container images must use immutable
 lowercase hexadecimal commits/tags or `sha256` digests; moving labels are
-rejected. Any release or endpoint-coordinate change queues real browser checks
+rejected. Any release, endpoint-coordinate, or OpenID Connect registration change queues real browser checks
 through both the Shauth catalog and the app's direct launch URL.
 
 The ARM64 validator is a standalone outbound-only Amazon ECS service, not a

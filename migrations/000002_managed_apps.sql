@@ -1,6 +1,5 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
--- Real application catalog records are paired with an OIDC client and an
--- Amazon Elastic Container Service service that Shauth can operate.
+-- Real application catalog records are paired with an OpenID Connect client.
 
 CREATE TABLE managed_apps (
     id UUID PRIMARY KEY,
