@@ -107,6 +107,7 @@ func TestLoadAcceptsPasswordlessValidationConfiguration(t *testing.T) {
 		"SHAUTH_VALIDATION_EMAIL":        "shauth-validator@example.invalid",
 		"SHAUTH_VALIDATOR_TOKEN":         strings.Repeat("v", 48),
 		"SHAUTH_VALIDATION_STATUS_TOKEN": strings.Repeat("s", 48),
+		"SHAUTH_SESSION_RESET_TOKEN":     strings.Repeat("r", 48),
 	}
 	cfg, err := Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -115,6 +116,18 @@ func TestLoadAcceptsPasswordlessValidationConfiguration(t *testing.T) {
 	if cfg.ValidationUsername != values["SHAUTH_VALIDATION_USERNAME"] || cfg.ValidationEmail != values["SHAUTH_VALIDATION_EMAIL"] || cfg.ValidatorToken != values["SHAUTH_VALIDATOR_TOKEN"] || cfg.ValidationStatusToken != values["SHAUTH_VALIDATION_STATUS_TOKEN"] {
 		t.Fatalf("validation configuration = %#v", cfg)
 	}
+	if cfg.SessionResetToken != values["SHAUTH_SESSION_RESET_TOKEN"] {
+		t.Fatalf("session reset token = %q", cfg.SessionResetToken)
+	}
+	values["SHAUTH_SESSION_RESET_TOKEN"] = values["SHAUTH_VALIDATOR_TOKEN"]
+	if _, err := Load(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("Load() accepted a session reset token equal to the validator token")
+	}
+	values["SHAUTH_SESSION_RESET_TOKEN"] = "short"
+	if _, err := Load(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("Load() accepted a short session reset token")
+	}
+	values["SHAUTH_SESSION_RESET_TOKEN"] = strings.Repeat("r", 48)
 	values["SHAUTH_VALIDATION_STATUS_TOKEN"] = values["SHAUTH_VALIDATOR_TOKEN"]
 	if _, err := Load(func(key string) string { return values[key] }); err == nil {
 		t.Fatal("Load() accepted one credential for validator control and status reading")

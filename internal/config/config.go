@@ -41,6 +41,7 @@ type Config struct {
 	MonitoringSources      []monitoring.Source
 	ValidatorToken         string
 	ValidationStatusToken  string
+	SessionResetToken      string
 }
 
 // BootstrapApp is a confidential OpenID Connect client and its corresponding
@@ -101,6 +102,7 @@ func Load(getenv func(string) string) (Config, error) {
 		InvitationEmailFrom:    getenv("SHAUTH_INVITATION_EMAIL_FROM"),
 		ValidatorToken:         getenv("SHAUTH_VALIDATOR_TOKEN"),
 		ValidationStatusToken:  getenv("SHAUTH_VALIDATION_STATUS_TOKEN"),
+		SessionResetToken:      getenv("SHAUTH_SESSION_RESET_TOKEN"),
 	}
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_EMAIL and SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must be set together")
@@ -156,6 +158,12 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if config.ValidatorToken != "" && config.ValidationStatusToken != "" && config.ValidatorToken == config.ValidationStatusToken {
 		return Config{}, fmt.Errorf("SHAUTH_VALIDATION_STATUS_TOKEN must differ from SHAUTH_VALIDATOR_TOKEN")
+	}
+	if config.SessionResetToken != "" && len(config.SessionResetToken) < 32 {
+		return Config{}, fmt.Errorf("SHAUTH_SESSION_RESET_TOKEN must contain at least 32 characters")
+	}
+	if config.SessionResetToken != "" && (config.SessionResetToken == config.ValidatorToken || config.SessionResetToken == config.ValidationStatusToken) {
+		return Config{}, fmt.Errorf("SHAUTH_SESSION_RESET_TOKEN must differ from the validator and validation-status tokens")
 	}
 	for name, value := range map[string]string{
 		"DATABASE_URL":                 config.DatabaseURL,
