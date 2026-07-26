@@ -1883,6 +1883,18 @@ func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 	}
 	return userID, nil
 }
+
+// UserIDByEmail resolves an account's identifier from its email address so an
+// operator can reset a user's sessions without first looking up the internal
+// identifier. Matching is case-insensitive.
+func (s *Store) UserIDByEmail(ctx context.Context, email string) (string, error) {
+	var userID string
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM users WHERE lower(email)=lower($1)`, email).Scan(&userID)
+	if err != nil {
+		return "", fmt.Errorf("read user by email: %w", err)
+	}
+	return userID, nil
+}
 func (s *Store) RevokeUserSessions(ctx context.Context, userID string, now time.Time) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

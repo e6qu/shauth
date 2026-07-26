@@ -384,6 +384,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/users/{id}/sessions", s.adminUserSessions)
 	mux.HandleFunc("POST /admin/users/{id}/sessions/revoke", s.adminRevokeSessions)
 	mux.HandleFunc("POST /admin/sessions/{id}/revoke", s.adminRevokeSession)
+	mux.HandleFunc("POST /internal/sessions/reset", s.sessionResetAPI)
 	mux.HandleFunc("GET /monitoring", s.monitoring)
 	return securityHeaders(csrfPosts(s.config.PublicURL, mux))
 }
@@ -431,7 +432,7 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 				http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: token, Path: "/", Secure: publicURL.Scheme == "https", SameSite: http.SameSiteLaxMode})
 			}
 		}
-		if r.Method == http.MethodPost && r.URL.Path != "/oauth2/token" && !strings.HasPrefix(r.URL.Path, "/internal/validator/") {
+		if r.Method == http.MethodPost && r.URL.Path != "/oauth2/token" && !strings.HasPrefix(r.URL.Path, "/internal/") {
 			if err := r.ParseForm(); err != nil {
 				http.Error(w, "invalid form", http.StatusBadRequest)
 				return
@@ -2233,6 +2234,49 @@ func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/admin/users/"+r.PathValue("id")+"/sessions", 303)
+}
+
+// sessionResetAPI is the token-authenticated counterpart of adminRevokeSessions:
+// it lets an operator end all of a user's browser sessions and revoke the
+// correlated Ory Hydra sessions without an admin browser login. This is how a
+// stuck login is cleared -- a stale Hydra session that "could not correlate"
+// with the current browser -- programmatically, instead of asking the user to
+// clear cookies. Target the account by "user_id" or, more conveniently, "email".
+func (s *Server) sessionResetAPI(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if s.config.SessionResetToken == "" {
+		http.Error(w, "session reset is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if !bearerTokenMatches(r, s.config.SessionResetToken) {
+		http.Error(w, "session reset authentication failed", http.StatusUnauthorized)
+		return
+	}
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	if userID == "" {
+		email := strings.TrimSpace(r.URL.Query().Get("email"))
+		if email == "" {
+			http.Error(w, "provide user_id or email", http.StatusBadRequest)
+			return
+		}
+		resolved, err := s.store.UserIDByEmail(r.Context(), email)
+		if err != nil {
+			http.Error(w, "no account matches that email", http.StatusNotFound)
+			return
+		}
+		userID = resolved
+	}
+	if err := s.store.RevokeUserSessions(r.Context(), userID, time.Now()); err != nil {
+		http.Error(w, "could not revoke sessions", http.StatusInternalServerError)
+		return
+	}
+	if err := s.revokeHydraSessions(r.Context(), userID); err != nil {
+		http.Error(w, "local sessions ended but OAuth session revocation did not complete", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"reset_user_id": userID})
 }
 func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
