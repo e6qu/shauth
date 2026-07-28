@@ -45,8 +45,8 @@ func TestApplicationValidationComponentReportsBothDirections(t *testing.T) {
 	failed := identity.AppValidationRun{Status: identity.ValidationFailed, ReleaseRevision: "0123456789ab", Failure: "logout returned to the identity service"}
 	view := managedAppView{
 		ManagedApp: identity.ManagedApp{ID: "00000000-0000-4000-8000-000000000001", Name: "Bleephub"},
-		FromShauth: &passed,
-		FromApp:    &failed,
+		FromShauth: newAppValidationRunView(passed),
+		FromApp:    newAppValidationRunView(failed),
 	}
 	var rendered bytes.Buffer
 	if err := pages.ExecuteTemplate(&rendered, "app-validation", view); err != nil {
@@ -99,17 +99,69 @@ func TestValidationNeedsPoll(t *testing.T) {
 		"running":   {Status: identity.ValidationRunning},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if !validationNeedsPoll(run) {
+			var view *appValidationRunView
+			if run != nil {
+				view = newAppValidationRunView(*run)
+			}
+			if !validationNeedsPoll(view) {
 				t.Fatal("ongoing validation did not poll")
 			}
 		})
 	}
 	for name, status := range map[string]string{"passed": identity.ValidationPassed, "failed": identity.ValidationFailed} {
 		t.Run(name, func(t *testing.T) {
-			if validationNeedsPoll(&identity.AppValidationRun{Status: status}) {
+			if validationNeedsPoll(newAppValidationRunView(identity.AppValidationRun{Status: status})) {
 				t.Fatal("terminal validation kept polling")
 			}
 		})
+	}
+}
+
+func TestReleaseRevisionDisplayIsShortWithoutChangingValidationValue(t *testing.T) {
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for name, test := range map[string]struct {
+		revision string
+		want     string
+	}{
+		"short commit":   {revision: "0123456789ab", want: "0123456789ab"},
+		"full commit":    {revision: "0123456789abcdef0123456789abcdef01234567", want: "0123456789ab"},
+		"image digest":   {revision: digest, want: "0123456789ab"},
+		"shorter opaque": {revision: "0123456", want: "0123456"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := shortReleaseRevision(test.revision); got != test.want {
+				t.Fatalf("shortReleaseRevision(%q) = %q, want %q", test.revision, got, test.want)
+			}
+		})
+	}
+
+	duration := int64(12)
+	view := newManagedAppView(identity.ManagedApp{ID: "00000000-0000-4000-8000-000000000001", ReleaseRevision: digest})
+	view.FromShauth = newAppValidationRunView(identity.AppValidationRun{
+		Status:               identity.ValidationPassed,
+		ReleaseRevision:      digest,
+		DurationMilliseconds: &duration,
+	})
+	pages, err := template.New("pages").Parse(pageTemplates)
+	if err != nil {
+		t.Fatalf("parse templates: %v", err)
+	}
+	var rendered bytes.Buffer
+	if err := pages.ExecuteTemplate(&rendered, "app-validation", view); err != nil {
+		t.Fatalf("render validation component: %v", err)
+	}
+	if !strings.Contains(rendered.String(), `title="`+digest+`">0123456789ab</code>`) {
+		t.Fatalf("validation component did not display a short revision with the exact value available as its title: %s", rendered.String())
+	}
+	if view.FromShauth.ReleaseRevision != digest {
+		t.Fatalf("display formatting changed the validation value to %q", view.FromShauth.ReleaseRevision)
+	}
+	rendered.Reset()
+	if err := pages.ExecuteTemplate(&rendered, "admin-apps", map[string]any{"Apps": []managedAppView{view}}); err != nil {
+		t.Fatalf("render application administration page: %v", err)
+	}
+	if !strings.Contains(rendered.String(), `title="`+digest+`">0123456789ab</code>`) {
+		t.Fatalf("application administration page did not display a short revision with the exact value available as its title")
 	}
 }
 

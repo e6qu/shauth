@@ -1124,12 +1124,41 @@ func (s *Server) adminConnectors(w http.ResponseWriter, r *http.Request) {
 
 type managedAppView struct {
 	identity.ManagedApp
-	Healthy     bool
-	StatusCode  int
-	StatusError string
-	FromShauth  *identity.AppValidationRun
-	FromApp     *identity.AppValidationRun
-	NeedsPoll   bool
+	DisplayReleaseRevision string
+	Healthy                bool
+	StatusCode             int
+	StatusError            string
+	FromShauth             *appValidationRunView
+	FromApp                *appValidationRunView
+	NeedsPoll              bool
+}
+
+type appValidationRunView struct {
+	identity.AppValidationRun
+	DisplayReleaseRevision string
+}
+
+func newManagedAppView(app identity.ManagedApp) managedAppView {
+	return managedAppView{
+		ManagedApp:             app,
+		DisplayReleaseRevision: shortReleaseRevision(app.ReleaseRevision),
+	}
+}
+
+func newAppValidationRunView(run identity.AppValidationRun) *appValidationRunView {
+	return &appValidationRunView{
+		AppValidationRun:       run,
+		DisplayReleaseRevision: shortReleaseRevision(run.ReleaseRevision),
+	}
+}
+
+func shortReleaseRevision(revision string) string {
+	const displayLength = 12
+	revision = strings.TrimPrefix(revision, "sha256:")
+	if len(revision) <= displayLength {
+		return revision
+	}
+	return revision[:displayLength]
 }
 
 func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
@@ -1143,7 +1172,7 @@ func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
 	}
 	views := make([]managedAppView, 0, len(apps))
 	for _, app := range apps {
-		view := managedAppView{ManagedApp: app}
+		view := newManagedAppView(app)
 		if status, err := s.managedApps.Status(ctx, app); err != nil {
 			view.StatusError = err.Error()
 		} else {
@@ -1151,12 +1180,10 @@ func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
 		}
 		if appResults := validations[app.ID]; appResults != nil {
 			if run, ok := appResults[identity.ValidationFromShauth]; ok {
-				runCopy := run
-				view.FromShauth = &runCopy
+				view.FromShauth = newAppValidationRunView(run)
 			}
 			if run, ok := appResults[identity.ValidationFromApp]; ok {
-				runCopy := run
-				view.FromApp = &runCopy
+				view.FromApp = newAppValidationRunView(run)
 			}
 		}
 		view.NeedsPoll = validationNeedsPoll(view.FromShauth) || validationNeedsPoll(view.FromApp)
@@ -1165,7 +1192,7 @@ func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
 	return views, nil
 }
 
-func validationNeedsPoll(run *identity.AppValidationRun) bool {
+func validationNeedsPoll(run *appValidationRunView) bool {
 	return run == nil || run.Status == identity.ValidationQueued || run.Status == identity.ValidationRunning
 }
 
@@ -1198,12 +1225,12 @@ func (s *Server) appValidationStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not query application validation", http.StatusInternalServerError)
 		return
 	}
-	view := managedAppView{ManagedApp: app}
+	view := newManagedAppView(app)
 	if run, ok := validations[identity.ValidationFromShauth]; ok {
-		view.FromShauth = &run
+		view.FromShauth = newAppValidationRunView(run)
 	}
 	if run, ok := validations[identity.ValidationFromApp]; ok {
-		view.FromApp = &run
+		view.FromApp = newAppValidationRunView(run)
 	}
 	view.NeedsPoll = validationNeedsPoll(view.FromShauth) || validationNeedsPoll(view.FromApp)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
