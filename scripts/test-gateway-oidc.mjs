@@ -43,6 +43,7 @@ if (testFocus === "logout-correlation") {
   try {
     await exerciseLogoutCorrelationFailure(browser, primaryDatabase);
     await exerciseCorrelationCreationFailure(browser, primaryDatabase);
+    await exerciseStaleHydraCorrelationRebind(browser, secondaryDatabase);
   } finally {
     await browser.close();
     await Promise.all([closeServer(primary.server), closeServer(secondary.server), closeServer(tertiary.server)]);
@@ -346,10 +347,48 @@ try {
   // correlation grant is single-use, and durable recovery revokes the RP.
   await exerciseLogoutCorrelationFailure(browser, primaryDatabase);
   await exerciseCorrelationCreationFailure(browser, primaryDatabase);
+  await exerciseStaleHydraCorrelationRebind(browser, secondaryDatabase);
 } finally {
   await browser.close();
   await Promise.all([closeServer(primary.server), closeServer(secondary.server), closeServer(tertiary.server)]);
 }
+}
+
+async function exerciseStaleHydraCorrelationRebind(browserInstance, secondaryDatabaseName) {
+  const context = await browserInstance.newContext();
+  let freshSessionID = "";
+  try {
+    const page = await context.newPage();
+    await signInPortalAndPrimaryRP(page, context);
+    const oldSessionID = await currentShauthSessionID(context);
+    const providerSessionID = queryShauth(`SELECT hydra_session_id FROM hydra_login_sessions WHERE browser_session_id='${oldSessionID}'::uuid ORDER BY created_at DESC LIMIT 1`);
+    assert.ok(providerSessionID, "the browser has no Hydra session to reuse");
+
+    revokeTestShauthSession(oldSessionID);
+    await context.clearCookies({ name: "shauth_session" });
+    await page.goto("http://localhost:8080/login");
+    await page.locator("#username").fill("admin");
+    await page.locator("#password").fill(password);
+    await page.getByRole("button", { name: "Sign in with password" }).click();
+    await page.waitForURL("http://localhost:8080/");
+    freshSessionID = await currentShauthSessionID(context);
+    assert.notEqual(freshSessionID, oldSessionID, "re-login did not create a fresh Shauth browser session");
+
+    await page.goto("http://localhost:8080/apps");
+    await page.getByRole("link", { name: "Open Gateway secondary", exact: true }).click();
+    await page.waitForURL("http://gateway-secondary.localhost:5558/");
+    await assertSession(context, "http://gateway-secondary.localhost:5558", 200);
+    const reusedProviderSessionID = queryGateway(secondaryDatabaseName, "SELECT provider_session_id FROM oidc_gateway_sessions WHERE client_id='gateway-secondary' AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1");
+    assert.equal(reusedProviderSessionID, providerSessionID, "Hydra did not reuse the stale browser sid, so the rebind flow was not exercised");
+    assert.equal(
+      queryShauth(`SELECT browser_session_id::text FROM hydra_login_sessions WHERE hydra_session_id='${providerSessionID}'`),
+      freshSessionID,
+      "Shauth did not move the reused Hydra sid to the fresh same-user browser session",
+    );
+  } finally {
+    revokeTestShauthSession(freshSessionID);
+    await context.close();
+  }
 }
 
 async function exerciseLogoutCorrelationFailure(browserInstance, database) {
@@ -523,6 +562,15 @@ function activeShauthSessionCount() {
 function newestActiveShauthSessionID() {
   const sessionID = queryShauth("SELECT sessions.id::text FROM sessions JOIN users ON users.id=sessions.user_id WHERE users.username='admin' AND sessions.revoked_at IS NULL ORDER BY sessions.created_at DESC,sessions.id DESC LIMIT 1");
   assert.match(sessionID, /^[0-9a-f-]{36}$/, "active Shauth session ID is unavailable");
+  return sessionID;
+}
+
+async function currentShauthSessionID(context) {
+  const cookie = (await context.cookies("http://localhost:8080/")).find((candidate) => candidate.name === "shauth_session");
+  assert.ok(cookie, "Shauth browser session cookie is unavailable");
+  const tokenHash = createHash("sha256").update(cookie.value).digest("hex");
+  const sessionID = queryShauth(`SELECT id::text FROM sessions WHERE browser_token_hash=decode('${tokenHash}','hex')`);
+  assert.match(sessionID, /^[0-9a-f-]{36}$/, "Shauth browser session is unavailable");
   return sessionID;
 }
 

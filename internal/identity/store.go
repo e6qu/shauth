@@ -1384,11 +1384,17 @@ func (s *Store) RecordHydraLoginSession(ctx context.Context, browserSessionID, h
 	if strings.TrimSpace(browserSessionID) == "" || strings.TrimSpace(hydraSessionID) == "" {
 		return fmt.Errorf("browser and Ory Hydra session IDs are required")
 	}
+	policy, err := s.SessionPolicy(ctx)
+	if err != nil {
+		return err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin Ory Hydra session recording: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	observed := now.UTC()
+	idleCutoff := observed.Add(-policy.BrowserIdleTimeout)
 	var userID string
 	if err := tx.QueryRow(ctx, `SELECT user_id::text FROM sessions WHERE id=$1::uuid`, browserSessionID).Scan(&userID); err != nil {
 		return fmt.Errorf("find Ory Hydra browser session: %w", err)
@@ -1397,18 +1403,40 @@ func (s *Store) RecordHydraLoginSession(ctx context.Context, browserSessionID, h
 		return err
 	}
 	var activeSessionID string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM sessions WHERE id=$1::uuid AND user_id=$2::uuid AND revoked_at IS NULL FOR UPDATE`, browserSessionID, userID).Scan(&activeSessionID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM sessions
+		WHERE id=$1::uuid AND user_id=$2::uuid AND revoked_at IS NULL
+		  AND expires_at>$3 AND last_seen_at>$4
+		FOR UPDATE`, browserSessionID, userID, observed, idleCutoff).Scan(&activeSessionID); err != nil {
 		return fmt.Errorf("lock active Ory Hydra browser session: %w", err)
 	}
 	command, err := tx.Exec(ctx, `INSERT INTO hydra_login_sessions (hydra_session_id,browser_session_id,created_at)
 	VALUES ($1,$2::uuid,$3)
-	ON CONFLICT (hydra_session_id) DO UPDATE SET created_at=EXCLUDED.created_at
-	WHERE hydra_login_sessions.browser_session_id=EXCLUDED.browser_session_id`, hydraSessionID, activeSessionID, now.UTC())
+	ON CONFLICT (hydra_session_id) DO NOTHING`, hydraSessionID, activeSessionID, observed)
 	if err != nil {
 		return fmt.Errorf("record Ory Hydra login session: %w", err)
 	}
-	if command.RowsAffected() != 1 {
-		return fmt.Errorf("Ory Hydra session is already correlated with another browser")
+	if command.RowsAffected() == 0 {
+		var existingBrowserID, existingUserID string
+		var existingRevokedAt *time.Time
+		var existingExpiresAt, existingLastSeenAt time.Time
+		if err := tx.QueryRow(ctx, `SELECT h.browser_session_id::text,s.user_id::text,s.revoked_at,s.expires_at,s.last_seen_at
+			FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
+			WHERE h.hydra_session_id=$1
+			FOR UPDATE OF h,s`, hydraSessionID).
+			Scan(&existingBrowserID, &existingUserID, &existingRevokedAt, &existingExpiresAt, &existingLastSeenAt); err != nil {
+			return fmt.Errorf("find existing Ory Hydra session correlation: %w", err)
+		}
+		sameBrowser := existingBrowserID == activeSessionID
+		staleSameUserBrowser := existingUserID == userID &&
+			(existingRevokedAt != nil || !existingExpiresAt.After(observed) || !existingLastSeenAt.After(idleCutoff))
+		if !sameBrowser && !staleSameUserBrowser {
+			return fmt.Errorf("Ory Hydra session is already correlated with another browser")
+		}
+		if _, err := tx.Exec(ctx, `UPDATE hydra_login_sessions
+			SET browser_session_id=$2::uuid,created_at=$3
+			WHERE hydra_session_id=$1`, hydraSessionID, activeSessionID, observed); err != nil {
+			return fmt.Errorf("refresh Ory Hydra login session correlation: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit Ory Hydra session recording: %w", err)
