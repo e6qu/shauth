@@ -342,6 +342,77 @@ func TestLogoutSerializationPreservesACompleteOrdering(t *testing.T) {
 	})
 }
 
+func TestHydraLoginSessionRebindsOnlyAStaleSameUserBrowser(t *testing.T) {
+	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("SHAUTH_ACCEPTANCE_DATABASE_URL is required")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	defer pool.Close()
+	store, err := NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	userID := createLogoutAcceptanceUser(t, ctx, pool, "rebind", 0)
+	defer deleteLogoutAcceptanceUser(t, ctx, pool, userID)
+	_, oldBrowser, err := store.CreateSession(ctx, userID, "old correlated browser", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerSID := "provider-rebind-" + userID
+	if err := store.RecordHydraLoginSession(ctx, oldBrowser.ID, providerSID, now); err != nil {
+		t.Fatal(err)
+	}
+	_, freshBrowser, err := store.CreateSession(ctx, userID, "fresh browser", nil, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordHydraLoginSession(ctx, freshBrowser.ID, providerSID, now.Add(time.Second)); err == nil || !strings.Contains(err.Error(), "another browser") {
+		t.Fatalf("active-browser correlation was movable: %v", err)
+	}
+	if err := store.RevokeSession(ctx, oldBrowser.ID, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordHydraLoginSession(ctx, freshBrowser.ID, providerSID, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("rebind revoked same-user browser: %v", err)
+	}
+	var reboundBrowserID string
+	if err := pool.QueryRow(ctx, `SELECT browser_session_id::text FROM hydra_login_sessions WHERE hydra_session_id=$1`, providerSID).Scan(&reboundBrowserID); err != nil {
+		t.Fatal(err)
+	}
+	if reboundBrowserID != freshBrowser.ID {
+		t.Fatalf("provider session remained correlated with %s, want %s", reboundBrowserID, freshBrowser.ID)
+	}
+
+	otherUserID := createLogoutAcceptanceUser(t, ctx, pool, "rebind-other", 0)
+	defer deleteLogoutAcceptanceUser(t, ctx, pool, otherUserID)
+	_, otherBrowser, err := store.CreateSession(ctx, otherUserID, "other account browser", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProviderSID := "provider-rebind-other-" + otherUserID
+	if err := store.RecordHydraLoginSession(ctx, otherBrowser.ID, otherProviderSID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeSession(ctx, otherBrowser.ID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordHydraLoginSession(ctx, freshBrowser.ID, otherProviderSID, now.Add(4*time.Second)); err == nil || !strings.Contains(err.Error(), "another browser") {
+		t.Fatalf("cross-account stale correlation was movable: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT browser_session_id::text FROM hydra_login_sessions WHERE hydra_session_id=$1`, otherProviderSID).Scan(&reboundBrowserID); err != nil {
+		t.Fatal(err)
+	}
+	if reboundBrowserID != otherBrowser.ID {
+		t.Fatalf("cross-account provider session moved to %s, want %s", reboundBrowserID, otherBrowser.ID)
+	}
+}
+
 func TestStaleProviderLogoutDoesNotRevokeFreshSessions(t *testing.T) {
 	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
 	if databaseURL == "" {
