@@ -661,6 +661,10 @@ func enqueueAllAppValidations(ctx context.Context, tx pgx.Tx, requestedBy *strin
 	return nil
 }
 
+// ErrManagedAppNotFound reports that no registered managed app matches the
+// requested identifier or slug.
+var ErrManagedAppNotFound = errors.New("managed app not found")
+
 // EnqueueAppValidations schedules both catalog-entry and direct-entry browser
 // checks. Duplicate pending checks for the exact same application contract
 // collapse into one queue entry per direction.
@@ -685,7 +689,61 @@ func (s *Store) EnqueueAppValidations(ctx context.Context, appID, requestedBy st
 			return nil
 		}
 	}
-	return fmt.Errorf("managed app not found")
+	return ErrManagedAppNotFound
+}
+
+// EnqueueAppValidationsBySlug schedules both catalog-entry and direct-entry
+// browser checks for one app addressed by its catalog slug. It mirrors
+// EnqueueAppValidations for token-authorized operators, so no requesting user
+// is recorded.
+func (s *Store) EnqueueAppValidationsBySlug(ctx context.Context, slug string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin enqueue application validations: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	apps, err := loadManagedAppsForValidation(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, app := range apps {
+		if app.Slug == slug {
+			if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), nil, now.UTC()); err != nil {
+				return err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit enqueue application validations: %w", err)
+			}
+			return nil
+		}
+	}
+	return ErrManagedAppNotFound
+}
+
+// EnqueueAllAppValidations schedules both catalog-entry and direct-entry
+// browser checks for every registered app on behalf of a token-authorized
+// operator and returns the slugs it queued in catalog order.
+func (s *Store) EnqueueAllAppValidations(ctx context.Context, now time.Time) ([]string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin enqueue application validations: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	apps, err := loadManagedAppsForValidation(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	slugs := make([]string, 0, len(apps))
+	for _, app := range apps {
+		if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), nil, now.UTC()); err != nil {
+			return nil, err
+		}
+		slugs = append(slugs, app.Slug)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit enqueue application validations: %w", err)
+	}
+	return slugs, nil
 }
 
 // LatestAppValidationRuns returns the most recent durable result for each app
@@ -704,14 +762,9 @@ func (s *Store) LatestAppValidationRuns(ctx context.Context) (map[string]map[str
 	defer rows.Close()
 	results := map[string]map[string]AppValidationRun{}
 	for rows.Next() {
-		var run AppValidationRun
-		var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision *string
-		if err := rows.Scan(&run.ID, &run.ManagedAppID, &run.AppSlug, &run.AppName, &run.OIDCClientID, &run.LaunchURL, &run.ValidationURL, &run.SignedOutURL, &run.Direction, &run.ReleaseRevision, &run.ValidationContractHash, &run.Status, &run.RequestedAt, &run.StartedAt, &run.CompletedAt, &run.DurationMilliseconds, &run.Failure,
-			&witnessID, &witnessSlug, &witnessName, &witnessClientID, &witnessLaunchURL, &witnessValidationURL, &witnessSignedOutURL, &witnessRevision); err != nil {
-			return nil, fmt.Errorf("scan application validation result: %w", err)
-		}
-		if witnessID != nil {
-			run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
+		run, err := scanAppValidationRun(rows)
+		if err != nil {
+			return nil, err
 		}
 		if results[run.ManagedAppID] == nil {
 			results[run.ManagedAppID] = map[string]AppValidationRun{}
@@ -738,18 +791,53 @@ func (s *Store) LatestAppValidationRunsForApp(ctx context.Context, appID string)
 	defer rows.Close()
 	results := map[string]AppValidationRun{}
 	for rows.Next() {
-		var run AppValidationRun
-		var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision *string
-		if err := rows.Scan(&run.ID, &run.ManagedAppID, &run.AppSlug, &run.AppName, &run.OIDCClientID, &run.LaunchURL, &run.ValidationURL, &run.SignedOutURL, &run.Direction, &run.ReleaseRevision, &run.ValidationContractHash, &run.Status, &run.RequestedAt, &run.StartedAt, &run.CompletedAt, &run.DurationMilliseconds, &run.Failure,
-			&witnessID, &witnessSlug, &witnessName, &witnessClientID, &witnessLaunchURL, &witnessValidationURL, &witnessSignedOutURL, &witnessRevision); err != nil {
-			return nil, fmt.Errorf("scan application validation result: %w", err)
-		}
-		if witnessID != nil {
-			run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
+		run, err := scanAppValidationRun(rows)
+		if err != nil {
+			return nil, err
 		}
 		results[run.Direction] = run
 	}
 	return results, rows.Err()
+}
+
+// AppValidationRunHistory returns durable validation runs ordered newest
+// first, optionally filtered to one app slug.
+func (s *Store) AppValidationRunHistory(ctx context.Context, slug string, limit int) ([]AppValidationRun, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT
+			r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.validation_contract_hash,r.status,
+			r.requested_at,r.started_at,r.completed_at,r.duration_milliseconds,r.failure,
+			r.witness_managed_app_id::text,r.witness_app_slug,r.witness_app_name,r.witness_oidc_client_id,r.witness_launch_url,r.witness_validation_url,r.witness_signed_out_url,r.witness_release_revision
+		FROM app_validation_runs r
+		WHERE $1::text='' OR r.app_slug=$1::text
+		ORDER BY r.requested_at DESC,r.id DESC
+		LIMIT $2`, slug, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list application validation history: %w", err)
+	}
+	defer rows.Close()
+	var runs []AppValidationRun
+	for rows.Next() {
+		run, err := scanAppValidationRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func scanAppValidationRun(rows pgx.Rows) (AppValidationRun, error) {
+	var run AppValidationRun
+	var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision *string
+	if err := rows.Scan(&run.ID, &run.ManagedAppID, &run.AppSlug, &run.AppName, &run.OIDCClientID, &run.LaunchURL, &run.ValidationURL, &run.SignedOutURL, &run.Direction, &run.ReleaseRevision, &run.ValidationContractHash, &run.Status, &run.RequestedAt, &run.StartedAt, &run.CompletedAt, &run.DurationMilliseconds, &run.Failure,
+		&witnessID, &witnessSlug, &witnessName, &witnessClientID, &witnessLaunchURL, &witnessValidationURL, &witnessSignedOutURL, &witnessRevision); err != nil {
+		return AppValidationRun{}, fmt.Errorf("scan application validation result: %w", err)
+	}
+	if witnessID != nil {
+		run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
+	}
+	return run, nil
 }
 
 // ClaimAppValidation leases exactly one queued check. PostgreSQL serializes all

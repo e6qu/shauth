@@ -153,8 +153,8 @@ if [ "$attempt" -eq 300 ]; then
 fi
 
 SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
-	go test -tags acceptance ./internal/identity ./internal/gateway \
-	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout)$' -count=1
+	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app \
+	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout|TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester|TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates|TestAppValidationRunHistoryOrdersFiltersAndLimits|TestApplicationsAPIListsCatalogHealthAndValidations|TestApplicationValidationHistoryAPIFiltersAndValidatesLimit|TestApplicationValidationEnqueueAPIQueuesWithoutABrowserCSRFToken)$' -count=1
 
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'id="main-content"'
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-label="Primary navigation"'
