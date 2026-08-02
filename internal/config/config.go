@@ -42,6 +42,8 @@ type Config struct {
 	ValidatorToken         string
 	ValidationStatusToken  string
 	SessionResetToken      string
+	AdminAPIReadToken      string
+	AdminAPIWriteToken     string
 }
 
 // BootstrapApp is a confidential OpenID Connect client and its corresponding
@@ -103,6 +105,8 @@ func Load(getenv func(string) string) (Config, error) {
 		ValidatorToken:         getenv("SHAUTH_VALIDATOR_TOKEN"),
 		ValidationStatusToken:  getenv("SHAUTH_VALIDATION_STATUS_TOKEN"),
 		SessionResetToken:      getenv("SHAUTH_SESSION_RESET_TOKEN"),
+		AdminAPIReadToken:      getenv("SHAUTH_ADMIN_API_READ_TOKEN"),
+		AdminAPIWriteToken:     getenv("SHAUTH_ADMIN_API_WRITE_TOKEN"),
 	}
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_EMAIL and SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must be set together")
@@ -150,20 +154,28 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("SHAUTH_MONITORING_SOURCES_JSON: %w", err)
 		}
 	}
-	if config.ValidatorToken != "" && len(config.ValidatorToken) < 32 {
-		return Config{}, fmt.Errorf("SHAUTH_VALIDATOR_TOKEN must contain at least 32 characters")
+	// Every closed-API bearer credential authorizes a distinct security
+	// boundary, so each one must be long enough to resist guessing and must
+	// never be reused for another boundary.
+	bearerTokens := []struct{ name, value string }{
+		{"SHAUTH_VALIDATOR_TOKEN", config.ValidatorToken},
+		{"SHAUTH_VALIDATION_STATUS_TOKEN", config.ValidationStatusToken},
+		{"SHAUTH_SESSION_RESET_TOKEN", config.SessionResetToken},
+		{"SHAUTH_ADMIN_API_READ_TOKEN", config.AdminAPIReadToken},
+		{"SHAUTH_ADMIN_API_WRITE_TOKEN", config.AdminAPIWriteToken},
 	}
-	if config.ValidationStatusToken != "" && len(config.ValidationStatusToken) < 32 {
-		return Config{}, fmt.Errorf("SHAUTH_VALIDATION_STATUS_TOKEN must contain at least 32 characters")
-	}
-	if config.ValidatorToken != "" && config.ValidationStatusToken != "" && config.ValidatorToken == config.ValidationStatusToken {
-		return Config{}, fmt.Errorf("SHAUTH_VALIDATION_STATUS_TOKEN must differ from SHAUTH_VALIDATOR_TOKEN")
-	}
-	if config.SessionResetToken != "" && len(config.SessionResetToken) < 32 {
-		return Config{}, fmt.Errorf("SHAUTH_SESSION_RESET_TOKEN must contain at least 32 characters")
-	}
-	if config.SessionResetToken != "" && (config.SessionResetToken == config.ValidatorToken || config.SessionResetToken == config.ValidationStatusToken) {
-		return Config{}, fmt.Errorf("SHAUTH_SESSION_RESET_TOKEN must differ from the validator and validation-status tokens")
+	for index, token := range bearerTokens {
+		if token.value == "" {
+			continue
+		}
+		if len(token.value) < 32 {
+			return Config{}, fmt.Errorf("%s must contain at least 32 characters", token.name)
+		}
+		for _, other := range bearerTokens[:index] {
+			if other.value == token.value {
+				return Config{}, fmt.Errorf("%s must differ from %s", token.name, other.name)
+			}
+		}
 	}
 	for name, value := range map[string]string{
 		"DATABASE_URL":                 config.DatabaseURL,

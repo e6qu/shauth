@@ -344,6 +344,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/apps", s.applicationsAPI)
 	mux.HandleFunc("GET /api/v1/apps/validations", s.applicationValidationStatusAPI)
 	mux.HandleFunc("GET /api/v1/apps/validations/history", s.applicationValidationHistoryAPI)
+	mux.HandleFunc("GET /api/v1/users", s.usersAPI)
+	mux.HandleFunc("GET /api/v1/users/{id}/sessions", s.userSessionsAPI)
+	mux.HandleFunc("GET /api/v1/session-policy", s.sessionPolicyAPI)
+	mux.HandleFunc("GET /api/v1/oidc-clients", s.oidcClientsAPI)
+	mux.HandleFunc("GET /api/v1/github-mappings", s.githubMappingsAPI)
+	mux.HandleFunc("GET /api/v1/connectors", s.connectorsAPI)
+	mux.HandleFunc("GET /api/v1/monitoring", s.monitoringAPI)
+	mux.HandleFunc("POST /internal/users", s.createUserAPI)
+	mux.HandleFunc("POST /internal/invitations", s.createInvitationAPI)
+	mux.HandleFunc("POST /internal/sessions/{id}/revoke", s.revokeSessionAPI)
+	mux.HandleFunc("PUT /internal/session-policy", s.updateSessionPolicyAPI)
+	mux.HandleFunc("POST /internal/oidc-clients", s.createOIDCClientAPI)
+	mux.HandleFunc("DELETE /internal/oidc-clients/{id}", s.deleteOIDCClientAPI)
+	mux.HandleFunc("POST /internal/github-mappings", s.createGitHubMappingAPI)
+	mux.HandleFunc("DELETE /internal/github-mappings/{id}", s.deleteGitHubMappingAPI)
+	mux.HandleFunc("POST /internal/apps", s.createAppAPI)
+	mux.HandleFunc("DELETE /internal/apps/{slug}", s.deleteAppAPI)
 	mux.HandleFunc("GET /login", s.login)
 	mux.HandleFunc("POST /login", s.passwordLogin)
 	mux.HandleFunc("GET /logout", s.logoutConfirm)
@@ -1834,6 +1851,10 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/clients", http.StatusSeeOther)
 }
 
+// errHydraClientNotFound reports that Ory Hydra has no client with the
+// requested identifier.
+var errHydraClientNotFound = errors.New("OAuth client not found")
+
 func (s *Server) deleteHydraClient(ctx context.Context, clientID string) error {
 	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + url.PathEscape(clientID)})
 	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
@@ -1845,30 +1866,13 @@ func (s *Server) deleteHydraClient(ctx context.Context, clientID string) error {
 		return err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return errHydraClientNotFound
+	}
 	if response.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("Hydra delete client returned %s", response.Status)
 	}
 	return nil
-}
-
-type sessionPolicyView struct {
-	BrowserAbsoluteHours int64
-	BrowserIdleMinutes   int64
-	OIDCSSOHours         int64
-	AccessTokenMinutes   int64
-	IDTokenMinutes       int64
-	RefreshTokenHours    int64
-}
-
-func newSessionPolicyView(policy identity.SessionPolicy) sessionPolicyView {
-	return sessionPolicyView{
-		BrowserAbsoluteHours: int64(policy.BrowserAbsoluteLifetime / time.Hour),
-		BrowserIdleMinutes:   int64(policy.BrowserIdleTimeout / time.Minute),
-		OIDCSSOHours:         int64(policy.OIDCSessionLifetime / time.Hour),
-		AccessTokenMinutes:   int64(policy.AccessTokenLifetime / time.Minute),
-		IDTokenMinutes:       int64(policy.IDTokenLifetime / time.Minute),
-		RefreshTokenHours:    int64(policy.RefreshTokenLifetime / time.Hour),
-	}
 }
 
 func (s *Server) adminSessionPolicy(w http.ResponseWriter, r *http.Request) {
@@ -1880,7 +1884,7 @@ func (s *Server) adminSessionPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load session policy", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "session-policy", map[string]any{"SignedIn": true, "IsAdmin": true, "Policy": newSessionPolicyView(policy), "Error": r.URL.Query().Get("error"), "Saved": r.URL.Query().Get("saved") == "true"})
+	s.render(w, "session-policy", map[string]any{"SignedIn": true, "IsAdmin": true, "Policy": newSessionPolicyRecord(policy), "Error": r.URL.Query().Get("error"), "Saved": r.URL.Query().Get("saved") == "true"})
 }
 
 func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request) {
@@ -1919,40 +1923,22 @@ func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request
 }
 
 func parseSessionPolicyForm(values url.Values) (identity.SessionPolicy, error) {
-	parse := func(name string, unit time.Duration) (time.Duration, error) {
+	var record sessionPolicyRecord
+	for name, target := range map[string]*int64{
+		"browser_absolute_hours": &record.BrowserAbsoluteHours,
+		"browser_idle_minutes":   &record.BrowserIdleMinutes,
+		"oidc_sso_hours":         &record.OIDCSSOHours,
+		"access_token_minutes":   &record.AccessTokenMinutes,
+		"id_token_minutes":       &record.IDTokenMinutes,
+		"refresh_token_hours":    &record.RefreshTokenHours,
+	} {
 		value, err := strconv.ParseInt(strings.TrimSpace(values.Get(name)), 10, 64)
-		if err != nil || value <= 0 {
-			return 0, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(name, "_", " "))
+		if err != nil {
+			return identity.SessionPolicy{}, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(name, "_", " "))
 		}
-		if value > int64((90*24*time.Hour)/unit) {
-			return 0, fmt.Errorf("%s exceeds the maximum supported duration", strings.ReplaceAll(name, "_", " "))
-		}
-		return time.Duration(value) * unit, nil
+		*target = value
 	}
-	var policy identity.SessionPolicy
-	var err error
-	if policy.BrowserAbsoluteLifetime, err = parse("browser_absolute_hours", time.Hour); err != nil {
-		return identity.SessionPolicy{}, err
-	}
-	if policy.BrowserIdleTimeout, err = parse("browser_idle_minutes", time.Minute); err != nil {
-		return identity.SessionPolicy{}, err
-	}
-	if policy.OIDCSessionLifetime, err = parse("oidc_sso_hours", time.Hour); err != nil {
-		return identity.SessionPolicy{}, err
-	}
-	if policy.AccessTokenLifetime, err = parse("access_token_minutes", time.Minute); err != nil {
-		return identity.SessionPolicy{}, err
-	}
-	if policy.IDTokenLifetime, err = parse("id_token_minutes", time.Minute); err != nil {
-		return identity.SessionPolicy{}, err
-	}
-	if policy.RefreshTokenLifetime, err = parse("refresh_token_hours", time.Hour); err != nil {
-		return identity.SessionPolicy{}, err
-	}
-	if err := policy.Validate(); err != nil {
-		return identity.SessionPolicy{}, err
-	}
-	return policy, nil
+	return record.sessionPolicy()
 }
 
 func hydraClientLifespans(policy identity.SessionPolicy) map[string]string {
@@ -2096,11 +2082,18 @@ func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) e
 		return err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		return errHydraClientConflict
+	}
 	if response.StatusCode != http.StatusCreated {
 		return fmt.Errorf("Hydra create client returned %s", response.Status)
 	}
 	return nil
 }
+
+// errHydraClientConflict reports that Ory Hydra already has a client with the
+// requested identifier.
+var errHydraClientConflict = errors.New("OAuth client already exists")
 
 func marshalHydraClient(input oidcClientInput, policy identity.SessionPolicy) ([]byte, error) {
 	payload := map[string]any{

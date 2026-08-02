@@ -219,6 +219,72 @@ acceptance gates:
   `202` with the `shauth.app-validation-enqueue/v1` receipt. It lives under
   `/internal/` because bearer-token requests carry no browser CSRF token.
 
+## Administration API
+
+Every remaining surface of the signed-in administration interface is also a
+versioned machine-readable contract, so operators and agents can inspect and
+drive Shauth without a browser session. Two dedicated bearer credentials
+authorize it: `SHAUTH_ADMIN_API_READ_TOKEN` protects the read-only contracts
+under `/api/v1/`, and the distinct `SHAUTH_ADMIN_API_WRITE_TOKEN` protects
+state changes under `/internal/` (bearer-token requests carry no browser CSRF
+token). Each configured token must contain at least 32 characters and must
+differ from every other closed-API credential; reads never accept the write
+token and writes never accept the read token, so a read-only consumer never
+holds a state-changing secret. An unset token keeps its half of the API
+disabled, answering `503`.
+
+Reads return an `observed_at` timestamp and a versioned envelope:
+
+- `GET /api/v1/users?q=<query>` — `shauth.users/v1`: user catalog with
+  machine-readable `identity_source` (`local`, `github`, or `entra`),
+  verification, role, and disabled state; `q` filters by username, email, or
+  GitHub login exactly like the users page.
+- `GET /api/v1/users/{id}/sessions` — `shauth.user-sessions/v1`: the account
+  plus every browser session's created/last-seen/expiry times, user agent,
+  remote address, revocation state, and computed `active` flag.
+- `GET /api/v1/session-policy` — `shauth.session-policy/v1`: durable session
+  lifetimes in the same units as the administration form.
+- `GET /api/v1/oidc-clients` — `shauth.oidc-clients/v1`: the Ory Hydra client
+  catalog as Shauth manages it (never any client secret).
+- `GET /api/v1/github-mappings` — `shauth.github-role-mappings/v1`: GitHub
+  kind/target/role rules.
+- `GET /api/v1/connectors` — `shauth.connectors/v1`: GitHub and Microsoft
+  Entra ID enablement, team names, and tenant.
+- `GET /api/v1/monitoring` — `shauth.monitoring/v1`: active Shauth sessions,
+  PostgreSQL and Ory Hydra health, and each configured `e6qu.monitoring/v1`
+  infrastructure observation (snapshot, staleness, or fetch error) — the same
+  data the monitoring page renders.
+
+Writes mirror the corresponding administration forms, validate identically,
+and answer with a versioned receipt:
+
+- `POST /internal/users` — create a local account
+  (`{"username","email","password","role"}`), answering `201` with
+  `shauth.user/v1`.
+- `POST /internal/invitations` — invite by email (`{"email","role"}`),
+  answering `201` with `shauth.invitation/v1`. The invitation link is
+  delivered only through the invitation email; if the email cannot be sent
+  the invitation is revoked and the request fails with `502`. Token-created
+  invitations record no inviting user.
+- `POST /internal/sessions/{id}/revoke` — end one browser session and its
+  correlated Ory Hydra login sessions (`shauth.session-revoke/v1`);
+  `POST /internal/sessions/reset` remains the whole-user reset behind its own
+  `SHAUTH_SESSION_RESET_TOKEN`.
+- `PUT /internal/session-policy` — replace the session policy using the same
+  fields as `shauth.session-policy/v1`; lifetimes are applied to every OAuth
+  client and rolled back together on failure.
+- `POST /internal/oidc-clients` and `DELETE /internal/oidc-clients/{id}` —
+  register (`201`, `shauth.oidc-client/v1`) or remove an OpenID Connect
+  client. Deleting a client still referenced by a managed app answers `409`.
+- `POST /internal/github-mappings` and
+  `DELETE /internal/github-mappings/{id}` — manage GitHub role mappings
+  (`shauth.github-role-mapping/v1`).
+- `POST /internal/apps` and `DELETE /internal/apps/{slug}` — register
+  (`201`, `shauth.app/v1`) or remove a managed app. Registration enforces the
+  same invariants as the form: the OpenID Connect client must already exist,
+  every coordinate must share one application origin, and the client must
+  register exactly its logout-bridge post-logout redirect URI.
+
 ## Native relying-party gateway
 
 The container also includes `/shauth-gateway`, a native OpenID Connect (OIDC)

@@ -46,10 +46,18 @@ type User struct {
 	EmailVerified     bool
 	GitHubLogin       string
 	FederatedIdentity string
+	IdentitySource    string
 	Role              Role
 	DisabledAt        *time.Time
 	CreatedAt         time.Time
 }
+
+// Identity sources reported by ListUsers for machine-readable consumers.
+const (
+	IdentitySourceLocal  = "local"
+	IdentitySourceGitHub = "github"
+	IdentitySourceEntra  = "entra"
+)
 
 type Session struct {
 	ID        string
@@ -290,13 +298,17 @@ func (s *Store) ListGitHubRoleMappings(ctx context.Context) ([]GitHubRoleMapping
 	return mappings, rows.Err()
 }
 
+// ErrGitHubRoleMappingNotFound reports that no GitHub role mapping matches
+// the requested identifier.
+var ErrGitHubRoleMappingNotFound = errors.New("GitHub role mapping not found")
+
 func (s *Store) DeleteGitHubRoleMapping(ctx context.Context, id string) error {
 	command, err := s.pool.Exec(ctx, `DELETE FROM github_role_mappings WHERE id=$1::uuid`, id)
 	if err != nil {
 		return fmt.Errorf("delete GitHub role mapping: %w", err)
 	}
 	if command.RowsAffected() != 1 {
-		return fmt.Errorf("GitHub role mapping not found")
+		return ErrGitHubRoleMappingNotFound
 	}
 	return nil
 }
@@ -551,6 +563,31 @@ func (s *Store) DeleteManagedApp(ctx context.Context, id string) error {
 	}
 	if result.RowsAffected() != 1 {
 		return fmt.Errorf("managed app not found")
+	}
+	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete managed app: %w", err)
+	}
+	return nil
+}
+
+// DeleteManagedAppBySlug removes one catalog entry addressed by its public
+// slug and queues fresh validations for the remaining apps. It mirrors
+// DeleteManagedApp for token-authorized operators, which address apps by slug.
+func (s *Store) DeleteManagedAppBySlug(ctx context.Context, slug string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete managed app: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `DELETE FROM managed_apps WHERE slug=$1`, slug)
+	if err != nil {
+		return fmt.Errorf("delete managed app: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return ErrManagedAppNotFound
 	}
 	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
 		return err
@@ -1253,7 +1290,7 @@ func (s *Store) CreateInvitation(ctx context.Context, email string, role Role, i
 	}
 	hash := sha256.Sum256([]byte(raw))
 	invitation := Invitation{ID: randomUUID(), Email: email, Role: role, ExpiresAt: now.UTC().Add(7 * 24 * time.Hour)}
-	err = s.pool.QueryRow(ctx, `INSERT INTO invitations (id,email,role,token_hash,invited_by,created_at,expires_at) VALUES ($1::uuid,$2,$3,$4,$5::uuid,$6,$7) RETURNING id::text`, invitation.ID, email, role, hash[:], invitedBy, now.UTC(), invitation.ExpiresAt).Scan(&invitation.ID)
+	err = s.pool.QueryRow(ctx, `INSERT INTO invitations (id,email,role,token_hash,invited_by,created_at,expires_at) VALUES ($1::uuid,$2,$3,$4,$5::uuid,$6,$7) RETURNING id::text`, invitation.ID, email, role, hash[:], nullable(invitedBy), now.UTC(), invitation.ExpiresAt).Scan(&invitation.ID)
 	if err != nil {
 		return "", Invitation{}, fmt.Errorf("create invitation: %w", err)
 	}
@@ -1430,7 +1467,7 @@ func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (Use
 }
 
 func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'GitHub: ' || github_login WHEN entra_object_id IS NOT NULL THEN 'Microsoft Entra ID' ELSE 'Local account' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC`, strings.TrimSpace(query))
+	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC`, strings.TrimSpace(query))
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -1438,12 +1475,41 @@ func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.EmailVerified, &u.GitHubLogin, &u.FederatedIdentity, &u.Role, &u.DisabledAt, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.EmailVerified, &u.GitHubLogin, &u.IdentitySource, &u.Role, &u.DisabledAt, &u.CreatedAt); err != nil {
 			return nil, err
 		}
+		u.FederatedIdentity = federatedIdentityLabel(u.IdentitySource, u.GitHubLogin)
 		users = append(users, u)
 	}
 	return users, rows.Err()
+}
+
+func federatedIdentityLabel(source, githubLogin string) string {
+	switch source {
+	case IdentitySourceGitHub:
+		return "GitHub: " + githubLogin
+	case IdentitySourceEntra:
+		return "Microsoft Entra ID"
+	default:
+		return "Local account"
+	}
+}
+
+// ErrUserNotFound reports that no account matches the requested identifier.
+var ErrUserNotFound = errors.New("user not found")
+
+func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
+	var user User
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE id=$1::uuid`, id).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("read user: %w", err)
+	}
+	user.FederatedIdentity = federatedIdentityLabel(user.IdentitySource, user.GitHubLogin)
+	return user, nil
 }
 func (s *Store) ListSessions(ctx context.Context, userID string) ([]Session, error) {
 	policy, err := s.SessionPolicy(ctx)
@@ -1943,6 +2009,10 @@ func (s *Store) ActiveUserHydraLoginSessionIDs(ctx context.Context, userID strin
 	return sessionIDs, nil
 }
 
+// ErrActiveSessionNotFound reports that no unrevoked session matches the
+// requested identifier.
+var ErrActiveSessionNotFound = errors.New("active session not found")
+
 func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1952,7 +2022,7 @@ func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) err
 	var familyID string
 	if err := tx.QueryRow(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL RETURNING refresh_family_id::text`, id, now.UTC()).Scan(&familyID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("active session not found")
+			return ErrActiveSessionNotFound
 		}
 		return fmt.Errorf("revoke session: %w", err)
 	}
@@ -1991,9 +2061,16 @@ func (s *Store) RevokeSessions(ctx context.Context, sessionIDs []string, now tim
 	return nil
 }
 
+// ErrSessionNotFound reports that no session matches the requested
+// identifier.
+var ErrSessionNotFound = errors.New("session not found")
+
 func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 	var userID string
 	err := s.pool.QueryRow(ctx, `SELECT user_id::text FROM sessions WHERE id=$1::uuid`, id).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrSessionNotFound
+	}
 	if err != nil {
 		return "", fmt.Errorf("read session user: %w", err)
 	}

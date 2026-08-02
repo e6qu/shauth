@@ -138,6 +138,50 @@ func TestLoadAcceptsPasswordlessValidationConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadEnforcesDistinctAdminAPITokens(t *testing.T) {
+	values := map[string]string{
+		"SHAUTH_PUBLIC_URL":            "https://auth.dev.e6qu.dev",
+		"HYDRA_ADMIN_URL":              "http://hydra:4445",
+		"HYDRA_PUBLIC_INTERNAL_URL":    "http://hydra:4444",
+		"DATABASE_URL":                 "postgres://shauth:password@postgres/shauth",
+		"GITHUB_CLIENT_ID":             "client-id",
+		"GITHUB_CLIENT_SECRET":         "client-secret",
+		"GITHUB_DEVELOPER_TEAM":        "e6qu-org/e6qu-org-members",
+		"GITHUB_ADMIN_TEAM":            "e6qu-org/e6qu-org-admins",
+		"SHAUTH_SES_REGION":            "eu-west-1",
+		"SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.dev.e6qu.dev",
+		"SHAUTH_SESSION_RESET_TOKEN":   strings.Repeat("r", 48),
+		"SHAUTH_ADMIN_API_READ_TOKEN":  strings.Repeat("a", 48),
+		"SHAUTH_ADMIN_API_WRITE_TOKEN": strings.Repeat("w", 48),
+	}
+	cfg, err := Load(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.AdminAPIReadToken != values["SHAUTH_ADMIN_API_READ_TOKEN"] || cfg.AdminAPIWriteToken != values["SHAUTH_ADMIN_API_WRITE_TOKEN"] {
+		t.Fatalf("admin API tokens = %q, %q", cfg.AdminAPIReadToken, cfg.AdminAPIWriteToken)
+	}
+	for name, override := range map[string]map[string]string{
+		"short read token":         {"SHAUTH_ADMIN_API_READ_TOKEN": "short"},
+		"short write token":        {"SHAUTH_ADMIN_API_WRITE_TOKEN": "short"},
+		"read equals write":        {"SHAUTH_ADMIN_API_READ_TOKEN": strings.Repeat("w", 48)},
+		"write equals reset token": {"SHAUTH_ADMIN_API_WRITE_TOKEN": strings.Repeat("r", 48)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			overridden := make(map[string]string, len(values))
+			for key, value := range values {
+				overridden[key] = value
+			}
+			for key, value := range override {
+				overridden[key] = value
+			}
+			if _, err := Load(func(key string) string { return overridden[key] }); err == nil {
+				t.Fatal("Load() accepted an unsafe administration API token")
+			}
+		})
+	}
+}
+
 func TestLoadRejectsPartialPasswordlessValidationConfiguration(t *testing.T) {
 	values := map[string]string{
 		"SHAUTH_PUBLIC_URL":            "https://auth.dev.e6qu.dev",
