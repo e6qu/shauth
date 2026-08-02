@@ -95,22 +95,22 @@ type oidcClientInput struct {
 
 func (input oidcClientInput) validate() error {
 	if !oidcClientIDPattern.MatchString(input.ID) {
-		return fmt.Errorf("client ID must contain 3–128 lowercase letters, digits, or hyphens and start with a letter")
+		return identity.Invalid("client ID must contain 3–128 lowercase letters, digits, or hyphens and start with a letter")
 	}
 	if strings.TrimSpace(input.Name) == "" {
-		return fmt.Errorf("client name is required")
+		return identity.Invalid("client name is required")
 	}
 	if len(input.Secret) < 32 {
-		return fmt.Errorf("client secret must contain at least 32 characters")
+		return identity.Invalid("client secret must contain at least 32 characters")
 	}
 	if len(input.RedirectURIs) == 0 {
-		return fmt.Errorf("at least one redirect URI is required")
+		return identity.Invalid("at least one redirect URI is required")
 	}
 	if len(input.PostLogoutRedirectURIs) == 0 {
-		return fmt.Errorf("at least one post-logout redirect URI is required")
+		return identity.Invalid("at least one post-logout redirect URI is required")
 	}
 	if input.FrontChannelLogoutURI == "" && input.BackChannelLogoutURI == "" {
-		return fmt.Errorf("a front-channel or back-channel logout URI is required")
+		return identity.Invalid("a front-channel or back-channel logout URI is required")
 	}
 	if err := validateClientURIs("redirect URI", input.RedirectURIs); err != nil {
 		return err
@@ -141,18 +141,18 @@ func oidcClientOrigin(redirectURIs, postLogoutRedirectURIs []string, frontChanne
 		}
 		coordinate, err := url.Parse(raw)
 		if err != nil {
-			return nil, fmt.Errorf("application coordinate %q is invalid", raw)
+			return nil, identity.Invalid("application coordinate %q is invalid", raw)
 		}
 		if origin == nil {
 			origin = &url.URL{Scheme: strings.ToLower(coordinate.Scheme), Host: strings.ToLower(coordinate.Host)}
 			continue
 		}
 		if !sameOrigin(origin, coordinate) {
-			return nil, fmt.Errorf("all redirect and logout URIs must use one application origin")
+			return nil, identity.Invalid("all redirect and logout URIs must use one application origin")
 		}
 	}
 	if origin == nil {
-		return nil, fmt.Errorf("application origin is unavailable")
+		return nil, identity.Invalid("application origin is unavailable")
 	}
 	return origin, nil
 }
@@ -163,25 +163,25 @@ func sameOrigin(left, right *url.URL) bool {
 
 func validateManagedAppClient(app identity.ManagedApp, client oidcClient) error {
 	if app.OIDCClientID != client.ID {
-		return fmt.Errorf("managed app OpenID Connect client does not match the registered client")
+		return identity.Invalid("managed app OpenID Connect client does not match the registered client")
 	}
 	launchURL, err := url.Parse(app.LaunchURL)
 	if err != nil {
-		return fmt.Errorf("managed app launch URL is invalid")
+		return identity.Invalid("managed app launch URL is invalid")
 	}
 	bridgeURL, err := managedAppLogoutBridgeURL(app.LaunchURL)
 	if err != nil {
 		return err
 	}
 	if len(client.PostLogoutRedirectURIs) != 1 || client.PostLogoutRedirectURIs[0] != bridgeURL {
-		return fmt.Errorf("managed app must register only its exact Shauth logout bridge URI")
+		return identity.Invalid("managed app must register only its exact Shauth logout bridge URI")
 	}
 	clientOrigin, err := oidcClientOrigin(client.RedirectURIs, client.PostLogoutRedirectURIs, client.FrontChannelLogoutURI, client.BackChannelLogoutURI)
 	if err != nil {
 		return err
 	}
 	if !sameOrigin(clientOrigin, launchURL) {
-		return fmt.Errorf("managed app and OpenID Connect client must use one application origin")
+		return identity.Invalid("managed app and OpenID Connect client must use one application origin")
 	}
 	return nil
 }
@@ -240,10 +240,10 @@ func validateClientURIs(label string, uris []string) error {
 		}
 		uri, err := url.Parse(rawURI)
 		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.User != nil || uri.Fragment != "" {
-			return fmt.Errorf("%s %q must be an absolute URI without user information or a fragment", label, rawURI)
+			return identity.Invalid("%s %q must be an absolute URI without user information or a fragment", label, rawURI)
 		}
 		if uri.Scheme != "https" && !isLoopbackRedirect(uri) {
-			return fmt.Errorf("%s %q must use HTTPS unless it targets loopback", label, rawURI)
+			return identity.Invalid("%s %q must use HTTPS unless it targets loopback", label, rawURI)
 		}
 	}
 	return nil
@@ -279,7 +279,7 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		return nil, err
 	}
 	callback := cfg.PublicURL.ResolveReference(&url.URL{Path: "/oauth/github/callback"}).String()
-	templates, err := template.New("pages").Parse(pageTemplates)
+	templates, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
 	if err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
@@ -290,11 +290,11 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 	appController := managedapps.New()
 	proxy := httputil.NewSingleHostReverseProxy(cfg.HydraPublicURL)
 	proxy.ModifyResponse = ensureRedirectBody
+	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, monitoringClient: monitoring.NewClient(), oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
-		http.Error(w, "OAuth provider unavailable", http.StatusBadGateway)
+		server.failPage(w, r, http.StatusBadGateway, "The authorization provider is unavailable. Please try signing in again shortly.")
 	}
-	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, monitoringClient: monitoring.NewClient(), oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
 	if cfg.EntraTenantID != "" {
 		issuer := "https://login.microsoftonline.com/" + cfg.EntraTenantID + "/v2.0"
 		discoveryContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -359,6 +359,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/apps/validations", s.applicationValidationStatusAPI)
 	mux.HandleFunc("GET /api/v1/apps/validations/history", s.applicationValidationHistoryAPI)
 	mux.HandleFunc("GET /api/v1/users", s.usersAPI)
+	mux.HandleFunc("GET /api/v1/users/{id}", s.userAPI)
 	mux.HandleFunc("GET /api/v1/users/{id}/sessions", s.userSessionsAPI)
 	mux.HandleFunc("GET /api/v1/session-policy", s.sessionPolicyAPI)
 	mux.HandleFunc("GET /api/v1/oidc-clients", s.oidcClientsAPI)
@@ -430,6 +431,9 @@ func (s *Server) Handler() http.Handler {
 	// CSRF enforcement, so this bearer-token POST must live under /internal/.
 	mux.HandleFunc("POST /internal/apps/validations/enqueue", s.applicationValidationEnqueueAPI)
 	mux.HandleFunc("GET /monitoring", s.monitoring)
+	mux.HandleFunc("GET /favicon.svg", serveFavicon)
+	mux.HandleFunc("GET /favicon.ico", serveFavicon)
+	mux.HandleFunc("/", s.notFound)
 	return securityHeaders(csrfPosts(s.config.PublicURL, mux))
 }
 
@@ -449,8 +453,24 @@ func securityHeaders(next http.Handler) http.Handler {
 func serveThemeScript(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	_, _ = w.Write([]byte(`!function(){try{var root=document.documentElement,theme=localStorage.getItem("shauth-theme");if(theme){root.dataset.theme=theme}function setup(){var button=document.getElementById("theme-toggle");if(!button)return;function label(){var dark=root.dataset.theme==="dark";button.setAttribute("aria-pressed",String(dark));button.setAttribute("aria-label",dark?"Switch to light mode":"Switch to dark mode");button.innerHTML="<span aria-hidden=\"true\">"+(dark?"☀":"☾")+"</span>"}button.addEventListener("click",function(){root.dataset.theme=root.dataset.theme==="dark"?"light":"dark";localStorage.setItem("shauth-theme",root.dataset.theme);label()});label()}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",setup)}else{setup()}}catch(error){}}();`))
-	_, _ = w.Write([]byte(`document.addEventListener("submit",function(event){var form=event.target;if(!(form instanceof HTMLFormElement)||form.method.toLowerCase()!=="post")return;var input=form.querySelector('input[name="_csrf"]');if(!input){input=document.createElement("input");input.type="hidden";input.name="_csrf";form.appendChild(input)}var match=document.cookie.match(/(?:^|; )shauth_csrf=([^;]*)/);input.value=match?decodeURIComponent(match[1]):""},true);`))
+	// Applied before first paint, so a chosen theme does not flash. The
+	// toggle cycles system -> light -> dark and reports the state it is in,
+	// rather than claiming "light" while the system renders dark.
+	_, _ = w.Write([]byte(`!function(){try{var root=document.documentElement,stored=localStorage.getItem("shauth-theme");if(stored==="light"||stored==="dark"){root.dataset.theme=stored}
+function effective(){var mode=root.dataset.theme;if(mode==="light"||mode==="dark")return mode;return window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}
+function setup(){var button=document.getElementById("theme-toggle");if(!button)return;var order=["system","light","dark"],names={system:"follow the system theme",light:"light mode",dark:"dark mode"};
+function label(){var mode=root.dataset.theme||"system",next=order[(order.indexOf(mode)+1)%order.length],dark=effective()==="dark";button.setAttribute("aria-label","Theme: "+names[mode]+". Switch to "+names[next]+".");button.innerHTML="<span aria-hidden=\"true\">"+(dark?"\u2600":"\u263e")+"</span>"}
+button.addEventListener("click",function(){var mode=root.dataset.theme||"system",next=order[(order.indexOf(mode)+1)%order.length];root.dataset.theme=next;if(next==="system"){localStorage.removeItem("shauth-theme")}else{localStorage.setItem("shauth-theme",next)}label()});label()}
+if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",setup)}else{setup()}}catch(error){}}();`))
+	// A destructive action asks first. The confirmation is attached by
+	// attribute so it also covers forms inserted by HTMX.
+	_, _ = w.Write([]byte(`document.addEventListener("submit",function(event){var form=event.target;if(!(form instanceof HTMLFormElement))return;var question=form.getAttribute("data-confirm");if(question&&!window.confirm(question)){event.preventDefault();event.stopPropagation()}},true);`))
+	// Forms rendered by the server already carry their CSRF token; this
+	// covers any form inserted into the page after it loaded.
+	_, _ = w.Write([]byte(`document.addEventListener("submit",function(event){var form=event.target;if(!(form instanceof HTMLFormElement)||form.method.toLowerCase()!=="post")return;var input=form.querySelector('input[name="_csrf"]');if(!input){input=document.createElement("input");input.type="hidden";input.name="_csrf";form.appendChild(input)}if(!input.value){var match=document.cookie.match(/(?:^|; )shauth_csrf=([^;]*)/);input.value=match?decodeURIComponent(match[1]):""}},true);`))
+	// A newly inserted table row replaces the empty-state row rather than
+	// appearing beneath it.
+	_, _ = w.Write([]byte(`document.addEventListener("htmx:afterSwap",function(){var empty=document.getElementById("users-empty");if(empty&&empty.parentNode&&empty.parentNode.querySelectorAll("tr").length>1){empty.remove()}});`))
 }
 
 func serveValidatorBootstrapScript(w http.ResponseWriter, _ *http.Request) {
@@ -464,6 +484,24 @@ func noStore(w http.ResponseWriter) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
+
+// csrfTokenKey carries the request's CSRF token so every server-rendered
+// form can embed it. Injecting the token in the browser would make every
+// state change depend on JavaScript.
+type csrfTokenKey struct{}
+
+// csrfToken reports the CSRF token for this request, whether it arrived in a
+// cookie or was minted by the middleware for this response.
+func csrfToken(r *http.Request) string {
+	if token, ok := r.Context().Value(csrfTokenKey{}).(string); ok {
+		return token
+	}
+	if cookie, err := r.Cookie(csrfCookie); err == nil {
+		return cookie.Value
+	}
+	return ""
+}
+
 func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
@@ -474,6 +512,7 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 					return
 				}
 				http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: token, Path: "/", Secure: publicURL.Scheme == "https", SameSite: http.SameSiteLaxMode})
+				r = r.WithContext(context.WithValue(r.Context(), csrfTokenKey{}, token))
 			}
 		}
 		if r.Method == http.MethodPost && r.URL.Path != "/oauth2/token" && !strings.HasPrefix(r.URL.Path, "/internal/") {
@@ -501,6 +540,7 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 	})
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := s.store.Ping(ctx); err != nil {
@@ -514,9 +554,21 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = fmt.Fprintln(w, "ok")
 }
+
+// notFound answers an unrouted path. Machine namespaces receive the JSON
+// error shape their clients parse; browsers receive a navigable page.
+func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/internal/") {
+		noStore(w)
+		writeAdminAPIError(w, http.StatusNotFound, "no such endpoint")
+		return
+	}
+	s.failPage(w, r, http.StatusNotFound, "That page does not exist.")
+}
+
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
-	s.render(w, "home", map[string]any{"User": user, "SignedIn": err == nil, "IsAdmin": err == nil && user.Role == identity.RoleAdmin})
+	s.render(w, "home", s.view(r, "Home", map[string]any{"User": newUserRecord(user), "SignedIn": err == nil, "IsAdmin": err == nil && user.Role == identity.RoleAdmin}))
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := s.current(r); err == nil {
@@ -527,11 +579,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if isOIDCNext(next) {
 		allowOIDCFormAction(w)
 	}
-	s.render(w, "login", map[string]any{"Next": next, "Error": r.URL.Query().Get("error"), "EntraEnabled": s.entraOAuth != nil})
+	s.render(w, "login", s.view(r, "Sign in", map[string]any{"Next": next, "Error": r.URL.Query().Get("error"), "EntraEnabled": s.entraOAuth != nil, "SignedIn": false}))
 }
 func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", 400)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
 	user, err := s.store.AuthenticatePassword(r.Context(), r.Form.Get("username"), r.Form.Get("password"))
@@ -546,7 +598,7 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) logoutConfirm(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
-	s.render(w, "logout", map[string]any{"SignedIn": err == nil, "User": user, "IsAdmin": err == nil && user.Role == identity.RoleAdmin})
+	s.render(w, "logout", s.view(r, "Sign out", map[string]any{"SignedIn": err == nil, "User": newUserRecord(user), "IsAdmin": err == nil && user.Role == identity.RoleAdmin}))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -561,7 +613,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		localErr := s.store.RevokeSession(r.Context(), session.ID, time.Now())
 		s.expireCookie(w, browserSessionCookie)
 		log.Printf("logout correlation creation failed after exact local revocation: local=%v correlation=%v", localErr, err)
-		http.Error(w, "browser session ended but connected application logout could not start", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "browser session ended but connected application logout could not start")
 		return
 	}
 	s.expireCookie(w, browserSessionCookie)
@@ -572,7 +624,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if len(grant.BrowserHydraSessionIDs) == 0 {
 		if err := s.finalizeProviderLogout(r.Context(), grant); err != nil {
 			s.scheduleLogoutRecovery(r.Context(), grant, err)
-			http.Error(w, "local sessions ended but connected application logout did not complete", http.StatusBadGateway)
+			s.failPage(w, r, http.StatusBadGateway, "local sessions ended but connected application logout did not complete")
 			return
 		}
 		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
@@ -590,7 +642,7 @@ func (s *Server) providerLogoutStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) signedOut(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "signed-out", map[string]any{"SignedIn": false})
+	s.render(w, "signed-out", s.view(r, "Signed out", map[string]any{"SignedIn": false}))
 }
 
 func (s *Server) logoutComplete(w http.ResponseWriter, r *http.Request) {
@@ -613,7 +665,7 @@ func (s *Server) logoutComplete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 	state, err := newState()
 	if err != nil {
-		http.Error(w, "could not begin GitHub login", 500)
+		s.failPage(w, r, http.StatusInternalServerError, "could not begin GitHub login")
 		return
 	}
 	s.setCookie(w, &http.Cookie{Name: githubStateCookieName(state), Value: relativeNext(r.URL.Query().Get("next")), Path: "/oauth/github/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
@@ -624,32 +676,32 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	cookieName, validState := validGitHubStateCookieName(state)
 	cookie, err := r.Cookie(cookieName)
 	if !validState || err != nil {
-		http.Error(w, "GitHub login state did not match", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "GitHub login state did not match")
 		return
 	}
 	s.expireCookieAtPath(w, cookieName, "/oauth/github/callback")
 	token, err := s.oauth.Exchange(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
-		http.Error(w, "GitHub authorization failed", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "GitHub authorization failed")
 		return
 	}
 	profile, err := s.github.Profile(r.Context(), token.AccessToken)
 	if err != nil {
-		http.Error(w, "could not read GitHub identity", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not read GitHub identity")
 		return
 	}
 	role, allowed, err := s.githubRole(r.Context(), token.AccessToken, profile)
 	if err != nil {
-		http.Error(w, "could not verify GitHub organization membership", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not verify GitHub organization membership")
 		return
 	}
 	if !allowed {
-		http.Error(w, "GitHub account is not authorized for e6qu", http.StatusForbidden)
+		s.failPage(w, r, http.StatusForbidden, "GitHub account is not authorized for e6qu")
 		return
 	}
 	user, err := s.store.FindOrCreateGitHubUser(r.Context(), profile.ID, profile.Login, profile.Email, role)
 	if err != nil {
-		http.Error(w, "could not establish local account", 500)
+		s.failPage(w, r, http.StatusInternalServerError, "could not establish local account")
 		return
 	}
 	if !s.startSession(w, r, user) {
@@ -665,17 +717,17 @@ func (s *Server) entraStart(w http.ResponseWriter, r *http.Request) {
 	}
 	state, err := newState()
 	if err != nil {
-		http.Error(w, "could not begin Microsoft Entra ID login", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not begin Microsoft Entra ID login")
 		return
 	}
 	nonce, err := newState()
 	if err != nil {
-		http.Error(w, "could not begin Microsoft Entra ID login", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not begin Microsoft Entra ID login")
 		return
 	}
 	cookieValue, err := json.Marshal(map[string]string{"next": relativeNext(r.URL.Query().Get("next")), "nonce": nonce})
 	if err != nil {
-		http.Error(w, "could not begin Microsoft Entra ID login", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not begin Microsoft Entra ID login")
 		return
 	}
 	s.setCookie(w, &http.Cookie{Name: entraStateCookieName(state), Value: base64.RawURLEncoding.EncodeToString(cookieValue), Path: "/oauth/entra/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
@@ -701,44 +753,44 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 	cookieName, validState := validEntraStateCookieName(state)
 	cookie, err := r.Cookie(cookieName)
 	if !validState || err != nil {
-		http.Error(w, "Microsoft Entra ID login state did not match", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "Microsoft Entra ID login state did not match")
 		return
 	}
 	s.expireCookieAtPath(w, cookieName, "/oauth/entra/callback")
 	var transaction map[string]string
 	transactionJSON, err := base64.RawURLEncoding.DecodeString(cookie.Value)
 	if err != nil || json.Unmarshal(transactionJSON, &transaction) != nil || transaction["nonce"] == "" {
-		http.Error(w, "Microsoft Entra ID login state was invalid", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "Microsoft Entra ID login state was invalid")
 		return
 	}
 	token, err := s.entraOAuth.Exchange(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
-		http.Error(w, "Microsoft Entra ID authorization failed", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID authorization failed")
 		return
 	}
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		http.Error(w, "Microsoft Entra ID authorization omitted the ID token", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID authorization omitted the ID token")
 		return
 	}
 	idToken, err := s.entraVerify.Verify(r.Context(), rawIDToken)
 	if err != nil {
-		http.Error(w, "Microsoft Entra ID token verification failed", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID token verification failed")
 		return
 	}
 	var claims entraClaims
 	if err := idToken.Claims(&claims); err != nil {
-		http.Error(w, "Microsoft Entra ID identity claims were invalid", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID identity claims were invalid")
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(transaction["nonce"])) != 1 || !strings.EqualFold(claims.TenantID, s.config.EntraTenantID) || claims.ObjectID == "" || claims.Subject == "" {
-		http.Error(w, "Microsoft Entra ID identity did not match this Shauth tenant", http.StatusForbidden)
+		s.failPage(w, r, http.StatusForbidden, "Microsoft Entra ID identity did not match this Shauth tenant")
 		return
 	}
 	email, emailVerified := entraEmail(claims)
 	user, err := s.store.FindOrCreateEntraUser(r.Context(), claims.TenantID, claims.ObjectID, entraUsername(claims.PreferredUsername, email, claims.ObjectID), email, emailVerified)
 	if err != nil {
-		http.Error(w, "could not establish local account", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not establish local account")
 		return
 	}
 	if !s.startSession(w, r, user) {
@@ -784,7 +836,7 @@ func validEntraStateCookieName(state string) (string, bool) {
 func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 	challenge := r.URL.Query().Get("login_challenge")
 	if challenge == "" {
-		http.Error(w, "missing login_challenge", 400)
+		s.failPage(w, r, http.StatusBadRequest, "missing login_challenge")
 		return
 	}
 	user, session, err := s.current(r)
@@ -794,21 +846,21 @@ func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	policy, err := s.store.SessionPolicy(r.Context())
 	if err != nil {
-		http.Error(w, "could not load session policy", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not load session policy")
 		return
 	}
 	loginRequest, err := s.hydraLoginRequest(r.Context(), challenge)
 	if err != nil {
-		http.Error(w, "could not load OAuth login request", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not load OAuth login request")
 		return
 	}
 	if loginRequest.Skip && loginRequest.Subject != user.ID {
-		http.Error(w, "OAuth login request belongs to a different account", http.StatusForbidden)
+		s.failPage(w, r, http.StatusForbidden, "OAuth login request belongs to a different account")
 		return
 	}
 	redirect, err := s.hydraAccept(r.Context(), "/admin/oauth2/auth/requests/login/accept", challenge, map[string]any{"subject": user.ID, "identity_provider_session_id": session.ID, "remember": true, "remember_for": int64(policy.OIDCSessionLifetime / time.Second)})
 	if err != nil {
-		http.Error(w, "could not complete OAuth login", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not complete OAuth login")
 		return
 	}
 	if err := s.store.RecordHydraLoginSession(r.Context(), session.ID, loginRequest.SessionID, time.Now()); err != nil {
@@ -817,7 +869,7 @@ func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 		} else {
 			log.Printf("delete accepted Ory Hydra login after local correlation failed: %v", err)
 		}
-		http.Error(w, "could not correlate OAuth login session", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not correlate OAuth login session")
 		return
 	}
 	http.Redirect(w, r, redirect, http.StatusFound)
@@ -830,23 +882,23 @@ func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	challenge := r.URL.Query().Get("consent_challenge")
 	if challenge == "" {
-		http.Error(w, "missing consent_challenge", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "missing consent_challenge")
 		return
 	}
 	consent, err := s.hydraConsentRequest(r.Context(), challenge)
 	if err != nil {
-		http.Error(w, "could not load OAuth consent request", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not load OAuth consent request")
 		return
 	}
 	managed, err := s.store.IsManagedOIDCClient(r.Context(), consent.ClientID)
 	if err != nil {
-		http.Error(w, "could not identify the connected application", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not identify the connected application")
 		return
 	}
 	if managed {
 		redirect, err := s.acceptHydraConsent(r.Context(), challenge, consent.Scopes, user)
 		if err != nil {
-			http.Error(w, "could not complete OAuth consent", http.StatusBadGateway)
+			s.failPage(w, r, http.StatusBadGateway, "could not complete OAuth consent")
 			return
 		}
 		if err := s.store.RevalidateSession(r.Context(), user.ID, session.ID, time.Now()); err != nil {
@@ -855,14 +907,14 @@ func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
 					log.Printf("delete accepted Ory Hydra consent after browser logout: revalidate=%v cleanup=%v", err, cleanupErr)
 				}
 			}
-			http.Error(w, "browser session ended before OAuth consent completed", http.StatusConflict)
+			s.failPage(w, r, http.StatusConflict, "browser session ended before OAuth consent completed")
 			return
 		}
 		http.Redirect(w, r, redirect, http.StatusFound)
 		return
 	}
 	allowOIDCFormAction(w)
-	s.render(w, "consent", map[string]any{"Challenge": challenge, "Scopes": consent.Scopes})
+	s.render(w, "consent", s.view(r, "Authorize application", map[string]any{"Challenge": challenge, "Scopes": consent.Scopes}))
 }
 
 func (s *Server) hydraError(w http.ResponseWriter, r *http.Request) {
@@ -877,7 +929,7 @@ func (s *Server) hydraError(w http.ResponseWriter, r *http.Request) {
 		message = "The authorization service is temporarily unavailable. Please try again shortly."
 	}
 	w.WriteHeader(http.StatusBadRequest)
-	s.render(w, "oauth-error", map[string]any{"Code": code, "Message": message})
+	s.render(w, "oauth-error", s.view(r, "Authorization error", map[string]any{"Code": code, "Message": message}))
 }
 func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 	user, session, err := s.current(r)
@@ -886,18 +938,18 @@ func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", 400)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
 	challenge := r.Form.Get("challenge")
 	consent, err := s.hydraConsentRequest(r.Context(), challenge)
 	if err != nil {
-		http.Error(w, "could not load OAuth consent request", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not load OAuth consent request")
 		return
 	}
 	redirect, err := s.acceptHydraConsent(r.Context(), challenge, r.Form["scope"], user)
 	if err != nil {
-		http.Error(w, "could not complete OAuth consent", 502)
+		s.failPage(w, r, http.StatusBadGateway, "could not complete OAuth consent")
 		return
 	}
 	if err := s.store.RevalidateSession(r.Context(), user.ID, session.ID, time.Now()); err != nil {
@@ -906,7 +958,7 @@ func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 				log.Printf("delete accepted explicit Ory Hydra consent after browser logout: revalidate=%v cleanup=%v", err, cleanupErr)
 			}
 		}
-		http.Error(w, "browser session ended before OAuth consent completed", http.StatusConflict)
+		s.failPage(w, r, http.StatusConflict, "browser session ended before OAuth consent completed")
 		return
 	}
 	http.Redirect(w, r, redirect, 302)
@@ -941,17 +993,17 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 	request, err := s.hydraLogoutRequest(r.Context(), challenge)
 	if err != nil {
 		log.Printf("load Ory Hydra logout request: %v", err)
-		http.Error(w, "could not load OAuth logout request", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not load OAuth logout request")
 		return
 	}
 	correlationCookie, err := r.Cookie(logoutCorrelationCookie)
 	if err != nil {
 		if !request.RPInitiated {
 			if rejectErr := s.hydraRejectLogout(r.Context(), challenge); rejectErr != nil {
-				http.Error(w, "could not reject unconfirmed OAuth logout", http.StatusBadGateway)
+				s.failPage(w, r, http.StatusBadGateway, "could not reject unconfirmed OAuth logout")
 				return
 			}
-			http.Error(w, "logout confirmation is required", http.StatusBadRequest)
+			s.failPage(w, r, http.StatusBadRequest, "logout confirmation is required")
 			return
 		}
 		s.hydraLogoutWithoutBrowserCookie(w, r, request, challenge)
@@ -960,7 +1012,7 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 	grant, err := s.store.ConsumeLogoutCorrelationGrant(r.Context(), correlationCookie.Value, request.Subject, time.Now())
 	s.expireCookieAtPath(w, logoutCorrelationCookie, logoutCorrelationPath)
 	if err != nil {
-		http.Error(w, "OAuth logout request cannot be correlated with this browser", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "OAuth logout request cannot be correlated with this browser")
 		return
 	}
 	preservedHydraSessions, err := preservedPublicLogoutSessions(request.SessionID, grant.BrowserHydraSessionIDs)
@@ -974,25 +1026,25 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hydraLogoutWithoutBrowserCookie(w http.ResponseWriter, r *http.Request, request hydraLogoutRequest, challenge string) {
 	if request.SessionID == "" {
-		http.Error(w, "relying-party logout has no provider session", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "relying-party logout has no provider session")
 		return
 	}
 	if request.Client.ID == "" {
 		if rejectErr := s.hydraRejectLogout(r.Context(), challenge); rejectErr != nil {
-			http.Error(w, "could not reject uncorrelated OAuth logout", http.StatusBadGateway)
+			s.failPage(w, r, http.StatusBadGateway, "could not reject uncorrelated OAuth logout")
 			return
 		}
-		http.Error(w, "relying-party logout has no managed client", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "relying-party logout has no managed client")
 		return
 	}
 	raw, createdGrant, err := s.store.CreateLogoutCorrelationGrant(r.Context(), request.Subject, "", request.SessionID, request.Client.ID, time.Now())
 	if err != nil {
 		log.Printf("reject uncorrelated provider logout without local session mutation: %v", err)
 		if rejectErr := s.hydraRejectLogout(r.Context(), challenge); rejectErr != nil {
-			http.Error(w, "could not reject uncorrelated OAuth logout", http.StatusBadGateway)
+			s.failPage(w, r, http.StatusBadGateway, "could not reject uncorrelated OAuth logout")
 			return
 		}
-		http.Error(w, "OAuth logout could not be correlated with an exact provider session", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "OAuth logout could not be correlated with an exact provider session")
 		return
 	}
 	preservedHydraSessions, err := preservedPublicLogoutSessions(request.SessionID, createdGrant.BrowserHydraSessionIDs)
@@ -1003,12 +1055,12 @@ func (s *Server) hydraLogoutWithoutBrowserCookie(w http.ResponseWriter, r *http.
 	}
 	grant, err := s.store.ConsumeLogoutCorrelationGrant(r.Context(), raw, request.Subject, time.Now())
 	if err != nil {
-		http.Error(w, "could not consume connected application logout", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not consume connected application logout")
 		return
 	}
 	if grant.ID != createdGrant.ID {
 		s.scheduleLogoutRecovery(r.Context(), grant, fmt.Errorf("logout correlation identifier changed during consumption"))
-		http.Error(w, "could not correlate connected application logout", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not correlate connected application logout")
 		return
 	}
 	s.completeLogout(w, r, grant, preservedHydraSessions, challenge, raw)
@@ -1036,14 +1088,14 @@ func (s *Server) completeLogout(w http.ResponseWriter, r *http.Request, grant id
 	if err := s.revokeOtherHydraSessions(r.Context(), grant.ActiveHydraSessionIDs, preservedHydraSessions...); err != nil {
 		log.Printf("revoke remote Ory Hydra sessions during public logout: %v", err)
 		s.scheduleLogoutRecovery(r.Context(), grant, err)
-		http.Error(w, "local sessions ended but connected application logout did not complete", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "local sessions ended but connected application logout did not complete")
 		return
 	}
 	redirect, err := s.hydraAcceptLogout(r.Context(), challenge)
 	if err != nil {
 		log.Printf("accept Ory Hydra logout request after revoking local session: %v", err)
 		s.scheduleLogoutRecovery(r.Context(), grant, err)
-		http.Error(w, "could not complete OAuth logout", http.StatusBadGateway)
+		s.failPage(w, r, http.StatusBadGateway, "could not complete OAuth logout")
 		return
 	}
 	s.setCookie(w, &http.Cookie{Name: logoutCompletionCookie, Value: completionToken, Path: logoutCompletionPath, HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(identity.LogoutCompletionLifetime), MaxAge: int(identity.LogoutCompletionLifetime / time.Second)})
@@ -1148,26 +1200,24 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "admin", map[string]any{"SignedIn": true, "IsAdmin": true})
+	s.render(w, "admin", s.view(r, "Administration", map[string]any{"SignedIn": true, "IsAdmin": true}))
 }
 
 func (s *Server) adminConnectors(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "connectors", map[string]any{
-		"SignedIn":         true,
-		"IsAdmin":          true,
-		"GitHubEnabled":    s.oauth != nil,
-		"EntraEnabled":     s.entraOAuth != nil,
-		"EntraTenantID":    s.config.EntraTenantID,
-		"GitHubAdminTeam":  s.config.GitHubAdminTeam,
-		"GitHubMemberTeam": s.config.GitHubDeveloperTeam,
-	})
+	s.render(w, "connectors", s.view(r, "Connectors", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Connectors": s.connectors(),
+	}))
 }
 
 type managedAppView struct {
 	identity.ManagedApp
+	// CSRF lets the re-validation control render inside a component that is
+	// also served standalone as an HTMX fragment, where the page root is
+	// not in scope.
+	CSRF                   string
 	DisplayReleaseRevision string
 	Healthy                bool
 	StatusCode             int
@@ -1248,25 +1298,30 @@ func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
 	}
 	apps, err := s.appViews(r.Context())
 	if err != nil {
-		http.Error(w, "could not query apps", http.StatusInternalServerError)
+		log.Printf("list applications: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The application catalog could not be loaded.")
 		return
 	}
-	s.render(w, "apps", map[string]any{"SignedIn": true, "User": user, "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin})
+	token := csrfToken(r)
+	for index := range apps {
+		apps[index].CSRF = token
+	}
+	s.render(w, "apps", s.view(r, "Apps", map[string]any{"SignedIn": true, "User": newUserRecord(user), "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin}))
 }
 
 func (s *Server) appValidationStatus(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := s.current(r); err != nil {
-		http.Error(w, "sign-in required", http.StatusUnauthorized)
+		s.failPage(w, r, http.StatusUnauthorized, "sign-in required")
 		return
 	}
 	app, err := s.store.ManagedApp(r.Context(), r.PathValue("id"))
 	if err != nil {
-		http.Error(w, "application not found", http.StatusNotFound)
+		s.failPage(w, r, http.StatusNotFound, "application not found")
 		return
 	}
 	validations, err := s.store.LatestAppValidationRunsForApp(r.Context(), app.ID)
 	if err != nil {
-		http.Error(w, "could not query application validation", http.StatusInternalServerError)
+		s.failPage(w, r, http.StatusInternalServerError, "could not query application validation")
 		return
 	}
 	view := newManagedAppView(app)
@@ -1287,12 +1342,27 @@ func (s *Server) adminApps(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	s.renderAdminApps(w, r, http.StatusOK, r.URL.Query().Get("error"), identity.ManagedApp{})
+}
+
+func (s *Server) renderAdminApps(w http.ResponseWriter, r *http.Request, status int, message string, form identity.ManagedApp) {
 	apps, err := s.appViews(r.Context())
 	if err != nil {
-		http.Error(w, "could not query apps", http.StatusInternalServerError)
+		log.Printf("list applications: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The application catalog could not be loaded.")
 		return
 	}
-	s.render(w, "admin-apps", map[string]any{"SignedIn": true, "IsAdmin": true, "Apps": apps, "Error": r.URL.Query().Get("error")})
+	token := csrfToken(r)
+	for index := range apps {
+		apps[index].CSRF = token
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	s.render(w, "admin-apps", s.view(r, "Applications", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Apps": apps,
+		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+	}))
 }
 
 func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
@@ -1300,7 +1370,7 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
 	app := identity.ManagedApp{
@@ -1315,47 +1385,23 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 		SignedOutURL:    strings.TrimSpace(r.Form.Get("signed_out_url")),
 		ReleaseRevision: strings.TrimSpace(r.Form.Get("release_revision")),
 	}
-	clients, err := s.hydraClients(r.Context())
+	created, err := s.createApp(r.Context(), app)
 	if err != nil {
-		http.Error(w, "could not verify OAuth client", http.StatusBadGateway)
+		status, message := describeOperationFailure("create managed app", err)
+		s.renderAdminApps(w, r, status, message, app)
 		return
 	}
-	var registeredClient *oidcClient
-	for _, client := range clients {
-		if client.ID == app.OIDCClientID {
-			clientCopy := client
-			registeredClient = &clientCopy
-			break
-		}
-	}
-	if registeredClient == nil {
-		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape("register the OIDC client before adding its app"), http.StatusSeeOther)
-		return
-	}
-	app.OIDCContractHash = oidcClientContractHash(*registeredClient)
-	if err := identity.ValidateManagedApp(app); err != nil {
-		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-		return
-	}
-	if err := validateManagedAppClient(app, *registeredClient); err != nil {
-		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-		return
-	}
-	if _, err := s.store.CreateManagedApp(r.Context(), app); err != nil {
-		http.Redirect(w, r, "/admin/apps?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-		return
-	}
-	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/apps?done="+url.QueryEscape("Registered the application "+created.Name+"."), http.StatusSeeOther)
 }
 
 func (s *Server) validateApp(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
 	if err != nil {
-		http.Error(w, "sign-in required", http.StatusUnauthorized)
+		s.failPage(w, r, http.StatusUnauthorized, "sign-in required")
 		return
 	}
-	if err := s.store.EnqueueAppValidations(r.Context(), r.PathValue("id"), user.ID, time.Now()); err != nil {
-		http.Error(w, "could not queue application validation", http.StatusBadRequest)
+	if _, err := s.enqueueAppValidations(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}, actor{UserID: user.ID}); err != nil {
+		s.failOperation(w, r, "queue application validation", "/apps", err)
 		return
 	}
 	destination := "/apps#validation-" + url.PathEscape(r.PathValue("id"))
@@ -1380,11 +1426,11 @@ type validatorBootstrapResponse struct {
 
 func (s *Server) requireValidator(w http.ResponseWriter, r *http.Request) bool {
 	if s.config.ValidatorToken == "" {
-		http.Error(w, "application validator is not configured", http.StatusServiceUnavailable)
+		writeAdminAPIError(w, http.StatusServiceUnavailable, "application validator is not configured")
 		return false
 	}
 	if !bearerTokenMatches(r, s.config.ValidatorToken) {
-		http.Error(w, "validator authentication failed", http.StatusUnauthorized)
+		unauthorized(w, "validator authentication failed")
 		return false
 	}
 	return true
@@ -1392,22 +1438,29 @@ func (s *Server) requireValidator(w http.ResponseWriter, r *http.Request) bool {
 
 func bearerTokenMatches(r *http.Request, expected string) bool {
 	values := r.Header.Values("Authorization")
-	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+	if len(values) != 1 || len(values[0]) < 7 || !strings.EqualFold(values[0][:7], "bearer ") {
 		return false
 	}
-	provided := strings.TrimPrefix(values[0], "Bearer ")
+	provided := values[0][7:]
 	return len(provided) == len(expected) && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+// unauthorized answers a missing or wrong credential with the challenge RFC
+// 7235 requires, so a standard client can discover the scheme.
+func unauthorized(w http.ResponseWriter, message string) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeAdminAPIError(w, http.StatusUnauthorized, message)
 }
 
 // requireValidationStatusToken authorizes the closed machine-readable
 // application API with the shared read-and-trigger bearer credential.
 func (s *Server) requireValidationStatusToken(w http.ResponseWriter, r *http.Request) bool {
 	if s.config.ValidationStatusToken == "" {
-		http.Error(w, "application validation status is not configured", http.StatusServiceUnavailable)
+		writeAdminAPIError(w, http.StatusServiceUnavailable, "application validation status is not configured")
 		return false
 	}
 	if !bearerTokenMatches(r, s.config.ValidationStatusToken) {
-		http.Error(w, "validation status authentication failed", http.StatusUnauthorized)
+		unauthorized(w, "validation status authentication failed")
 		return false
 	}
 	return true
@@ -1450,7 +1503,7 @@ func (s *Server) applicationValidationStatusAPI(w http.ResponseWriter, r *http.R
 	runs, err := s.store.LatestAppValidationRuns(r.Context())
 	if err != nil {
 		log.Printf("list application validation status: %v", err)
-		http.Error(w, "could not list application validation status", http.StatusInternalServerError)
+		writeAdminAPIError(w, http.StatusInternalServerError, "could not list application validation status")
 		return
 	}
 	records := make([]validationStatusRecord, 0, len(runs)*2)
@@ -1528,7 +1581,7 @@ func (s *Server) applicationsAPI(w http.ResponseWriter, r *http.Request) {
 	views, err := s.appViews(r.Context())
 	if err != nil {
 		log.Printf("list applications: %v", err)
-		http.Error(w, "could not list applications", http.StatusInternalServerError)
+		writeAdminAPIError(w, http.StatusInternalServerError, "could not list applications")
 		return
 	}
 	records := make([]appRecord, 0, len(views))
@@ -1561,13 +1614,13 @@ func (s *Server) applicationValidationHistoryAPI(w http.ResponseWriter, r *http.
 	}
 	limit, err := parseValidationHistoryLimit(r.URL.Query().Get("limit"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAdminAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	runs, err := s.store.AppValidationRunHistory(r.Context(), strings.TrimSpace(r.URL.Query().Get("slug")), limit)
 	if err != nil {
 		log.Printf("list application validation history: %v", err)
-		http.Error(w, "could not list application validation history", http.StatusInternalServerError)
+		writeAdminAPIError(w, http.StatusInternalServerError, "could not list application validation history")
 		return
 	}
 	records := make([]validationStatusRecord, 0, len(runs))
@@ -1582,8 +1635,24 @@ func (s *Server) applicationValidationHistoryAPI(w http.ResponseWriter, r *http.
 	})
 }
 
+// validationEnqueueRequest selects the app to re-validate. An absent slug
+// queues every registered app; a present but empty slug is a caller mistake
+// -- typically an unset variable in a deployment script -- and is rejected
+// rather than silently starting a real browser check against every relying
+// party.
 type validationEnqueueRequest struct {
-	Slug string `json:"slug"`
+	Slug *string `json:"slug"`
+}
+
+func (request validationEnqueueRequest) ref() (identity.ManagedAppRef, error) {
+	if request.Slug == nil {
+		return identity.ManagedAppRef{}, nil
+	}
+	slug := strings.TrimSpace(*request.Slug)
+	if slug == "" {
+		return identity.ManagedAppRef{}, identity.Invalid("slug must name an application, or be omitted to queue every application")
+	}
+	return identity.ManagedAppRef{Slug: slug}, nil
 }
 
 type validationEnqueueRecord struct {
@@ -1603,7 +1672,6 @@ func decodeValidationEnqueueRequest(reader io.Reader) (validationEnqueueRequest,
 	if err := decodeSingleJSONBody(bytes.NewReader(body), &request); err != nil {
 		return validationEnqueueRequest{}, err
 	}
-	request.Slug = strings.TrimSpace(request.Slug)
 	return request, nil
 }
 
@@ -1617,37 +1685,22 @@ func (s *Server) applicationValidationEnqueueAPI(w http.ResponseWriter, r *http.
 	}
 	request, err := decodeValidationEnqueueRequest(http.MaxBytesReader(w, r.Body, 4*1024))
 	if err != nil {
-		http.Error(w, "invalid validation enqueue request", http.StatusBadRequest)
+		writeAdminAPIError(w, http.StatusBadRequest, "invalid validation enqueue request")
 		return
 	}
-	slugs := []string{request.Slug}
-	if request.Slug == "" {
-		if slugs, err = s.store.EnqueueAllAppValidations(r.Context(), time.Now()); err != nil {
-			log.Printf("enqueue application validations: %v", err)
-			http.Error(w, "could not queue application validations", http.StatusInternalServerError)
-			return
-		}
-	} else if err := s.store.EnqueueAppValidationsBySlug(r.Context(), request.Slug, time.Now()); err != nil {
-		if errors.Is(err, identity.ErrManagedAppNotFound) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "managed app not found"})
-			return
-		}
-		log.Printf("enqueue application validations: %v", err)
-		http.Error(w, "could not queue application validations", http.StatusInternalServerError)
+	ref, err := request.ref()
+	if err != nil {
+		writeOperationFailure(w, "queue application validations", err)
 		return
 	}
-	enqueued := make([]validationEnqueueRecord, 0, len(slugs)*2)
-	for _, slug := range slugs {
-		for _, direction := range []string{identity.ValidationFromShauth, identity.ValidationFromApp} {
-			enqueued = append(enqueued, validationEnqueueRecord{Slug: slug, Direction: direction})
-		}
+	enqueued, err := s.enqueueAppValidations(r.Context(), ref, actor{})
+	if err != nil {
+		writeOperationFailure(w, "queue application validations", err)
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeAdminAPIJSON(w, http.StatusAccepted, map[string]any{
 		"schema_version": "shauth.app-validation-enqueue/v1",
+		"observed_at":    time.Now().UTC(),
 		"enqueued":       enqueued,
 	})
 }
@@ -1659,7 +1712,7 @@ func (s *Server) validatorClaim(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.ClaimAppValidation(r.Context(), time.Now())
 	if err != nil {
 		log.Printf("claim application validation: %v", err)
-		http.Error(w, "could not claim application validation", http.StatusInternalServerError)
+		writeAdminAPIError(w, http.StatusInternalServerError, "could not claim application validation")
 		return
 	}
 	if run == nil {
@@ -1668,14 +1721,14 @@ func (s *Server) validatorClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	logoutBridgeURL, err := managedAppLogoutBridgeURL(run.LaunchURL)
 	if err != nil {
-		http.Error(w, "application validation logout bridge is invalid", http.StatusInternalServerError)
+		writeAdminAPIError(w, http.StatusInternalServerError, "application validation logout bridge is invalid")
 		return
 	}
 	run.LogoutBridgeURL = logoutBridgeURL
 	if run.Witness != nil {
 		witnessLogoutBridgeURL, err := managedAppLogoutBridgeURL(run.Witness.LaunchURL)
 		if err != nil {
-			http.Error(w, "application validation witness logout bridge is invalid", http.StatusInternalServerError)
+			writeAdminAPIError(w, http.StatusInternalServerError, "application validation witness logout bridge is invalid")
 			return
 		}
 		run.Witness.LogoutBridgeURL = witnessLogoutBridgeURL
@@ -1696,18 +1749,18 @@ func (s *Server) validatorCreateBrowserBootstraps(w http.ResponseWriter, r *http
 	}
 	var request validatorBootstrapRequest
 	if err := decodeSingleJSONBody(http.MaxBytesReader(w, r.Body, 4*1024), &request); err != nil || len(request.Next) == 0 || len(request.Next) > 3 {
-		http.Error(w, "invalid browser bootstrap request", http.StatusBadRequest)
+		writeAdminAPIError(w, http.StatusBadRequest, "invalid browser bootstrap request")
 		return
 	}
 	for _, next := range request.Next {
 		if !strictRelativeNext(next) {
-			http.Error(w, "invalid browser bootstrap destination", http.StatusBadRequest)
+			writeAdminAPIError(w, http.StatusBadRequest, "invalid browser bootstrap destination")
 			return
 		}
 	}
 	tokens, err := s.store.CreateValidationBrowserBootstraps(r.Context(), request.Next, time.Now())
 	if err != nil {
-		http.Error(w, "could not create browser bootstraps", http.StatusInternalServerError)
+		writeAdminAPIError(w, http.StatusInternalServerError, "could not create browser bootstraps")
 		return
 	}
 	urls := make([]string, 0, len(tokens))
@@ -1723,28 +1776,28 @@ func (s *Server) validatorCreateBrowserBootstraps(w http.ResponseWriter, r *http
 	_ = json.NewEncoder(w).Encode(validatorBootstrapResponse{URLs: urls})
 }
 
-func (s *Server) validatorBootstrapPage(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) validatorBootstrapPage(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	s.render(w, "validator-bootstrap", map[string]any{"SignedIn": false})
+	s.render(w, "validator-bootstrap", s.view(r, "Validation session", map[string]any{"SignedIn": false}))
 }
 
 func (s *Server) validatorBootstrapConsume(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "validation browser bootstrap is unavailable", http.StatusGone)
+		s.failPage(w, r, http.StatusGone, "validation browser bootstrap is unavailable")
 		return
 	}
 	if len(r.Form) != 2 || len(r.Form["_csrf"]) != 1 || len(r.Form["token"]) != 1 {
-		http.Error(w, "validation browser bootstrap is unavailable", http.StatusGone)
+		s.failPage(w, r, http.StatusGone, "validation browser bootstrap is unavailable")
 		return
 	}
 	user, next, err := s.store.ConsumeValidationBrowserBootstrap(r.Context(), r.Form.Get("token"), time.Now())
 	if err != nil {
-		http.Error(w, "validation browser bootstrap is unavailable", http.StatusGone)
+		s.failPage(w, r, http.StatusGone, "validation browser bootstrap is unavailable")
 		return
 	}
 	if !strictRelativeNext(next) {
-		http.Error(w, "validation browser bootstrap is unavailable", http.StatusGone)
+		s.failPage(w, r, http.StatusGone, "validation browser bootstrap is unavailable")
 		return
 	}
 	if !s.startSession(w, r, user) {
@@ -1759,11 +1812,11 @@ func (s *Server) validatorComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	var result validatorResult
 	if err := decodeValidatorResult(http.MaxBytesReader(w, r.Body, 16*1024), &result); err != nil {
-		http.Error(w, "invalid validator result", http.StatusBadRequest)
+		writeAdminAPIError(w, http.StatusBadRequest, "invalid validator result")
 		return
 	}
 	if err := s.store.CompleteAppValidation(r.Context(), r.PathValue("id"), result.Status, result.Failure, time.Now()); err != nil {
-		http.Error(w, "could not record application validation", http.StatusBadRequest)
+		writeAdminAPIError(w, http.StatusBadRequest, "could not record application validation")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1792,23 +1845,34 @@ func (s *Server) adminDeleteApp(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.store.DeleteManagedApp(r.Context(), r.PathValue("id")); err != nil {
-		http.Error(w, "app not found", http.StatusNotFound)
+	if err := s.deleteApp(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}); err != nil {
+		s.failOperation(w, r, "delete managed app", "/admin/apps", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/apps", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/apps?done="+url.QueryEscape("The application was removed."), http.StatusSeeOther)
 }
 
 func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	clients, err := s.hydraClients(r.Context())
+	s.renderOIDCClients(w, r, http.StatusOK, r.URL.Query().Get("error"), oidcClientInput{})
+}
+
+func (s *Server) renderOIDCClients(w http.ResponseWriter, r *http.Request, status int, message string, form oidcClientInput) {
+	clients, err := s.listOIDCClients(r.Context())
 	if err != nil {
-		http.Error(w, "could not query OAuth clients", http.StatusBadGateway)
+		failureStatus, failureMessage := describeOperationFailure("list OAuth clients", err)
+		s.failPage(w, r, failureStatus, failureMessage)
 		return
 	}
-	s.render(w, "oidc-clients", map[string]any{"SignedIn": true, "IsAdmin": true, "Clients": clients, "Error": r.URL.Query().Get("error")})
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	s.render(w, "oidc-clients", s.view(r, "OAuth clients", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Clients": clients,
+		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+	}))
 }
 
 func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
@@ -1816,7 +1880,7 @@ func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
 	input := oidcClientInput{
@@ -1836,15 +1900,12 @@ func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
 			input.PostLogoutRedirectURIs = append(input.PostLogoutRedirectURIs, uri)
 		}
 	}
-	if err := input.validate(); err != nil {
-		http.Redirect(w, r, "/admin/clients?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+	if _, err := s.createOIDCClient(r.Context(), input); err != nil {
+		status, message := describeOperationFailure("create OAuth client", err)
+		s.renderOIDCClients(w, r, status, message, input)
 		return
 	}
-	if err := s.createHydraClient(r.Context(), input); err != nil {
-		http.Error(w, "could not create OAuth client", http.StatusBadGateway)
-		return
-	}
-	http.Redirect(w, r, "/admin/clients", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/clients?done="+url.QueryEscape("Registered the OAuth client "+input.ID+"."), http.StatusSeeOther)
 }
 
 func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
@@ -1852,24 +1913,11 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := r.PathValue("id")
-	if !deletableOIDCClientID(clientID) {
-		http.Error(w, "invalid client ID", http.StatusBadRequest)
+	if err := s.deleteOIDCClient(r.Context(), clientID); err != nil {
+		s.failOperation(w, r, "delete OAuth client", "/admin/clients", err)
 		return
 	}
-	used, err := s.store.ManagedAppUsesOIDCClient(r.Context(), clientID)
-	if err != nil {
-		http.Error(w, "could not verify connected apps", http.StatusInternalServerError)
-		return
-	}
-	if used {
-		http.Redirect(w, r, "/admin/clients?error="+url.QueryEscape("delete the connected app before deleting its OAuth client"), http.StatusSeeOther)
-		return
-	}
-	if err := s.deleteHydraClient(r.Context(), clientID); err != nil {
-		http.Error(w, "could not delete OAuth client", http.StatusBadGateway)
-		return
-	}
-	http.Redirect(w, r, "/admin/clients", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/clients?done="+url.QueryEscape("Deleted the OAuth client "+clientID+"."), http.StatusSeeOther)
 }
 
 // errHydraClientNotFound reports that Ory Hydra has no client with the
@@ -1902,10 +1950,24 @@ func (s *Server) adminSessionPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	policy, err := s.store.SessionPolicy(r.Context())
 	if err != nil {
-		http.Error(w, "could not load session policy", http.StatusInternalServerError)
+		log.Printf("read session policy: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The session policy could not be loaded.")
 		return
 	}
-	s.render(w, "session-policy", map[string]any{"SignedIn": true, "IsAdmin": true, "Policy": newSessionPolicyRecord(policy), "Error": r.URL.Query().Get("error"), "Saved": r.URL.Query().Get("saved") == "true"})
+	s.renderSessionPolicy(w, r, http.StatusOK, r.URL.Query().Get("error"), newSessionPolicyRecord(policy))
+}
+
+// renderSessionPolicy draws the policy form from a record, so a rejected
+// submission shows what the operator typed rather than reverting to the
+// stored policy and hiding their edit.
+func (s *Server) renderSessionPolicy(w http.ResponseWriter, r *http.Request, status int, message string, policy sessionPolicyRecord) {
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	s.render(w, "session-policy", s.view(r, "Session limits", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Policy": policy,
+		"Error": message, "Saved": r.URL.Query().Get("saved") == "true",
+	}))
 }
 
 func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request) {
@@ -1913,37 +1975,26 @@ func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
-	policy, err := parseSessionPolicyForm(r.Form)
+	request, err := parseSessionPolicyForm(r.Form)
 	if err != nil {
-		http.Redirect(w, r, "/admin/session-policy?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		s.renderSessionPolicy(w, r, http.StatusBadRequest, err.Error(), request)
 		return
 	}
-	previous, err := s.store.SessionPolicy(r.Context())
-	if err != nil {
-		http.Error(w, "could not load current session policy", http.StatusInternalServerError)
-		return
-	}
-	if err := s.applyHydraSessionPolicy(r.Context(), policy); err != nil {
-		if rollbackErr := s.applyHydraSessionPolicy(r.Context(), previous); rollbackErr != nil {
-			log.Printf("restore Ory Hydra session policy after client update failed: %v", rollbackErr)
-		}
-		http.Error(w, "could not update OAuth client lifetimes", http.StatusBadGateway)
-		return
-	}
-	if err := s.store.UpdateSessionPolicy(r.Context(), policy, time.Now()); err != nil {
-		if rollbackErr := s.applyHydraSessionPolicy(r.Context(), previous); rollbackErr != nil {
-			log.Printf("restore Ory Hydra session policy after PostgreSQL update failed: %v", rollbackErr)
-		}
-		http.Error(w, "could not save session policy", http.StatusInternalServerError)
+	if _, err := s.updateSessionPolicy(r.Context(), request); err != nil {
+		status, message := describeOperationFailure("update session policy", err)
+		s.renderSessionPolicy(w, r, status, message, request)
 		return
 	}
 	http.Redirect(w, r, "/admin/session-policy?saved=true", http.StatusSeeOther)
 }
 
-func parseSessionPolicyForm(values url.Values) (identity.SessionPolicy, error) {
+// parseSessionPolicyForm converts the form into the same record the JSON
+// transport decodes. Validation belongs to the shared operation, so both
+// transports enforce one rule set.
+func parseSessionPolicyForm(values url.Values) (sessionPolicyRecord, error) {
 	var record sessionPolicyRecord
 	// Ordered so a form with several unparseable fields always reports the
 	// same one; map iteration would name a different field each submission.
@@ -1958,14 +2009,13 @@ func parseSessionPolicyForm(values url.Values) (identity.SessionPolicy, error) {
 		{"id_token_minutes", &record.IDTokenMinutes},
 		{"refresh_token_hours", &record.RefreshTokenHours},
 	} {
-		name, target := field.name, field.target
-		value, err := strconv.ParseInt(strings.TrimSpace(values.Get(name)), 10, 64)
+		value, err := strconv.ParseInt(strings.TrimSpace(values.Get(field.name)), 10, 64)
 		if err != nil {
-			return identity.SessionPolicy{}, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(name, "_", " "))
+			return record, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(field.name, "_", " "))
 		}
-		*target = value
+		*field.target = value
 	}
-	return record.sessionPolicy()
+	return record, nil
 }
 
 func hydraClientLifespans(policy identity.SessionPolicy) map[string]string {
@@ -2352,92 +2402,130 @@ func (s *Server) adminGitHubMappings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	s.renderGitHubMappings(w, r, http.StatusOK, r.URL.Query().Get("error"), githubRoleMappingCreateRequest{Kind: "team", Role: string(identity.RoleDeveloper)})
+}
+
+func (s *Server) renderGitHubMappings(w http.ResponseWriter, r *http.Request, status int, message string, form githubRoleMappingCreateRequest) {
 	mappings, err := s.store.ListGitHubRoleMappings(r.Context())
 	if err != nil {
-		http.Error(w, "could not query GitHub role mappings", http.StatusInternalServerError)
+		log.Printf("list GitHub role mappings: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The GitHub access rules could not be loaded.")
 		return
 	}
-	s.render(w, "github-mappings", map[string]any{"SignedIn": true, "IsAdmin": true, "Mappings": mappings})
+	records := make([]githubRoleMappingRecord, 0, len(mappings))
+	for _, mapping := range mappings {
+		records = append(records, newGitHubRoleMappingRecord(mapping))
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	s.render(w, "github-mappings", s.view(r, "GitHub access", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Mappings": records,
+		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+	}))
 }
 func (s *Server) adminCreateGitHubMapping(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
-	_, err := s.store.CreateGitHubRoleMapping(r.Context(), r.Form.Get("kind"), r.Form.Get("target"), identity.Role(r.Form.Get("role")))
+	request := githubRoleMappingCreateRequest{Kind: r.Form.Get("kind"), Target: r.Form.Get("target"), Role: r.Form.Get("role")}
+	mapping, err := s.createGitHubMapping(r.Context(), request.Kind, request.Target, request.Role)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status, message := describeOperationFailure("create GitHub role mapping", err)
+		s.renderGitHubMappings(w, r, status, message, request)
 		return
 	}
-	http.Redirect(w, r, "/admin/github", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/github?done="+url.QueryEscape("Added the access rule for "+mapping.Target+"."), http.StatusSeeOther)
 }
 func (s *Server) adminDeleteGitHubMapping(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.store.DeleteGitHubRoleMapping(r.Context(), r.PathValue("id")); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	if err := s.deleteGitHubMapping(r.Context(), r.PathValue("id")); err != nil {
+		s.failOperation(w, r, "delete GitHub role mapping", "/admin/github", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/github", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/github?done="+url.QueryEscape("The access rule was removed."), http.StatusSeeOther)
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	users, err := s.store.ListUsers(r.Context(), r.URL.Query().Get("q"))
+	s.renderUsers(w, r, http.StatusOK, r.URL.Query().Get("error"), userCreateRequest{Role: string(identity.RoleDeveloper)})
+}
+
+// renderUsers draws the users page from the same records the API publishes,
+// carrying any failure message and the operator's unsaved input.
+func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, status int, message string, form userCreateRequest) {
+	query := r.URL.Query().Get("q")
+	users, err := s.store.ListUsers(r.Context(), query)
 	if err != nil {
-		http.Error(w, "could not query users", 500)
+		log.Printf("list users: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The user list could not be loaded.")
 		return
 	}
-	s.render(w, "users", map[string]any{"SignedIn": true, "IsAdmin": true, "Users": users, "Query": r.URL.Query().Get("q")})
+	records := make([]userRecord, 0, len(users))
+	for _, user := range users {
+		records = append(records, newUserRecord(user))
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	s.render(w, "users", s.view(r, "Users", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Users": records, "Query": query,
+		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+	}))
 }
 func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.failPage(w, r, http.StatusBadRequest, "The form could not be read.")
 		return
 	}
-	role := identity.Role(r.Form.Get("role"))
-	user, err := s.store.CreatePasswordUser(r.Context(), r.Form.Get("username"), r.Form.Get("email"), r.Form.Get("password"), role)
+	request := userCreateRequest{
+		Username: r.Form.Get("username"), Email: r.Form.Get("email"),
+		Password: r.Form.Get("password"), Role: r.Form.Get("role"),
+	}
+	user, err := s.createUser(r.Context(), request)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// The form posts through HTMX, which does not swap a failed
+		// response, so a rejection must re-render the page with the
+		// reason and the operator's typed values still in place.
+		status, message := describeOperationFailure("create user", err)
+		s.renderUsers(w, r, status, message, request)
 		return
 	}
 	if r.Header.Get("HX-Request") == "true" {
-		s.render(w, "user-row", user)
+		s.render(w, "user-row", newUserRecord(user))
 		return
 	}
-	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/users?done="+url.QueryEscape("Created the account "+user.Username+"."), http.StatusSeeOther)
 }
 func (s *Server) adminInvite(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", 400)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
-	actor, _, _ := s.current(r)
-	raw, invitation, err := s.store.CreateInvitation(r.Context(), r.Form.Get("email"), identity.Role(r.Form.Get("role")), actor.ID, time.Now())
+	inviter, _, err := s.current(r)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		s.failPage(w, r, http.StatusUnauthorized, "Your session has ended. Sign in again to send invitations.")
 		return
 	}
-	link := s.config.PublicURL.ResolveReference(&url.URL{Path: "/accept-invitation", RawQuery: "token=" + url.QueryEscape(raw)}).String()
-	if err := s.mailer.SendInvitation(r.Context(), invitation.Email, link); err != nil {
-		if revokeErr := s.store.RevokeInvitation(r.Context(), invitation.ID, time.Now()); revokeErr != nil {
-			log.Printf("revoke unsent invitation %s: %v", invitation.ID, revokeErr)
-		}
-		http.Error(w, "invitation email could not be sent", 502)
+	invitation, err := s.createInvitation(r.Context(), r.Form.Get("email"), r.Form.Get("role"), actor{UserID: inviter.ID})
+	if err != nil {
+		s.failOperation(w, r, "create invitation", "/admin/invitations", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/users", 303)
+	http.Redirect(w, r, "/admin/invitations?done="+url.QueryEscape("Invitation sent to "+invitation.Email+"."), http.StatusSeeOther)
 }
 func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -2445,21 +2533,29 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	}
 	invitations, err := s.store.ListInvitations(r.Context(), time.Now())
 	if err != nil {
-		http.Error(w, "could not query invitations", http.StatusInternalServerError)
+		log.Printf("list invitations: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The invitations could not be loaded.")
 		return
 	}
-	s.render(w, "invitations", map[string]any{"SignedIn": true, "IsAdmin": true, "Invitations": invitations, "Error": r.URL.Query().Get("error")})
+	records := make([]invitationRecord, 0, len(invitations))
+	for _, invitation := range invitations {
+		records = append(records, newInvitationRecord(invitation))
+	}
+	s.render(w, "invitations", s.view(r, "Invitations", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Invitations": records,
+		"Error": r.URL.Query().Get("error"), "Done": r.URL.Query().Get("done"),
+	}))
 }
 
 func (s *Server) adminRevokeInvitation(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.store.RevokeInvitation(r.Context(), r.PathValue("id"), time.Now()); err != nil {
-		http.Redirect(w, r, "/admin/invitations?error="+url.QueryEscape("that invitation is no longer active"), http.StatusSeeOther)
+	if err := s.revokeInvitation(r.Context(), r.PathValue("id")); err != nil {
+		s.failOperation(w, r, "revoke invitation", "/admin/invitations", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/invitations", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/invitations?done="+url.QueryEscape("The invitation was withdrawn."), http.StatusSeeOther)
 }
 
 // adminDisableUser is the browser twin of disableUserAPI: it ends every
@@ -2470,35 +2566,17 @@ func (s *Server) adminDisableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("id")
-	actor, _, err := s.current(r)
+	signedIn, _, err := s.current(r)
 	if err != nil {
-		http.Error(w, "sign-in required", http.StatusUnauthorized)
+		s.failPage(w, r, http.StatusUnauthorized, "Your session has ended. Sign in again to manage accounts.")
 		return
 	}
-	if actor.ID == userID {
-		http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions?error="+url.QueryEscape("you cannot disable the account you are signed in with"), http.StatusSeeOther)
+	account := "/admin/users/" + url.PathEscape(userID) + "/sessions"
+	if _, err := s.disableUser(r.Context(), userID, actor{UserID: signedIn.ID}); err != nil {
+		s.failOperation(w, r, "disable account", account, err)
 		return
 	}
-	hydraSessionIDs, err := s.store.DisableUser(r.Context(), userID, time.Now())
-	if err != nil {
-		if errors.Is(err, identity.ErrValidationUserProtected) {
-			http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
-			return
-		}
-		http.Error(w, "could not disable the account", http.StatusInternalServerError)
-		return
-	}
-	for _, hydraSessionID := range hydraSessionIDs {
-		if err := s.revokeHydraLoginSession(r.Context(), hydraSessionID); err != nil {
-			http.Error(w, "account disabled and local sessions ended, but OAuth session revocation did not complete", http.StatusBadGateway)
-			return
-		}
-	}
-	if err := s.revokeHydraSubjectSessions(r.Context(), userID); err != nil {
-		http.Error(w, "account disabled and local sessions ended, but OAuth session revocation did not complete", http.StatusBadGateway)
-		return
-	}
-	http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions", http.StatusSeeOther)
+	http.Redirect(w, r, account+"?done="+url.QueryEscape("The account was disabled and every session ended."), http.StatusSeeOther)
 }
 
 func (s *Server) adminEnableUser(w http.ResponseWriter, r *http.Request) {
@@ -2506,23 +2584,57 @@ func (s *Server) adminEnableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("id")
-	if err := s.store.EnableUser(r.Context(), userID, time.Now()); err != nil {
-		http.Error(w, "could not enable the account", http.StatusInternalServerError)
+	account := "/admin/users/" + url.PathEscape(userID) + "/sessions"
+	if _, err := s.enableUser(r.Context(), userID); err != nil {
+		s.failOperation(w, r, "enable account", account, err)
 		return
 	}
-	http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions", http.StatusSeeOther)
+	http.Redirect(w, r, account+"?done="+url.QueryEscape("The account was enabled. It must sign in again."), http.StatusSeeOther)
 }
 func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "accept-invitation", map[string]any{"Token": r.URL.Query().Get("token")})
+	token := r.URL.Query().Get("token")
+	if state, err := s.store.InvitationState(r.Context(), token, time.Now()); err != nil || state != identity.InvitationPending {
+		s.failPage(w, r, http.StatusGone, invitationRejection(state))
+		return
+	}
+	s.render(w, "accept-invitation", s.view(r, "Accept your invitation", map[string]any{"Token": token, "SignedIn": false}))
+}
+
+// invitationRejection explains why a link cannot be used, so the recipient
+// knows whether to ask for a new invitation or simply sign in.
+func invitationRejection(state string) string {
+	switch state {
+	case identity.InvitationAccepted:
+		return "This invitation has already been used. If the account is yours, sign in instead."
+	case identity.InvitationRevoked:
+		return "This invitation was withdrawn. Ask an administrator to send a new one."
+	case identity.InvitationExpired:
+		return "This invitation has expired. Ask an administrator to send a new one."
+	default:
+		return "This invitation link is not valid. Ask an administrator to send a new one."
+	}
 }
 func (s *Server) acceptInvitationPost(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", 400)
+		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
-	user, err := s.store.AcceptInvitation(r.Context(), r.Form.Get("token"), r.Form.Get("username"), r.Form.Get("password"), time.Now())
+	token := r.Form.Get("token")
+	user, err := s.store.AcceptInvitation(r.Context(), token, r.Form.Get("username"), r.Form.Get("password"), time.Now())
 	if err != nil {
-		http.Error(w, "invitation cannot be accepted", 400)
+		// The token may still be good and only the chosen username or
+		// password rejected, so keep the recipient on the form with the
+		// reason rather than burning their invitation on a bare 400.
+		state, stateErr := s.store.InvitationState(r.Context(), token, time.Now())
+		if stateErr != nil || state != identity.InvitationPending {
+			s.failPage(w, r, http.StatusGone, invitationRejection(state))
+			return
+		}
+		_, message := describeOperationFailure("accept invitation", err)
+		w.WriteHeader(http.StatusBadRequest)
+		s.render(w, "accept-invitation", s.view(r, "Accept your invitation", map[string]any{
+			"Token": token, "SignedIn": false, "Error": message, "Username": r.Form.Get("username"),
+		}))
 		return
 	}
 	if !s.startSession(w, r, user) {
@@ -2534,32 +2646,42 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
-	if err != nil {
-		http.Error(w, "user not found", http.StatusNotFound)
+	userID := r.PathValue("id")
+	if err := requireUUID(userID, identity.ErrUserNotFound); err != nil {
+		s.failPage(w, r, http.StatusNotFound, "That account does not exist.")
 		return
 	}
-	sessions, err := s.store.ListSessions(r.Context(), r.PathValue("id"))
+	user, err := s.store.UserByID(r.Context(), userID)
 	if err != nil {
-		http.Error(w, "could not query sessions", 500)
+		s.failPage(w, r, http.StatusNotFound, "That account does not exist.")
 		return
 	}
-	s.render(w, "sessions", map[string]any{"SignedIn": true, "IsAdmin": true, "Sessions": sessions, "UserID": r.PathValue("id"), "Account": user, "Error": r.URL.Query().Get("error")})
+	sessions, err := s.store.ListSessions(r.Context(), userID)
+	if err != nil {
+		log.Printf("list sessions for %s: %v", userID, err)
+		s.failPage(w, r, http.StatusInternalServerError, "The sessions for this account could not be loaded.")
+		return
+	}
+	records := make([]sessionRecord, 0, len(sessions))
+	for _, session := range sessions {
+		records = append(records, newSessionRecord(session))
+	}
+	s.render(w, "sessions", s.view(r, user.Username+" · sessions", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Sessions": records, "UserID": userID,
+		"Account": newUserRecord(user), "Error": r.URL.Query().Get("error"), "Done": r.URL.Query().Get("done"),
+	}))
 }
 func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
 	userID := r.PathValue("id")
-	if err := s.store.RevokeUserSessions(r.Context(), userID, time.Now()); err != nil {
-		http.Error(w, "could not revoke sessions", 500)
+	account := "/admin/users/" + url.PathEscape(userID) + "/sessions"
+	if _, err := s.revokeUserSessions(r.Context(), userID, ""); err != nil {
+		s.failOperation(w, r, "revoke account sessions", account, err)
 		return
 	}
-	if err := s.revokeHydraSessions(r.Context(), userID); err != nil {
-		http.Error(w, "local sessions ended but OAuth session revocation did not complete", http.StatusBadGateway)
-		return
-	}
-	http.Redirect(w, r, "/admin/users/"+r.PathValue("id")+"/sessions", 303)
+	http.Redirect(w, r, account+"?done="+url.QueryEscape("Every session for this account was ended."), http.StatusSeeOther)
 }
 
 // sessionResetAPI is the token-authenticated counterpart of adminRevokeSessions:
@@ -2571,65 +2693,35 @@ func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) sessionResetAPI(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if s.config.SessionResetToken == "" {
-		http.Error(w, "session reset is not configured", http.StatusServiceUnavailable)
+		writeAdminAPIError(w, http.StatusServiceUnavailable, "session reset is not configured")
 		return
 	}
 	if !bearerTokenMatches(r, s.config.SessionResetToken) {
-		http.Error(w, "session reset authentication failed", http.StatusUnauthorized)
+		unauthorized(w, "session reset authentication failed")
 		return
 	}
-	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
-	if userID == "" {
-		email := strings.TrimSpace(r.URL.Query().Get("email"))
-		if email == "" {
-			http.Error(w, "provide user_id or email", http.StatusBadRequest)
-			return
-		}
-		resolved, err := s.store.UserIDByEmail(r.Context(), email)
-		if err != nil {
-			http.Error(w, "no account matches that email", http.StatusNotFound)
-			return
-		}
-		userID = resolved
-	}
-	if err := s.store.RevokeUserSessions(r.Context(), userID, time.Now()); err != nil {
-		http.Error(w, "could not revoke sessions", http.StatusInternalServerError)
+	userID, err := s.revokeUserSessions(r.Context(),
+		strings.TrimSpace(r.URL.Query().Get("user_id")), strings.TrimSpace(r.URL.Query().Get("email")))
+	if err != nil {
+		writeOperationFailure(w, "reset account sessions", err)
 		return
 	}
-	if err := s.revokeHydraSessions(r.Context(), userID); err != nil {
-		http.Error(w, "local sessions ended but OAuth session revocation did not complete", http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"reset_user_id": userID})
+	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
+		"schema_version": "shauth.session-reset/v1",
+		"observed_at":    time.Now().UTC(),
+		"reset_user_id":  userID,
+	})
 }
 func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	sessionID := r.PathValue("id")
-	userID, err := s.store.SessionUserID(r.Context(), sessionID)
+	revoked, err := s.revokeSession(r.Context(), r.PathValue("id"))
 	if err != nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		s.failOperation(w, r, "revoke session", "/admin/users", err)
 		return
 	}
-	if err := s.store.RevokeSession(r.Context(), sessionID, time.Now()); err != nil {
-		http.Error(w, "could not revoke session", 500)
-		return
-	}
-	hydraSessionIDs, err := s.store.HydraLoginSessionIDs(r.Context(), sessionID)
-	if err != nil {
-		http.Error(w, "local session ended but OAuth session correlation could not be loaded", http.StatusInternalServerError)
-		return
-	}
-	for _, hydraSessionID := range hydraSessionIDs {
-		if err := s.revokeHydraLoginSession(r.Context(), hydraSessionID); err != nil {
-			http.Error(w, "local session ended but OAuth session revocation did not complete", http.StatusBadGateway)
-			return
-		}
-	}
-	http.Redirect(w, r, "/admin/users/"+userID+"/sessions", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/users/"+url.PathEscape(revoked.UserID)+"/sessions?done="+url.QueryEscape("The session was ended."), http.StatusSeeOther)
 }
 
 func (s *Server) revokeHydraLoginSession(ctx context.Context, sessionID string) error {
@@ -2731,23 +2823,10 @@ func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	active, err := s.store.CountActiveSessions(r.Context(), time.Now())
-	if err != nil {
-		http.Error(w, "could not inspect sessions", 500)
-		return
-	}
-	checkContext, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	postgresHealthy := s.store.Ping(checkContext) == nil
-	cancel()
-	s.render(w, "monitoring", map[string]any{
-		"SignedIn":          true,
-		"IsAdmin":           true,
-		"ActiveSessions":    active,
-		"PostgreSQLHealthy": postgresHealthy,
-		"HydraHealthy":      s.hydraReady(r.Context()),
-		"Infrastructure":    s.monitoringClient.FetchAll(r.Context(), s.config.MonitoringSources),
-		"Now":               time.Now().UTC(),
-	})
+	snapshot := s.monitoringSnapshot(r.Context())
+	s.render(w, "monitoring", s.view(r, "Monitoring", map[string]any{
+		"SignedIn": true, "IsAdmin": true, "Snapshot": snapshot, "Now": time.Now().UTC(),
+	}))
 }
 func (s *Server) hydraReady(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -2828,7 +2907,7 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	if user.Role != identity.RoleAdmin {
-		http.Error(w, "administrator access required", 403)
+		s.failPage(w, r, http.StatusForbidden, "This page is limited to administrators. Your account does not have administrator access.")
 		return false
 	}
 	return true
@@ -2836,7 +2915,7 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, user identity.User) bool {
 	raw, session, err := s.store.CreateSession(r.Context(), user.ID, r.UserAgent(), clientIP(r), time.Now())
 	if err != nil {
-		http.Error(w, "could not create session", 500)
+		s.failPage(w, r, http.StatusInternalServerError, "could not create session")
 		return false
 	}
 	s.setCookie(w, &http.Cookie{Name: browserSessionCookie, Value: raw, Path: "/", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
@@ -2856,12 +2935,94 @@ func (s *Server) expireCookie(w http.ResponseWriter, name string) {
 func (s *Server) expireCookieAtPath(w http.ResponseWriter, name, path string) {
 	s.setCookie(w, &http.Cookie{Name: name, Value: "", Path: path, HttpOnly: true, Secure: !s.config.AllowInsecureCookies, MaxAge: -1, Expires: time.Unix(0, 0)})
 }
+
+// view completes a page's template data. Every page receives its own title,
+// the CSRF token its forms must carry, and the sign-in state the header
+// renders from, so no page can accidentally present a signed-in
+// administrator as anonymous or ship a form the browser cannot submit.
+func (s *Server) view(r *http.Request, title string, data map[string]any) map[string]any {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["Title"] = title
+	data["CSRF"] = csrfToken(r)
+	data["Path"] = r.URL.Path
+	if _, ok := data["SignedIn"]; !ok {
+		user, _, err := s.current(r)
+		data["SignedIn"] = err == nil
+		data["IsAdmin"] = err == nil && user.Role == identity.RoleAdmin
+	}
+	if _, ok := data["IsAdmin"]; !ok {
+		data["IsAdmin"] = false
+	}
+	return data
+}
+
+func templateHelpers() template.FuncMap {
+	return template.FuncMap{
+		"moment": func(value time.Time) string {
+			if value.IsZero() {
+				return "never"
+			}
+			return value.UTC().Format("2 Jan 2006 15:04 MST")
+		},
+		"iso": func(value time.Time) string {
+			if value.IsZero() {
+				return ""
+			}
+			return value.UTC().Format(time.RFC3339)
+		},
+		"identityLabel": func(source, githubLogin string) string {
+			switch source {
+			case identity.IdentitySourceGitHub:
+				return "GitHub: " + githubLogin
+			case identity.IdentitySourceEntra:
+				return "Microsoft Entra ID"
+			default:
+				return "Local account"
+			}
+		},
+	}
+}
+
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.templates.ExecuteTemplate(w, name, data); err != nil {
+	var page bytes.Buffer
+	if err := s.templates.ExecuteTemplate(&page, name, data); err != nil {
 		log.Printf("render %s: %v", name, err)
-		http.Error(w, "page rendering failed", 500)
+		http.Error(w, "page rendering failed", http.StatusInternalServerError)
+		return
 	}
+	_, _ = page.WriteTo(w)
+}
+
+// failPage answers a browser navigation with a styled, navigable error page
+// instead of unstyled plain text, so a person who hits a failure keeps the
+// header, the theme, and a way back.
+func (s *Server) failPage(w http.ResponseWriter, r *http.Request, status int, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	var page bytes.Buffer
+	data := s.view(r, http.StatusText(status), map[string]any{"Status": status, "StatusText": http.StatusText(status), "Message": message})
+	if err := s.templates.ExecuteTemplate(&page, "error", data); err != nil {
+		log.Printf("render error page: %v", err)
+		http.Error(w, message, status)
+		return
+	}
+	w.WriteHeader(status)
+	_, _ = page.WriteTo(w)
+}
+
+// failOperation reports a failed administration operation to a browser
+// caller, using the same classification the JSON transport uses. Rejections
+// return the operator to the form with an explanation; failures render a
+// styled error page.
+func (s *Server) failOperation(w http.ResponseWriter, r *http.Request, action, back string, err error) {
+	status, message := describeOperationFailure(action, err)
+	if back != "" && status < http.StatusInternalServerError {
+		http.Redirect(w, r, back+"?error="+url.QueryEscape(message), http.StatusSeeOther)
+		return
+	}
+	s.failPage(w, r, status, message)
 }
 func (s *Server) hydraAccept(ctx context.Context, path, challenge string, payload any) (string, error) {
 	if challenge == "" {

@@ -230,10 +230,13 @@ func TestUserRecordReportsIdentitySourceAndOmitsEmptyFields(t *testing.T) {
 			t.Fatalf("local user record omitted %s: %s", expected, local)
 		}
 	}
-	for _, unexpected := range []string{"github_login", "disabled_at"} {
-		if strings.Contains(string(local), unexpected) {
-			t.Fatalf("local user record reported empty optional field %s: %s", unexpected, local)
-		}
+	if strings.Contains(string(local), "github_login") {
+		t.Fatalf("local user record reported an empty optional field: %s", local)
+	}
+	// disabled_at is always present so a consumer can read "not disabled" as
+	// a value rather than having to infer it from a missing key.
+	if !strings.Contains(string(local), `"disabled_at":null`) {
+		t.Fatalf("an enabled account did not report a null disabled_at: %s", local)
 	}
 
 	disabled := created.Add(time.Hour)
@@ -266,7 +269,7 @@ func TestUserRecordReportsIdentitySourceAndOmitsEmptyFields(t *testing.T) {
 	}
 }
 
-func TestWriteAdminAPIStoreErrorSeparatesRejectionFromFailure(t *testing.T) {
+func TestWriteOperationFailureSeparatesRejectionFromFailure(t *testing.T) {
 	for name, expectation := range map[string]struct {
 		err            error
 		status         int
@@ -294,7 +297,7 @@ func TestWriteAdminAPIStoreErrorSeparatesRejectionFromFailure(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			writeAdminAPIStoreError(response, "create user", expectation.err)
+			writeOperationFailure(response, "create user", expectation.err)
 			if response.Code != expectation.status {
 				t.Fatalf("status = %d, want %d", response.Code, expectation.status)
 			}

@@ -580,38 +580,24 @@ func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 	return app, nil
 }
 
-func (s *Store) DeleteManagedApp(ctx context.Context, id string) error {
+// DeleteManagedApp removes one catalog entry addressed by identifier or slug
+// and queues fresh validations for the remaining apps, because removing a
+// relying party changes the witness ring every other check depends on.
+func (s *Store) DeleteManagedApp(ctx context.Context, ref ManagedAppRef) error {
+	if ref.All() {
+		return invalidInput("a managed app identifier or slug is required")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin delete managed app: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `DELETE FROM managed_apps WHERE id=$1::uuid`, id)
-	if err != nil {
-		return fmt.Errorf("delete managed app: %w", err)
+	var result pgconn.CommandTag
+	if ref.ID != "" {
+		result, err = tx.Exec(ctx, `DELETE FROM managed_apps WHERE id=$1::uuid`, ref.ID)
+	} else {
+		result, err = tx.Exec(ctx, `DELETE FROM managed_apps WHERE slug=$1`, ref.Slug)
 	}
-	if result.RowsAffected() != 1 {
-		return fmt.Errorf("managed app not found")
-	}
-	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit delete managed app: %w", err)
-	}
-	return nil
-}
-
-// DeleteManagedAppBySlug removes one catalog entry addressed by its public
-// slug and queues fresh validations for the remaining apps. It mirrors
-// DeleteManagedApp for token-authorized operators, which address apps by slug.
-func (s *Store) DeleteManagedAppBySlug(ctx context.Context, slug string) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin delete managed app: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `DELETE FROM managed_apps WHERE slug=$1`, slug)
 	if err != nil {
 		return fmt.Errorf("delete managed app: %w", err)
 	}
@@ -734,62 +720,32 @@ var ErrManagedAppNotFound = errors.New("managed app not found")
 // EnqueueAppValidations schedules both catalog-entry and direct-entry browser
 // checks. Duplicate pending checks for the exact same application contract
 // collapse into one queue entry per direction.
-func (s *Store) EnqueueAppValidations(ctx context.Context, appID, requestedBy string, now time.Time) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin enqueue application validations: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	apps, err := loadManagedAppsForValidation(ctx, tx)
-	if err != nil {
-		return err
-	}
-	for _, app := range apps {
-		if app.ID == appID {
-			if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), &requestedBy, now.UTC()); err != nil {
-				return err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return fmt.Errorf("commit enqueue application validations: %w", err)
-			}
-			return nil
-		}
-	}
-	return ErrManagedAppNotFound
+// ManagedAppRef addresses one managed app by exactly one of its identifiers,
+// or every app when both are empty. Operators address apps by slug and the
+// browser interface addresses them by internal identifier; both reach the
+// same records.
+type ManagedAppRef struct {
+	ID   string
+	Slug string
 }
 
-// EnqueueAppValidationsBySlug schedules both catalog-entry and direct-entry
-// browser checks for one app addressed by its catalog slug. It mirrors
-// EnqueueAppValidations for token-authorized operators, so no requesting user
-// is recorded.
-func (s *Store) EnqueueAppValidationsBySlug(ctx context.Context, slug string, now time.Time) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin enqueue application validations: %w", err)
+func (ref ManagedAppRef) matches(app ManagedApp) bool {
+	if ref.ID != "" {
+		return app.ID == ref.ID
 	}
-	defer tx.Rollback(ctx)
-	apps, err := loadManagedAppsForValidation(ctx, tx)
-	if err != nil {
-		return err
-	}
-	for _, app := range apps {
-		if app.Slug == slug {
-			if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), nil, now.UTC()); err != nil {
-				return err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return fmt.Errorf("commit enqueue application validations: %w", err)
-			}
-			return nil
-		}
-	}
-	return ErrManagedAppNotFound
+	return app.Slug == ref.Slug
 }
 
-// EnqueueAllAppValidations schedules both catalog-entry and direct-entry
-// browser checks for every registered app on behalf of a token-authorized
-// operator and returns the slugs it queued in catalog order.
-func (s *Store) EnqueueAllAppValidations(ctx context.Context, now time.Time) ([]string, error) {
+// All reports whether the reference selects every registered app.
+func (ref ManagedAppRef) All() bool { return ref.ID == "" && ref.Slug == "" }
+
+// EnqueueAppValidations schedules both the catalog-entry and direct-entry
+// browser checks for the referenced app, or for every app when the reference
+// selects all of them, and returns the slugs it queued in catalog order.
+// Duplicate pending checks for the exact same application contract collapse
+// into one queue entry per direction. requestedBy records the operator who
+// asked for the run and is empty for token-authorized callers.
+func (s *Store) EnqueueAppValidations(ctx context.Context, ref ManagedAppRef, requestedBy string, now time.Time) ([]string, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin enqueue application validations: %w", err)
@@ -799,12 +755,22 @@ func (s *Store) EnqueueAllAppValidations(ctx context.Context, now time.Time) ([]
 	if err != nil {
 		return nil, err
 	}
+	var requester *string
+	if requestedBy != "" {
+		requester = &requestedBy
+	}
 	slugs := make([]string, 0, len(apps))
 	for _, app := range apps {
-		if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), nil, now.UTC()); err != nil {
+		if !ref.All() && !ref.matches(app) {
+			continue
+		}
+		if err := enqueueAppValidation(ctx, tx, app, validationWitness(app, apps), requester, now.UTC()); err != nil {
 			return nil, err
 		}
 		slugs = append(slugs, app.Slug)
+	}
+	if len(slugs) == 0 && !ref.All() {
+		return nil, ErrManagedAppNotFound
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit enqueue application validations: %w", err)
@@ -1356,6 +1322,27 @@ func (s *Store) RevokeInvitation(ctx context.Context, id string, now time.Time) 
 	return nil
 }
 
+// InvitationState reports whether a raw invitation token can still create an
+// account, so a recipient learns why a link does not work instead of being
+// told only that it failed. An unknown token is reported as expired, which
+// reveals nothing about whether it ever existed.
+func (s *Store) InvitationState(ctx context.Context, raw string, now time.Time) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return InvitationExpired, nil
+	}
+	hash := sha256.Sum256([]byte(raw))
+	var invitation Invitation
+	err := s.pool.QueryRow(ctx, `SELECT expires_at,accepted_at,revoked_at FROM invitations WHERE token_hash=$1`, hash[:]).
+		Scan(&invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return InvitationExpired, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read invitation state: %w", err)
+	}
+	return invitationState(invitation, now), nil
+}
+
 // ListInvitations reports every invitation and its current state, newest
 // first. The single-use token is stored only as a hash and is never
 // returned; an operator who needs a new link revokes and re-invites.
@@ -1567,6 +1554,11 @@ func (err InvalidInputError) Unwrap() error { return err.cause }
 func invalidInput(format string, args ...any) error {
 	return InvalidInputError{cause: fmt.Errorf(format, args...)}
 }
+
+// Invalid reports a caller-supplied value that the caller must correct. It
+// lets code outside this package raise the same rejection the store raises,
+// so every transport classifies it identically.
+func Invalid(format string, args ...any) error { return invalidInput(format, args...) }
 
 // ErrAlreadyExists reports that a uniqueness constraint rejected the record.
 var ErrAlreadyExists = errors.New("record already exists")

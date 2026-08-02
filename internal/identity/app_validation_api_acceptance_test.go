@@ -73,7 +73,7 @@ func TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester(t *tes
 	insertAcceptanceManagedApp(t, pool, "enqueue-alpha")
 	insertAcceptanceManagedApp(t, pool, "enqueue-beta")
 
-	if err := store.EnqueueAppValidationsBySlug(ctx, "enqueue-alpha", time.Now()); err != nil {
+	if _, err := store.EnqueueAppValidations(ctx, ManagedAppRef{Slug: "enqueue-alpha"}, "", time.Now()); err != nil {
 		t.Fatalf("enqueue by slug: %v", err)
 	}
 	var queued, fromShauth, fromApp, requesters int
@@ -91,7 +91,7 @@ func TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester(t *tes
 		t.Fatalf("witness = %v, want enqueue-beta", witness)
 	}
 
-	err := store.EnqueueAppValidationsBySlug(ctx, "enqueue-unknown", time.Now())
+	_, err := store.EnqueueAppValidations(ctx, ManagedAppRef{Slug: "enqueue-unknown"}, "", time.Now())
 	if !errors.Is(err, ErrManagedAppNotFound) {
 		t.Fatalf("unknown slug error = %v, want ErrManagedAppNotFound", err)
 	}
@@ -104,10 +104,10 @@ func TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates(t *testing.T
 	insertAcceptanceManagedApp(t, pool, "fleet-alpha")
 	insertAcceptanceManagedApp(t, pool, "fleet-beta")
 
-	if err := store.EnqueueAppValidationsBySlug(ctx, "fleet-alpha", time.Now()); err != nil {
+	if _, err := store.EnqueueAppValidations(ctx, ManagedAppRef{Slug: "fleet-alpha"}, "", time.Now()); err != nil {
 		t.Fatalf("prime one app: %v", err)
 	}
-	slugs, err := store.EnqueueAllAppValidations(ctx, time.Now())
+	slugs, err := store.EnqueueAppValidations(ctx, ManagedAppRef{}, "", time.Now())
 	if err != nil {
 		t.Fatalf("enqueue all: %v", err)
 	}

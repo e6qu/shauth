@@ -3,7 +3,6 @@
 package identity
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -31,22 +30,22 @@ func DefaultSessionPolicy() SessionPolicy {
 
 func (policy SessionPolicy) Validate() error {
 	if policy.BrowserAbsoluteLifetime < 5*time.Minute || policy.BrowserAbsoluteLifetime > 90*24*time.Hour {
-		return fmt.Errorf("browser absolute lifetime must be between 5 minutes and 90 days")
+		return invalidInput("browser absolute lifetime must be between 5 minutes and 90 days")
 	}
 	if policy.BrowserIdleTimeout < 5*time.Minute || policy.BrowserIdleTimeout > policy.BrowserAbsoluteLifetime {
-		return fmt.Errorf("browser idle timeout must be between 5 minutes and the absolute lifetime")
+		return invalidInput("browser idle timeout must be between 5 minutes and the absolute lifetime")
 	}
 	if policy.OIDCSessionLifetime < 5*time.Minute || policy.OIDCSessionLifetime > policy.BrowserAbsoluteLifetime {
-		return fmt.Errorf("OpenID Connect SSO lifetime must be between 5 minutes and the browser absolute lifetime")
+		return invalidInput("OpenID Connect SSO lifetime must be between 5 minutes and the browser absolute lifetime")
 	}
 	if policy.AccessTokenLifetime < 5*time.Minute || policy.AccessTokenLifetime > 24*time.Hour {
-		return fmt.Errorf("access token lifetime must be between 5 minutes and 24 hours")
+		return invalidInput("access token lifetime must be between 5 minutes and 24 hours")
 	}
 	if policy.IDTokenLifetime < 5*time.Minute || policy.IDTokenLifetime > 24*time.Hour {
-		return fmt.Errorf("ID token lifetime must be between 5 minutes and 24 hours")
+		return invalidInput("ID token lifetime must be between 5 minutes and 24 hours")
 	}
 	if policy.RefreshTokenLifetime < policy.AccessTokenLifetime || policy.RefreshTokenLifetime < policy.IDTokenLifetime || policy.RefreshTokenLifetime > 90*24*time.Hour {
-		return fmt.Errorf("refresh token lifetime must cover access and ID tokens and must not exceed 90 days")
+		return invalidInput("refresh token lifetime must cover access and ID tokens and must not exceed 90 days")
 	}
 	return nil
 }

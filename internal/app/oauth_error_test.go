@@ -11,7 +11,7 @@ import (
 )
 
 func TestHydraErrorUsesBrandedSafeResponse(t *testing.T) {
-	templates, err := template.New("pages").Parse(pageTemplates)
+	templates, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
 	if err != nil {
 		t.Fatalf("parse templates: %v", err)
 	}

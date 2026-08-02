@@ -179,14 +179,34 @@ func TestDecodeValidationEnqueueRequestTreatsEmptyBodyAsAllApps(t *testing.T) {
 	for name, body := range map[string]string{"empty": "", "whitespace": "  \n", "empty object": "{}"} {
 		t.Run(name, func(t *testing.T) {
 			request, err := decodeValidationEnqueueRequest(strings.NewReader(body))
-			if err != nil || request.Slug != "" {
-				t.Fatalf("decodeValidationEnqueueRequest(%q) = %#v, %v", body, request, err)
+			if err != nil {
+				t.Fatalf("decodeValidationEnqueueRequest(%q) error = %v", body, err)
+			}
+			ref, err := request.ref()
+			if err != nil || !ref.All() {
+				t.Fatalf("decodeValidationEnqueueRequest(%q) = %#v, %v", body, ref, err)
 			}
 		})
 	}
 	request, err := decodeValidationEnqueueRequest(strings.NewReader(`{"slug":" bleephub "}`))
-	if err != nil || request.Slug != "bleephub" {
-		t.Fatalf("slug request = %#v, %v", request, err)
+	if err != nil {
+		t.Fatalf("slug request error = %v", err)
+	}
+	ref, err := request.ref()
+	if err != nil || ref.Slug != "bleephub" || ref.All() {
+		t.Fatalf("slug ref = %#v, %v", ref, err)
+	}
+
+	// A present but empty slug is an unset deployment variable, not a
+	// request to re-validate every registered application.
+	for _, blank := range []string{`{"slug":""}`, `{"slug":"   "}`} {
+		blankRequest, err := decodeValidationEnqueueRequest(strings.NewReader(blank))
+		if err != nil {
+			t.Fatalf("decode %s: %v", blank, err)
+		}
+		if _, err := blankRequest.ref(); err == nil {
+			t.Fatalf("a blank slug in %s was accepted as every application", blank)
+		}
 	}
 	for name, body := range map[string]string{
 		"unknown field":  `{"slug":"bleephub","force":true}`,
