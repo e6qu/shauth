@@ -45,20 +45,27 @@ unset SHAUTH_VALIDATOR_TOKEN
 SHAUTH_VALIDATOR_TOKEN=$(random_secret)
 unset SHAUTH_VALIDATION_STATUS_TOKEN
 SHAUTH_VALIDATION_STATUS_TOKEN=$(random_secret)
+unset SHAUTH_ADMIN_API_READ_TOKEN
+SHAUTH_ADMIN_API_READ_TOKEN=$(random_secret)
+unset SHAUTH_ADMIN_API_WRITE_TOKEN
+SHAUTH_ADMIN_API_WRITE_TOKEN=$(random_secret)
 
-# Keep the reusable validator queue credential out of the ambient process
-# environment. Only Shauth and its validator receive it in production.
+# Keep the reusable validator queue and administration API credentials out of
+# the ambient process environment. Only Shauth and its callers receive them in
+# production.
 compose() {
   SHAUTH_VALIDATOR_TOKEN=$SHAUTH_VALIDATOR_TOKEN \
     SHAUTH_VALIDATION_STATUS_TOKEN=$SHAUTH_VALIDATION_STATUS_TOKEN \
+    SHAUTH_ADMIN_API_READ_TOKEN=$SHAUTH_ADMIN_API_READ_TOKEN \
+    SHAUTH_ADMIN_API_WRITE_TOKEN=$SHAUTH_ADMIN_API_WRITE_TOKEN \
     command docker compose "$@"
 }
 
 prepare_test_app_coordinates() {
 	node -e 'let body="";process.stdin.on("data",value=>body+=value);process.stdin.on("end",()=>{const apps=JSON.parse(body);for(const app of apps){if(app.slug.startsWith("gateway-")){const launch=new URL(app.launch_url);app.validation_url=new URL("/auth/validation",launch).toString();app.backchannel_logout_uri="http://"+app.slug+".localhost:"+launch.port+"/auth/backchannel-logout"}app.post_logout_redirect_uris=[new URL("/auth/shauth/logout/complete",app.launch_url).toString()]}process.stdout.write(JSON.stringify(apps))})'
 }
-if env | grep -Eq '^SHAUTH_VALIDATOR_TOKEN=|^SHAUTH_VALIDATION_STATUS_TOKEN='; then
-  echo 'browser-validation secrets leaked into the ambient process environment' >&2
+if env | grep -Eq '^SHAUTH_VALIDATOR_TOKEN=|^SHAUTH_VALIDATION_STATUS_TOKEN=|^SHAUTH_ADMIN_API_READ_TOKEN=|^SHAUTH_ADMIN_API_WRITE_TOKEN='; then
+  echo 'closed-API secrets leaked into the ambient process environment' >&2
   exit 1
 fi
 SHAUTH_OIDC_CLIENT_SECRET=$(random_secret)
@@ -153,8 +160,10 @@ if [ "$attempt" -eq 300 ]; then
 fi
 
 SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
+	SHAUTH_ACCEPTANCE_HYDRA_ADMIN_URL=http://localhost:4445 \
+	SHAUTH_ACCEPTANCE_HYDRA_PUBLIC_URL=http://localhost:4444 \
 	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app \
-	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout|TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester|TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates|TestAppValidationRunHistoryOrdersFiltersAndLimits|TestApplicationsAPIListsCatalogHealthAndValidations|TestApplicationValidationHistoryAPIFiltersAndValidatesLimit|TestApplicationValidationEnqueueAPIQueuesWithoutABrowserCSRFToken)$' -count=1
+	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout|TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester|TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates|TestAppValidationRunHistoryOrdersFiltersAndLimits|TestApplicationsAPIListsCatalogHealthAndValidations|TestApplicationValidationHistoryAPIFiltersAndValidatesLimit|TestApplicationValidationEnqueueAPIQueuesWithoutABrowserCSRFToken|TestAdminAPIUserLifecycleAndSearch|TestAdminAPIUserSessionsReadAndSingleRevoke|TestAdminAPISessionPolicyReadAndUpdate|TestAdminAPIGitHubRoleMappingLifecycle|TestAdminAPIOIDCClientAndManagedAppLifecycle|TestAdminAPIMonitoringSnapshot|TestAdminAPIInvitationValidation)$' -count=1
 
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'id="main-content"'
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-label="Primary navigation"'
@@ -530,6 +539,23 @@ process.stdin.on("end", () => {
   }
   if (expected.size !== 0) process.exit(1);
 });'
+
+# The administration API accepts only its own credential for each direction:
+# reads reject the write token and writes reject the read token.
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/users)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" http://localhost:8080/api/v1/users)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" --header 'Content-Type: application/json' --data '{}' http://localhost:8080/internal/users)" = 401 ]
+admin_users_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?q=admin')
+printf '%s' "$admin_users_response" | grep -q '"schema_version":"shauth.users/v1"'
+printf '%s' "$admin_users_response" | grep -q '"username":"admin"'
+printf '%s' "$admin_users_response" | grep -q '"identity_source":"local"'
+admin_monitoring_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/monitoring)
+printf '%s' "$admin_monitoring_response" | grep -q '"schema_version":"shauth.monitoring/v1"'
+printf '%s' "$admin_monitoring_response" | grep -q '"postgresql_healthy":true'
+printf '%s' "$admin_monitoring_response" | grep -q '"hydra_healthy":true'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/session-policy | grep -q '"schema_version":"shauth.session-policy/v1"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/oidc-clients | grep -q '"client_id":"gateway-integration"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/connectors | grep -q '"schema_version":"shauth.connectors/v1"'
 for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE" "$SHAUTH_GATEWAY_TERTIARY_DATABASE"; do
 	[ "$(compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL")" = 0 ]
 done
