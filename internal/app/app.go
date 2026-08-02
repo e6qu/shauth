@@ -1453,7 +1453,10 @@ func unauthorized(w http.ResponseWriter, message string) {
 }
 
 // requireValidationStatusToken authorizes the closed machine-readable
-// application API with the shared read-and-trigger bearer credential.
+// application API. It is a read-only credential: queuing validations is a
+// state change and requires the administration write credential, so a
+// dashboard or post-deployment poller given read access cannot start real
+// browser logins against every registered relying party.
 func (s *Server) requireValidationStatusToken(w http.ResponseWriter, r *http.Request) bool {
 	if s.config.ValidationStatusToken == "" {
 		writeAdminAPIError(w, http.StatusServiceUnavailable, "application validation status is not configured")
@@ -1677,10 +1680,12 @@ func decodeValidationEnqueueRequest(reader io.Reader) (validationEnqueueRequest,
 
 // applicationValidationEnqueueAPI is the token-authorized twin of the Apps
 // page's "Run both checks again" button. An empty or {} body queues both
-// browser checks for every app; {"slug":"<slug>"} queues one app.
+// browser checks for every app; {"slug":"<slug>"} queues one app. It queues
+// real browser sessions and global logouts, so it requires the administration
+// write credential rather than the read-only application status credential.
 func (s *Server) applicationValidationEnqueueAPI(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if !s.requireValidationStatusToken(w, r) {
+	if !s.requireAdminAPIWriteToken(w, r) {
 		return
 	}
 	request, err := decodeValidationEnqueueRequest(http.MaxBytesReader(w, r.Body, 4*1024))
@@ -2462,7 +2467,11 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 // carrying any failure message and the operator's unsaved input.
 func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, status int, message string, form userCreateRequest) {
 	query := r.URL.Query().Get("q")
-	users, err := s.store.ListUsers(r.Context(), query)
+	page, err := requestedPage(r)
+	if err != nil {
+		page = identity.Page{}
+	}
+	users, total, err := s.store.ListUsers(r.Context(), query, page)
 	if err != nil {
 		log.Printf("list users: %v", err)
 		s.failPage(w, r, http.StatusInternalServerError, "The user list could not be loaded.")
@@ -2478,6 +2487,7 @@ func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, status int,
 	s.render(w, "users", s.view(r, "Users", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Users": records, "Query": query,
 		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+		"Page": browserPage(r, page, len(records), total),
 	}))
 }
 func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -2531,7 +2541,11 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	invitations, err := s.store.ListInvitations(r.Context(), time.Now())
+	page, err := requestedPage(r)
+	if err != nil {
+		page = identity.Page{}
+	}
+	invitations, total, err := s.store.ListInvitations(r.Context(), time.Now(), page)
 	if err != nil {
 		log.Printf("list invitations: %v", err)
 		s.failPage(w, r, http.StatusInternalServerError, "The invitations could not be loaded.")
@@ -2544,6 +2558,7 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "invitations", s.view(r, "Invitations", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Invitations": records,
 		"Error": r.URL.Query().Get("error"), "Done": r.URL.Query().Get("done"),
+		"Page": browserPage(r, page, len(records), total),
 	}))
 }
 
@@ -2956,6 +2971,44 @@ func (s *Server) view(r *http.Request, title string, data map[string]any) map[st
 		data["IsAdmin"] = false
 	}
 	return data
+}
+
+// pageView describes a listing window for a page that renders navigation.
+type pageView struct {
+	First    int
+	Last     int
+	Total    int
+	Previous string
+	Next     string
+}
+
+func browserPage(r *http.Request, page identity.Page, returned, total int) pageView {
+	limit := page.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	view := pageView{Total: total}
+	if returned > 0 {
+		view.First, view.Last = page.Offset+1, page.Offset+returned
+	}
+	link := func(offset int) string {
+		query := r.URL.Query()
+		query.Del("done")
+		query.Del("error")
+		if offset <= 0 {
+			query.Del("offset")
+		} else {
+			query.Set("offset", strconv.Itoa(offset))
+		}
+		return r.URL.Path + "?" + query.Encode()
+	}
+	if page.Offset > 0 {
+		view.Previous = link(max(0, page.Offset-limit))
+	}
+	if page.Offset+returned < total {
+		view.Next = link(page.Offset + limit)
+	}
+	return view
 }
 
 func templateHelpers() template.FuncMap {

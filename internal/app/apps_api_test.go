@@ -28,7 +28,6 @@ func applicationAPIEndpoints(server *Server) map[string]struct {
 		"apps":        {http.MethodGet, "/api/v1/apps", server.applicationsAPI},
 		"validations": {http.MethodGet, "/api/v1/apps/validations", server.applicationValidationStatusAPI},
 		"history":     {http.MethodGet, "/api/v1/apps/validations/history", server.applicationValidationHistoryAPI},
-		"enqueue":     {http.MethodPost, "/internal/apps/validations/enqueue", server.applicationValidationEnqueueAPI},
 	}
 }
 
@@ -236,5 +235,25 @@ func TestCSRFPostsExemptsInternalValidationEnqueue(t *testing.T) {
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: bearer-token POSTs have no CSRF cookie to present", response.Code, http.StatusAccepted)
+	}
+}
+
+// The application status credential is read-only. Queuing validations starts
+// real browser sessions and global logouts against every registered relying
+// party, so it must require the administration write credential.
+func TestApplicationValidationEnqueueRejectsTheReadOnlyStatusToken(t *testing.T) {
+	const statusToken = "validation-status-token-0123456789ab"
+	const writeToken = "admin-api-write-token-0123456789abc"
+	server := &Server{config: config.Config{ValidationStatusToken: statusToken, AdminAPIWriteToken: writeToken}}
+
+	request := httptest.NewRequest(http.MethodPost, "/internal/apps/validations/enqueue", nil)
+	request.Header.Set("Authorization", "Bearer "+statusToken)
+	response := httptest.NewRecorder()
+	server.applicationValidationEnqueueAPI(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("the read-only status credential queued validations: status = %d", response.Code)
+	}
+	if response.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("the rejection did not advertise its authentication scheme")
 	}
 }

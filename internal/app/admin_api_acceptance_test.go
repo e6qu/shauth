@@ -739,3 +739,74 @@ func TestAdminAPIInvitationValidation(t *testing.T) {
 		t.Fatalf("invitations after rejected requests = %d", invitations)
 	}
 }
+
+// A list endpoint must answer a bounded window and say how much remains, so a
+// consumer can page instead of pulling an unbounded array as the directory
+// grows.
+func TestAdminAPIUserListIsBoundedAndPageable(t *testing.T) {
+	_, handler, store := newAdminAPIAcceptanceServer(t)
+	ctx := context.Background()
+	for index := 0; index < 5; index++ {
+		name := fmt.Sprintf("paged-%02d", index)
+		if _, err := store.CreatePasswordUser(ctx, name, name+"@example.test", "a-long-acceptance-password", identity.RoleDeveloper); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	type usersEnvelope struct {
+		Users []userRecord `json:"users"`
+		Page  struct {
+			Limit, Offset, Returned, Total int
+			HasMore                        bool `json:"has_more"`
+		} `json:"page"`
+	}
+	read := func(query string) usersEnvelope {
+		t.Helper()
+		response := adminAPIAcceptanceRequest(t, handler, http.MethodGet, "https://auth.example.test/api/v1/users"+query, adminAPIAcceptanceReadToken, "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var envelope usersEnvelope
+		if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode users envelope: %v: %s", err, response.Body.String())
+		}
+		return envelope
+	}
+
+	first := read("?limit=2")
+	if len(first.Users) != 2 || first.Page.Total != 5 || first.Page.Returned != 2 || !first.Page.HasMore {
+		t.Fatalf("first page = %#v", first.Page)
+	}
+	second := read("?limit=2&offset=2")
+	if len(second.Users) != 2 || second.Page.Offset != 2 || !second.Page.HasMore {
+		t.Fatalf("second page = %#v", second.Page)
+	}
+	last := read("?limit=2&offset=4")
+	if len(last.Users) != 1 || last.Page.HasMore {
+		t.Fatalf("last page = %#v", last.Page)
+	}
+	// Pages must not overlap or repeat a record.
+	seen := map[string]bool{}
+	for _, page := range []usersEnvelope{first, second, last} {
+		for _, user := range page.Users {
+			if seen[user.ID] {
+				t.Fatalf("account %s appeared on more than one page", user.Username)
+			}
+			seen[user.ID] = true
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("paging returned %d distinct accounts, want 5", len(seen))
+	}
+
+	// An unbounded request is still bounded by the store's default window.
+	if envelope := read(""); envelope.Page.Limit != 100 {
+		t.Fatalf("default limit = %d, want the store default", envelope.Page.Limit)
+	}
+	for _, invalid := range []string{"?limit=0", "?limit=501", "?limit=abc", "?offset=-1"} {
+		response := adminAPIAcceptanceRequest(t, handler, http.MethodGet, "https://auth.example.test/api/v1/users"+invalid, adminAPIAcceptanceReadToken, "")
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want %d", invalid, response.Code, http.StatusBadRequest)
+		}
+	}
+}
