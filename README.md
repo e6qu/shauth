@@ -239,6 +239,9 @@ Reads return an `observed_at` timestamp and a versioned envelope:
   machine-readable `identity_source` (`local`, `github`, or `entra`),
   verification, role, and disabled state; `q` filters by username, email, or
   GitHub login exactly like the users page.
+- `GET /api/v1/invitations` — `shauth.invitations/v1`: every invitation with
+  its state (`pending`, `accepted`, `revoked`, or `expired`). The single-use
+  token is stored only as a hash and is never returned.
 - `GET /api/v1/users/{id}/sessions` — `shauth.user-sessions/v1`: the account
   plus every browser session's created/last-seen/expiry times, user agent,
   remote address, revocation state, and computed `active` flag.
@@ -260,12 +263,23 @@ and answer with a versioned receipt:
 
 - `POST /internal/users` — create a local account
   (`{"username","email","password","role"}`), answering `201` with
-  `shauth.user/v1`.
+  `shauth.user/v1`. A username or email already in use answers `409`.
+- `POST /internal/users/{id}/disable` and `POST /internal/users/{id}/enable` —
+  contain or restore an account, answering `shauth.user/v1`. Disabling ends
+  every browser session, revokes the correlated provider sessions, and blocks
+  sign-in; unlike session revocation alone, the account cannot simply
+  authenticate again. It is idempotent, so a failed provider revocation can be
+  retried, and it refuses to disable the browser-validation identity (`409`).
+  Enabling restores sign-in without resurrecting the revoked sessions.
 - `POST /internal/invitations` — invite by email (`{"email","role"}`),
   answering `201` with `shauth.invitation/v1`. The invitation link is
   delivered only through the invitation email; if the email cannot be sent
   the invitation is revoked and the request fails with `502`. Token-created
   invitations record no inviting user.
+- `POST /internal/invitations/{id}/revoke` — withdraw an unaccepted
+  invitation (`shauth.invitation-revoke/v1`), so a link sent to the wrong
+  address can no longer create an account. An already accepted or revoked
+  invitation answers `404`.
 - `POST /internal/sessions/{id}/revoke` — end one browser session and its
   correlated Ory Hydra login sessions (`shauth.session-revoke/v1`);
   `POST /internal/sessions/reset` remains the whole-user reset behind its own
@@ -284,6 +298,15 @@ and answer with a versioned receipt:
   same invariants as the form: the OpenID Connect client must already exist,
   every coordinate must share one application origin, and the client must
   register exactly its logout-bridge post-logout redirect URI.
+
+Every administration API response is JSON, including failures, which carry an
+`error` message. A rejected request answers `400` with the reason, a
+uniqueness conflict answers `409`, and a failed dependency answers `500` with
+a generic message while the detail goes to the service log, so internal
+database text never reaches a caller. `GET /api/v1/monitoring` reports
+`postgresql_healthy: false` and a null `active_sessions` when PostgreSQL is
+unreachable rather than failing, because that contract exists to report an
+outage.
 
 ## Native relying-party gateway
 

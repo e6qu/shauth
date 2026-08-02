@@ -163,7 +163,7 @@ SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1
 	SHAUTH_ACCEPTANCE_HYDRA_ADMIN_URL=http://localhost:4445 \
 	SHAUTH_ACCEPTANCE_HYDRA_PUBLIC_URL=http://localhost:4444 \
 	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app \
-	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout|TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester|TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates|TestAppValidationRunHistoryOrdersFiltersAndLimits|TestApplicationsAPIListsCatalogHealthAndValidations|TestApplicationValidationHistoryAPIFiltersAndValidatesLimit|TestApplicationValidationEnqueueAPIQueuesWithoutABrowserCSRFToken|TestAdminAPIUserLifecycleAndSearch|TestAdminAPIUserSessionsReadAndSingleRevoke|TestAdminAPISessionPolicyReadAndUpdate|TestAdminAPIGitHubRoleMappingLifecycle|TestAdminAPIOIDCClientAndManagedAppLifecycle|TestAdminAPIMonitoringSnapshot|TestAdminAPIInvitationValidation)$' -count=1
+	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout|TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester|TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates|TestAppValidationRunHistoryOrdersFiltersAndLimits|TestApplicationsAPIListsCatalogHealthAndValidations|TestApplicationValidationHistoryAPIFiltersAndValidatesLimit|TestApplicationValidationEnqueueAPIQueuesWithoutABrowserCSRFToken|TestAdminAPIUserLifecycleAndSearch|TestAdminAPIUserSessionsReadAndSingleRevoke|TestAdminAPISessionPolicyReadAndUpdate|TestAdminAPIGitHubRoleMappingLifecycle|TestAdminAPIOIDCClientAndManagedAppLifecycle|TestAdminAPIMonitoringSnapshot|TestAdminAPIInvitationValidation|TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt|TestAdminAPIRefusesToDisableTheValidationIdentity|TestAdminAPIInvitationsAreListableAndRevocable|TestAdminAPIRejectsDuplicateUserWithoutLeakingDatabaseDetail)$' -count=1
 
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'id="main-content"'
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-label="Primary navigation"'
@@ -556,6 +556,37 @@ printf '%s' "$admin_monitoring_response" | grep -q '"hydra_healthy":true'
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/session-policy | grep -q '"schema_version":"shauth.session-policy/v1"'
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/oidc-clients | grep -q '"client_id":"gateway-integration"'
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/connectors | grep -q '"schema_version":"shauth.connectors/v1"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/invitations | grep -q '"schema_version":"shauth.invitations/v1"'
+
+# Disabling must contain an account: the session ends and the unchanged
+# password stops working. Revoking sessions alone would let it sign straight
+# back in.
+SHAUTH_CONTAINMENT_PASSWORD=$(random_secret)
+containment_user=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" --header 'Content-Type: application/json' \
+  --data "$(printf '{"username":"containment","email":"containment@localhost.test","password":"%s","role":"developer"}' "$SHAUTH_CONTAINMENT_PASSWORD")" \
+  http://localhost:8080/internal/users | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p')
+[ -n "$containment_user" ]
+containment_jar=$(mktemp)
+curl --fail --silent --show-error --cookie-jar "$containment_jar" http://localhost:8080/login >/dev/null
+containment_csrf=$(awk '$6 == "shauth_csrf" { print $7 }' "$containment_jar")
+curl --fail --silent --show-error --location --cookie "$containment_jar" --cookie-jar "$containment_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${containment_csrf}" --data-urlencode 'username=containment' \
+  --data-urlencode "password=${SHAUTH_CONTAINMENT_PASSWORD}" --data-urlencode 'next=/' \
+  http://localhost:8080/login | grep -q 'Welcome back, containment.'
+curl --fail --silent --show-error --output /dev/null --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" \
+  --request POST "http://localhost:8080/internal/users/${containment_user}/disable"
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$containment_jar" http://localhost:8080/apps)" = 303 ]
+curl --fail --silent --show-error --location --cookie "$containment_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${containment_csrf}" --data-urlencode 'username=containment' \
+  --data-urlencode "password=${SHAUTH_CONTAINMENT_PASSWORD}" --data-urlencode 'next=/' \
+  http://localhost:8080/login | grep -q 'Invalid username or password.'
+curl --fail --silent --show-error --output /dev/null --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" \
+  --request POST "http://localhost:8080/internal/users/${containment_user}/enable"
+curl --fail --silent --show-error --location --cookie "$containment_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${containment_csrf}" --data-urlencode 'username=containment' \
+  --data-urlencode "password=${SHAUTH_CONTAINMENT_PASSWORD}" --data-urlencode 'next=/' \
+  http://localhost:8080/login | grep -q 'Welcome back, containment.'
+rm -f "$containment_jar"
 for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE" "$SHAUTH_GATEWAY_TERTIARY_DATABASE"; do
 	[ "$(compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL")" = 0 ]
 done
