@@ -270,7 +270,10 @@ curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Or
   --data-urlencode 'id_token_minutes=15' \
   --data-urlencode 'refresh_token_hours=720' \
   http://localhost:8080/admin/session-policy | grep -q 'were saved and applied'
-rejected_app_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+# A rejected registration answers 400 and re-renders the form with the reason
+# and the operator's values, rather than redirecting and discarding the input.
+rejected_app_page=$(mktemp)
+rejected_app_status=$(curl --silent --show-error --output "$rejected_app_page" --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'slug=integration-app' \
   --data-urlencode 'name=Integration app' \
@@ -282,12 +285,20 @@ rejected_app_location=$(curl --fail --silent --show-error --dump-header - --outp
   --data-urlencode 'validation_url=http://localhost:5555/' \
   --data-urlencode 'signed_out_url=https://attacker.example/other-signed-out' \
   --data-urlencode 'release_revision=666666666666' \
-  http://localhost:8080/admin/apps |
-  awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
-case "$rejected_app_location" in
-	/admin/apps?error=*launch+and+signed-out+URLs+must+use+one+application+origin*) ;;
-	*) echo "cross-origin signed-out URL was not rejected: ${rejected_app_location}" >&2; exit 1 ;;
-esac
+  http://localhost:8080/admin/apps)
+if [ "$rejected_app_status" != 400 ]; then
+	echo "cross-origin signed-out URL was not rejected: HTTP ${rejected_app_status}" >&2
+	exit 1
+fi
+if ! grep -q 'launch and signed-out URLs must use one application origin' "$rejected_app_page"; then
+	echo 'the rejected registration did not explain why it was rejected' >&2
+	exit 1
+fi
+if ! grep -q 'https://attacker.example/other-signed-out' "$rejected_app_page"; then
+	echo 'the rejected registration discarded the operator input' >&2
+	exit 1
+fi
+rm -f "$rejected_app_page"
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='integration-app'")" = 0 ]
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
