@@ -270,7 +270,10 @@ curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Or
   --data-urlencode 'id_token_minutes=15' \
   --data-urlencode 'refresh_token_hours=720' \
   http://localhost:8080/admin/session-policy | grep -q 'were saved and applied'
-rejected_app_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+# A rejected registration answers 400 and re-renders the form with the reason
+# and the operator's values, rather than redirecting and discarding the input.
+rejected_app_page=$(mktemp)
+rejected_app_status=$(curl --silent --show-error --output "$rejected_app_page" --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'slug=integration-app' \
   --data-urlencode 'name=Integration app' \
@@ -282,12 +285,20 @@ rejected_app_location=$(curl --fail --silent --show-error --dump-header - --outp
   --data-urlencode 'validation_url=http://localhost:5555/' \
   --data-urlencode 'signed_out_url=https://attacker.example/other-signed-out' \
   --data-urlencode 'release_revision=666666666666' \
-  http://localhost:8080/admin/apps |
-  awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
-case "$rejected_app_location" in
-	/admin/apps?error=*launch+and+signed-out+URLs+must+use+one+application+origin*) ;;
-	*) echo "cross-origin signed-out URL was not rejected: ${rejected_app_location}" >&2; exit 1 ;;
-esac
+  http://localhost:8080/admin/apps)
+if [ "$rejected_app_status" != 400 ]; then
+	echo "cross-origin signed-out URL was not rejected: HTTP ${rejected_app_status}" >&2
+	exit 1
+fi
+if ! grep -q 'launch and signed-out URLs must use one application origin' "$rejected_app_page"; then
+	echo 'the rejected registration did not explain why it was rejected' >&2
+	exit 1
+fi
+if ! grep -q 'https://attacker.example/other-signed-out' "$rejected_app_page"; then
+	echo 'the rejected registration discarded the operator input' >&2
+	exit 1
+fi
+rm -f "$rejected_app_page"
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='integration-app'")" = 0 ]
 curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
   --data-urlencode "_csrf=${csrf_token}" \
@@ -557,6 +568,35 @@ curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/oidc-clients | grep -q '"client_id":"gateway-integration"'
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/connectors | grep -q '"schema_version":"shauth.connectors/v1"'
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/invitations | grep -q '"schema_version":"shauth.invitations/v1"'
+
+# The browser interface must not depend on JavaScript for state changes: the
+# CSRF token is rendered into the form, and a POST carrying only that token
+# must be accepted.
+noscript_jar=$(mktemp)
+noscript_page=$(curl --fail --silent --show-error --cookie-jar "$noscript_jar" http://localhost:8080/login)
+noscript_csrf=$(printf '%s' "$noscript_page" | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1)
+[ -n "$noscript_csrf" ]
+printf '%s' "$noscript_page" | grep -q '<title>Sign in · Shauth</title>'
+curl --fail --silent --show-error --location --cookie "$noscript_jar" --cookie-jar "$noscript_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${noscript_csrf}" --data-urlencode 'username=admin' \
+  --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" --data-urlencode 'next=/' \
+  http://localhost:8080/login | grep -q 'Welcome back, admin.'
+rm -f "$noscript_jar"
+
+# An unrouted path answers in the shape its caller parses.
+curl --silent http://localhost:8080/no-such-page | grep -q 'aria-label="Primary navigation"'
+curl --silent http://localhost:8080/api/v1/no-such-endpoint | grep -q '"error":"no such endpoint"'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/favicon.svg)" = 200 ]
+
+# Timestamps are rendered for people, not as Go debug syntax.
+if curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q '+0000 UTC'; then
+	echo 'the administration interface rendered a raw Go timestamp' >&2
+	exit 1
+fi
+
+# A 401 advertises its scheme, and the scheme is matched case-insensitively.
+curl --silent --dump-header - --output /dev/null http://localhost:8080/api/v1/users | grep -qi '^www-authenticate: Bearer'
+curl --fail --silent --show-error --header "authorization: bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/users | grep -q '"schema_version":"shauth.users/v1"'
 
 # Disabling must contain an account: the session ends and the unchanged
 # password stops working. Revoking sessions alone would let it sign straight

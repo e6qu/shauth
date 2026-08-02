@@ -301,12 +301,44 @@ and answer with a versioned receipt:
 
 Every administration API response is JSON, including failures, which carry an
 `error` message. A rejected request answers `400` with the reason, a
-uniqueness conflict answers `409`, and a failed dependency answers `500` with
-a generic message while the detail goes to the service log, so internal
-database text never reaches a caller. `GET /api/v1/monitoring` reports
-`postgresql_healthy: false` and a null `active_sessions` when PostgreSQL is
-unreachable rather than failing, because that contract exists to report an
-outage.
+uniqueness conflict answers `409`, a missing record answers `404`, and a
+failed dependency answers `502` while its detail goes only to the service log,
+so internal database and provider text never reaches a caller. Unauthorized
+responses carry a `WWW-Authenticate: Bearer` challenge, and the `Bearer`
+scheme is matched case-insensitively as RFC 7235 requires.
+`GET /api/v1/monitoring` reports `postgresql_healthy: false` and a null
+`active_sessions` when PostgreSQL is unreachable rather than failing, because
+that contract exists to report an outage. `GET /api/v1/users/{id}` reads one
+account, so polling a single account does not download every account. Record
+timestamps are published in UTC, and `disabled_at` is always present (null
+when the account is enabled) so a consumer never has to infer state from a
+missing key.
+
+## One implementation per operation
+
+The browser interface and the machine API are two transports over one
+implementation. Every administrative state change — creating a user,
+disabling an account, inviting, revoking a session or an invitation, updating
+the session policy, registering or deleting an OAuth client, a GitHub access
+rule, or an application, and queuing validations — lives once in
+`internal/app/operations.go`. A handler parses its own input, calls one
+operation, and renders the result; neither transport reimplements an
+operation, so the two cannot drift apart.
+
+Failures are classified once and mapped by each transport: the API answers a
+status and a JSON `error`, and the browser returns the operator to the form
+with the same message. The acting administrator is an explicit input, so a
+browser-created invitation records its inviter and a browser-requested
+validation records its requester, exactly as the API does when it supplies
+none. Security rules that were previously enforced only in the browser — such
+as refusing to disable the account the operator is signed in with — now hold
+for every caller.
+
+Browser forms carry their CSRF token from the server rather than having it
+injected by script, so signing in, accepting an invitation, signing out, and
+every administrative action work without JavaScript. Destructive controls ask
+for confirmation, failures render a navigable page instead of unstyled text,
+and each page carries its own title.
 
 ## Native relying-party gateway
 

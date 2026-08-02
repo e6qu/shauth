@@ -12,10 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -35,7 +33,7 @@ func (s *Server) requireAdminAPIReadToken(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	if !bearerTokenMatches(r, s.config.AdminAPIReadToken) {
-		writeAdminAPIError(w, http.StatusUnauthorized, "administration API authentication failed")
+		unauthorized(w, "administration API authentication failed")
 		return false
 	}
 	return true
@@ -50,7 +48,7 @@ func (s *Server) requireAdminAPIWriteToken(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 	if !bearerTokenMatches(r, s.config.AdminAPIWriteToken) {
-		writeAdminAPIError(w, http.StatusUnauthorized, "administration API authentication failed")
+		unauthorized(w, "administration API authentication failed")
 		return false
 	}
 	return true
@@ -74,7 +72,7 @@ type userRecord struct {
 	IdentitySource string     `json:"identity_source"`
 	GitHubLogin    string     `json:"github_login,omitempty"`
 	Role           string     `json:"role"`
-	DisabledAt     *time.Time `json:"disabled_at,omitempty"`
+	DisabledAt     *time.Time `json:"disabled_at"`
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
@@ -82,28 +80,24 @@ type userRecord struct {
 // guesses: publishing "local" for a federated account would misrepresent how
 // the account authenticates.
 func newUserRecord(user identity.User) userRecord {
-	return userRecord{
+	record := userRecord{
 		ID: user.ID, Username: user.Username, Email: user.Email, EmailVerified: user.EmailVerified,
 		IdentitySource: user.IdentitySource, GitHubLogin: user.GitHubLogin, Role: string(user.Role),
-		DisabledAt: user.DisabledAt, CreatedAt: user.CreatedAt,
+		CreatedAt: user.CreatedAt.UTC(),
 	}
+	if user.DisabledAt != nil {
+		disabled := user.DisabledAt.UTC()
+		record.DisabledAt = &disabled
+	}
+	return record
 }
 
-// writeAdminAPIStoreError separates a rejected request from a failed
-// dependency: invalid input answers 400 with the store's message, a
-// uniqueness conflict answers 409, and anything else is logged and answered
-// generically so internal database detail never reaches the caller.
-func writeAdminAPIStoreError(w http.ResponseWriter, action string, err error) {
-	var invalid identity.InvalidInputError
-	switch {
-	case errors.As(err, &invalid):
-		writeAdminAPIError(w, http.StatusBadRequest, invalid.Error())
-	case errors.Is(err, identity.ErrAlreadyExists):
-		writeAdminAPIError(w, http.StatusConflict, action+" already exists")
-	default:
-		log.Printf("%s: %v", action, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not complete the request")
-	}
+// writeOperationFailure answers a failed operation with the status and
+// caller-safe message shared with the browser transport, so the two report
+// the same outcome for the same cause.
+func writeOperationFailure(w http.ResponseWriter, action string, err error) {
+	status, message := describeOperationFailure(action, err)
+	writeAdminAPIError(w, status, message)
 }
 
 func (s *Server) usersAPI(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +122,30 @@ func (s *Server) usersAPI(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// userAPI reports one account. Without it a consumer polling a single
+// account's state has to download the entire user list.
+func (s *Server) userAPI(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if !s.requireAdminAPIReadToken(w, r) {
+		return
+	}
+	userID := r.PathValue("id")
+	if err := requireUUID(userID, identity.ErrUserNotFound); err != nil {
+		writeOperationFailure(w, "read user", err)
+		return
+	}
+	user, err := s.store.UserByID(r.Context(), userID)
+	if err != nil {
+		writeOperationFailure(w, "read user", err)
+		return
+	}
+	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
+		"schema_version": "shauth.user/v1",
+		"observed_at":    time.Now().UTC(),
+		"user":           newUserRecord(user),
+	})
+}
+
 type sessionRecord struct {
 	ID            string     `json:"id"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -141,9 +159,12 @@ type sessionRecord struct {
 
 func newSessionRecord(session identity.Session) sessionRecord {
 	record := sessionRecord{
-		ID: session.ID, CreatedAt: session.CreatedAt, LastSeenAt: session.LastSeen,
-		ExpiresAt: session.ExpiresAt, RevokedAt: session.RevokedAt,
-		UserAgent: session.UserAgent, Active: session.Active,
+		ID: session.ID, CreatedAt: session.CreatedAt.UTC(), LastSeenAt: session.LastSeen.UTC(),
+		ExpiresAt: session.ExpiresAt.UTC(), UserAgent: session.UserAgent, Active: session.Active,
+	}
+	if session.RevokedAt != nil {
+		revoked := session.RevokedAt.UTC()
+		record.RevokedAt = &revoked
 	}
 	if session.RemoteIP != nil {
 		record.RemoteAddress = session.RemoteIP.String()
@@ -214,10 +235,10 @@ func newSessionPolicyRecord(policy identity.SessionPolicy) sessionPolicyRecord {
 func (record sessionPolicyRecord) sessionPolicy() (identity.SessionPolicy, error) {
 	parse := func(name string, value int64, unit time.Duration) (time.Duration, error) {
 		if value <= 0 {
-			return 0, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(name, "_", " "))
+			return 0, identity.Invalid("%s must be a positive whole number", strings.ReplaceAll(name, "_", " "))
 		}
 		if value > int64((90*24*time.Hour)/unit) {
-			return 0, fmt.Errorf("%s exceeds the maximum supported duration", strings.ReplaceAll(name, "_", " "))
+			return 0, identity.Invalid("%s exceeds the maximum supported duration", strings.ReplaceAll(name, "_", " "))
 		}
 		return time.Duration(value) * unit, nil
 	}
@@ -279,37 +300,15 @@ func (s *Server) updateSessionPolicyAPI(w http.ResponseWriter, r *http.Request) 
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid session policy request")
 		return
 	}
-	policy, err := request.sessionPolicy()
+	policy, err := s.updateSessionPolicy(r.Context(), request)
 	if err != nil {
-		writeAdminAPIError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	previous, err := s.store.SessionPolicy(r.Context())
-	if err != nil {
-		log.Printf("load current session policy: %v", err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not load current session policy")
-		return
-	}
-	if err := s.applyHydraSessionPolicy(r.Context(), policy); err != nil {
-		if rollbackErr := s.applyHydraSessionPolicy(r.Context(), previous); rollbackErr != nil {
-			log.Printf("restore Ory Hydra session policy after client update failed: %v", rollbackErr)
-		}
-		log.Printf("apply Ory Hydra session policy: %v", err)
-		writeAdminAPIError(w, http.StatusBadGateway, "could not update OAuth client lifetimes")
-		return
-	}
-	if err := s.store.UpdateSessionPolicy(r.Context(), policy, time.Now()); err != nil {
-		if rollbackErr := s.applyHydraSessionPolicy(r.Context(), previous); rollbackErr != nil {
-			log.Printf("restore Ory Hydra session policy after PostgreSQL update failed: %v", rollbackErr)
-		}
-		log.Printf("save session policy: %v", err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not save session policy")
+		writeOperationFailure(w, "update session policy", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
 		"schema_version": "shauth.session-policy/v1",
 		"observed_at":    time.Now().UTC(),
-		"policy":         newSessionPolicyRecord(policy),
+		"policy":         policy,
 	})
 }
 
@@ -369,21 +368,11 @@ func (s *Server) createOIDCClientAPI(w http.ResponseWriter, r *http.Request) {
 			input.PostLogoutRedirectURIs = append(input.PostLogoutRedirectURIs, uri)
 		}
 	}
-	if err := input.validate(); err != nil {
-		writeAdminAPIError(w, http.StatusBadRequest, err.Error())
+	client, err := s.createOIDCClient(r.Context(), input)
+	if err != nil {
+		writeOperationFailure(w, "create OAuth client", err)
 		return
 	}
-	if err := s.createHydraClient(r.Context(), input); err != nil {
-		if errors.Is(err, errHydraClientConflict) {
-			writeAdminAPIError(w, http.StatusConflict, "OAuth client already exists")
-			return
-		}
-		log.Printf("create OAuth client %s: %v", input.ID, err)
-		writeAdminAPIError(w, http.StatusBadGateway, "could not create OAuth client")
-		return
-	}
-	client := registeredOIDCClient(input)
-	client.Name = input.Name
 	writeAdminAPIJSON(w, http.StatusCreated, map[string]any{
 		"schema_version": "shauth.oidc-client/v1",
 		"client":         client,
@@ -396,27 +385,8 @@ func (s *Server) deleteOIDCClientAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := r.PathValue("id")
-	if !deletableOIDCClientID(clientID) {
-		writeAdminAPIError(w, http.StatusBadRequest, "invalid client ID")
-		return
-	}
-	used, err := s.store.ManagedAppUsesOIDCClient(r.Context(), clientID)
-	if err != nil {
-		log.Printf("verify connected apps for client %s: %v", clientID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not verify connected apps")
-		return
-	}
-	if used {
-		writeAdminAPIError(w, http.StatusConflict, "delete the connected app before deleting its OAuth client")
-		return
-	}
-	if err := s.deleteHydraClient(r.Context(), clientID); err != nil {
-		if errors.Is(err, errHydraClientNotFound) {
-			writeAdminAPIError(w, http.StatusNotFound, "OAuth client not found")
-			return
-		}
-		log.Printf("delete OAuth client %s: %v", clientID, err)
-		writeAdminAPIError(w, http.StatusBadGateway, "could not delete OAuth client")
+	if err := s.deleteOIDCClient(r.Context(), clientID); err != nil {
+		writeOperationFailure(w, "delete OAuth client", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
@@ -436,7 +406,7 @@ type githubRoleMappingRecord struct {
 func newGitHubRoleMappingRecord(mapping identity.GitHubRoleMapping) githubRoleMappingRecord {
 	return githubRoleMappingRecord{
 		ID: mapping.ID, Kind: mapping.Kind, Target: mapping.Target,
-		Role: string(mapping.Role), CreatedAt: mapping.CreatedAt,
+		Role: string(mapping.Role), CreatedAt: mapping.CreatedAt.UTC(),
 	}
 }
 
@@ -478,9 +448,9 @@ func (s *Server) createGitHubMappingAPI(w http.ResponseWriter, r *http.Request) 
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid GitHub role mapping request")
 		return
 	}
-	mapping, err := s.store.CreateGitHubRoleMapping(r.Context(), request.Kind, request.Target, identity.Role(request.Role))
+	mapping, err := s.createGitHubMapping(r.Context(), request.Kind, request.Target, request.Role)
 	if err != nil {
-		writeAdminAPIStoreError(w, "create GitHub role mapping", err)
+		writeOperationFailure(w, "create GitHub role mapping", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusCreated, map[string]any{
@@ -495,17 +465,8 @@ func (s *Server) deleteGitHubMappingAPI(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	mappingID := r.PathValue("id")
-	if !uuidPathPattern.MatchString(mappingID) {
-		writeAdminAPIError(w, http.StatusNotFound, "GitHub role mapping not found")
-		return
-	}
-	if err := s.store.DeleteGitHubRoleMapping(r.Context(), mappingID); err != nil {
-		if errors.Is(err, identity.ErrGitHubRoleMappingNotFound) {
-			writeAdminAPIError(w, http.StatusNotFound, "GitHub role mapping not found")
-			return
-		}
-		log.Printf("delete GitHub role mapping %s: %v", mappingID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not delete GitHub role mapping")
+	if err := s.deleteGitHubMapping(r.Context(), mappingID); err != nil {
+		writeOperationFailure(w, "delete GitHub role mapping", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
@@ -602,9 +563,9 @@ func (s *Server) createUserAPI(w http.ResponseWriter, r *http.Request) {
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid user request")
 		return
 	}
-	user, err := s.store.CreatePasswordUser(r.Context(), request.Username, request.Email, request.Password, identity.Role(request.Role))
+	user, err := s.createUser(r.Context(), request)
 	if err != nil {
-		writeAdminAPIStoreError(w, "create user", err)
+		writeOperationFailure(w, "create user", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusCreated, map[string]any{
@@ -622,40 +583,9 @@ func (s *Server) disableUserAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAPIWriteToken(w, r) {
 		return
 	}
-	userID := r.PathValue("id")
-	if !uuidPathPattern.MatchString(userID) {
-		writeAdminAPIError(w, http.StatusNotFound, "user not found")
-		return
-	}
-	hydraSessionIDs, err := s.store.DisableUser(r.Context(), userID, time.Now())
+	user, err := s.disableUser(r.Context(), r.PathValue("id"), actor{})
 	if err != nil {
-		switch {
-		case errors.Is(err, identity.ErrUserNotFound):
-			writeAdminAPIError(w, http.StatusNotFound, "user not found")
-		case errors.Is(err, identity.ErrValidationUserProtected):
-			writeAdminAPIError(w, http.StatusConflict, err.Error())
-		default:
-			log.Printf("disable account %s: %v", userID, err)
-			writeAdminAPIError(w, http.StatusInternalServerError, "could not disable the account")
-		}
-		return
-	}
-	for _, hydraSessionID := range hydraSessionIDs {
-		if err := s.revokeHydraLoginSession(r.Context(), hydraSessionID); err != nil {
-			log.Printf("revoke Ory Hydra session while disabling account %s: %v", userID, err)
-			writeAdminAPIError(w, http.StatusBadGateway, "account disabled and local sessions ended, but OAuth session revocation did not complete")
-			return
-		}
-	}
-	if err := s.revokeHydraSubjectSessions(r.Context(), userID); err != nil {
-		log.Printf("revoke Ory Hydra subject sessions while disabling account %s: %v", userID, err)
-		writeAdminAPIError(w, http.StatusBadGateway, "account disabled and local sessions ended, but OAuth session revocation did not complete")
-		return
-	}
-	user, err := s.store.UserByID(r.Context(), userID)
-	if err != nil {
-		log.Printf("read disabled account %s: %v", userID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "the account was disabled but could not be read back")
+		writeOperationFailure(w, "disable account", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
@@ -671,24 +601,9 @@ func (s *Server) enableUserAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAPIWriteToken(w, r) {
 		return
 	}
-	userID := r.PathValue("id")
-	if !uuidPathPattern.MatchString(userID) {
-		writeAdminAPIError(w, http.StatusNotFound, "user not found")
-		return
-	}
-	if err := s.store.EnableUser(r.Context(), userID, time.Now()); err != nil {
-		if errors.Is(err, identity.ErrUserNotFound) {
-			writeAdminAPIError(w, http.StatusNotFound, "user not found")
-			return
-		}
-		log.Printf("enable account %s: %v", userID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not enable the account")
-		return
-	}
-	user, err := s.store.UserByID(r.Context(), userID)
+	user, err := s.enableUser(r.Context(), r.PathValue("id"))
 	if err != nil {
-		log.Printf("read enabled account %s: %v", userID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "the account was enabled but could not be read back")
+		writeOperationFailure(w, "enable account", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
@@ -712,7 +627,7 @@ type invitationRecord struct {
 func newInvitationRecord(invitation identity.Invitation) invitationRecord {
 	return invitationRecord{
 		ID: invitation.ID, Email: invitation.Email, Role: string(invitation.Role),
-		State: invitation.State, CreatedAt: invitation.CreatedAt, ExpiresAt: invitation.ExpiresAt,
+		State: invitation.State, CreatedAt: invitation.CreatedAt.UTC(), ExpiresAt: invitation.ExpiresAt.UTC(),
 		AcceptedAt: invitation.AcceptedAt, RevokedAt: invitation.RevokedAt, InvitedBy: invitation.InvitedBy,
 	}
 }
@@ -749,17 +664,8 @@ func (s *Server) revokeInvitationAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	invitationID := r.PathValue("id")
-	if !uuidPathPattern.MatchString(invitationID) {
-		writeAdminAPIError(w, http.StatusNotFound, "active invitation not found")
-		return
-	}
-	if err := s.store.RevokeInvitation(r.Context(), invitationID, time.Now()); err != nil {
-		if errors.Is(err, identity.ErrInvitationNotRevocable) {
-			writeAdminAPIError(w, http.StatusNotFound, "active invitation not found")
-			return
-		}
-		log.Printf("revoke invitation %s: %v", invitationID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not revoke the invitation")
+	if err := s.revokeInvitation(r.Context(), invitationID); err != nil {
+		writeOperationFailure(w, "revoke invitation", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
@@ -787,18 +693,9 @@ func (s *Server) createInvitationAPI(w http.ResponseWriter, r *http.Request) {
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid invitation request")
 		return
 	}
-	raw, invitation, err := s.store.CreateInvitation(r.Context(), request.Email, identity.Role(request.Role), "", time.Now())
+	invitation, err := s.createInvitation(r.Context(), request.Email, request.Role, actor{})
 	if err != nil {
-		writeAdminAPIStoreError(w, "create invitation", err)
-		return
-	}
-	link := s.config.PublicURL.ResolveReference(&url.URL{Path: "/accept-invitation", RawQuery: "token=" + url.QueryEscape(raw)}).String()
-	if err := s.mailer.SendInvitation(r.Context(), invitation.Email, link); err != nil {
-		if revokeErr := s.store.RevokeInvitation(r.Context(), invitation.ID, time.Now()); revokeErr != nil {
-			log.Printf("revoke unsent invitation %s: %v", invitation.ID, revokeErr)
-		}
-		log.Printf("send invitation to %s: %v", invitation.Email, err)
-		writeAdminAPIError(w, http.StatusBadGateway, "invitation email could not be sent")
+		writeOperationFailure(w, "create invitation", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusCreated, map[string]any{
@@ -815,47 +712,16 @@ func (s *Server) revokeSessionAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAPIWriteToken(w, r) {
 		return
 	}
-	sessionID := r.PathValue("id")
-	if !uuidPathPattern.MatchString(sessionID) {
-		writeAdminAPIError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	userID, err := s.store.SessionUserID(r.Context(), sessionID)
-	if errors.Is(err, identity.ErrSessionNotFound) {
-		writeAdminAPIError(w, http.StatusNotFound, "session not found")
-		return
-	}
+	revoked, err := s.revokeSession(r.Context(), r.PathValue("id"))
 	if err != nil {
-		log.Printf("read session %s: %v", sessionID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not read session")
+		writeOperationFailure(w, "revoke session", err)
 		return
-	}
-	if err := s.store.RevokeSession(r.Context(), sessionID, time.Now()); err != nil {
-		if errors.Is(err, identity.ErrActiveSessionNotFound) {
-			writeAdminAPIError(w, http.StatusConflict, "session is already revoked")
-			return
-		}
-		log.Printf("revoke session %s: %v", sessionID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not revoke session")
-		return
-	}
-	hydraSessionIDs, err := s.store.HydraLoginSessionIDs(r.Context(), sessionID)
-	if err != nil {
-		log.Printf("load Ory Hydra correlation for session %s: %v", sessionID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "local session ended but OAuth session correlation could not be loaded")
-		return
-	}
-	for _, hydraSessionID := range hydraSessionIDs {
-		if err := s.revokeHydraLoginSession(r.Context(), hydraSessionID); err != nil {
-			log.Printf("revoke Ory Hydra session for session %s: %v", sessionID, err)
-			writeAdminAPIError(w, http.StatusBadGateway, "local session ended but OAuth session revocation did not complete")
-			return
-		}
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
 		"schema_version": "shauth.session-revoke/v1",
-		"session_id":     sessionID,
-		"user_id":        userID,
+		"observed_at":    time.Now().UTC(),
+		"session_id":     revoked.SessionID,
+		"user_id":        revoked.UserID,
 	})
 }
 
@@ -921,36 +787,9 @@ func (s *Server) createAppAPI(w http.ResponseWriter, r *http.Request) {
 		SignedOutURL:    strings.TrimSpace(request.SignedOutURL),
 		ReleaseRevision: strings.TrimSpace(request.ReleaseRevision),
 	}
-	clients, err := s.hydraClients(r.Context())
+	created, err := s.createApp(r.Context(), app)
 	if err != nil {
-		log.Printf("verify OAuth client for app %s: %v", app.Slug, err)
-		writeAdminAPIError(w, http.StatusBadGateway, "could not verify OAuth client")
-		return
-	}
-	var registeredClient *oidcClient
-	for _, client := range clients {
-		if client.ID == app.OIDCClientID {
-			clientCopy := client
-			registeredClient = &clientCopy
-			break
-		}
-	}
-	if registeredClient == nil {
-		writeAdminAPIError(w, http.StatusBadRequest, "register the OIDC client before adding its app")
-		return
-	}
-	app.OIDCContractHash = oidcClientContractHash(*registeredClient)
-	if err := identity.ValidateManagedApp(app); err != nil {
-		writeAdminAPIError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := validateManagedAppClient(app, *registeredClient); err != nil {
-		writeAdminAPIError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	created, err := s.store.CreateManagedApp(r.Context(), app)
-	if err != nil {
-		writeAdminAPIStoreError(w, "create managed app", err)
+		writeOperationFailure(w, "create managed app", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusCreated, map[string]any{
@@ -965,17 +804,13 @@ func (s *Server) deleteAppAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slug := r.PathValue("slug")
-	if err := s.store.DeleteManagedAppBySlug(r.Context(), slug); err != nil {
-		if errors.Is(err, identity.ErrManagedAppNotFound) {
-			writeAdminAPIError(w, http.StatusNotFound, "managed app not found")
-			return
-		}
-		log.Printf("delete managed app %s: %v", slug, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not delete managed app")
+	if err := s.deleteApp(r.Context(), identity.ManagedAppRef{Slug: slug}); err != nil {
+		writeOperationFailure(w, "delete managed app", err)
 		return
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
 		"schema_version": "shauth.app-delete/v1",
+		"observed_at":    time.Now().UTC(),
 		"slug":           slug,
 	})
 }

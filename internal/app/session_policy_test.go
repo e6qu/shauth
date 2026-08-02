@@ -13,8 +13,10 @@ import (
 	"github.com/e6qu/shauth/internal/identity"
 )
 
+// The browser form and the JSON body converge on one record, which one
+// shared operation then validates, so both transports enforce one rule set.
 func TestParseSessionPolicyForm(t *testing.T) {
-	policy, err := parseSessionPolicyForm(url.Values{
+	record, err := parseSessionPolicyForm(url.Values{
 		"browser_absolute_hours": {"168"},
 		"browser_idle_minutes":   {"60"},
 		"oidc_sso_hours":         {"24"},
@@ -25,6 +27,10 @@ func TestParseSessionPolicyForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSessionPolicyForm() error = %v", err)
 	}
+	policy, err := record.sessionPolicy()
+	if err != nil {
+		t.Fatalf("sessionPolicy() error = %v", err)
+	}
 	if policy.BrowserAbsoluteLifetime != 7*24*time.Hour || policy.BrowserIdleTimeout != time.Hour || policy.OIDCSessionLifetime != 24*time.Hour {
 		t.Fatalf("browser and SSO policy = %#v", policy)
 	}
@@ -34,9 +40,19 @@ func TestParseSessionPolicyForm(t *testing.T) {
 }
 
 func TestParseSessionPolicyFormRejectsDurationOverflow(t *testing.T) {
-	_, err := parseSessionPolicyForm(url.Values{"browser_absolute_hours": {strconv.FormatInt(math.MaxInt64, 10)}})
-	if err == nil {
-		t.Fatal("parseSessionPolicyForm accepted a duration that overflows time.Duration")
+	record, err := parseSessionPolicyForm(url.Values{
+		"browser_absolute_hours": {strconv.FormatInt(math.MaxInt64, 10)},
+		"browser_idle_minutes":   {"60"},
+		"oidc_sso_hours":         {"24"},
+		"access_token_minutes":   {"10"},
+		"id_token_minutes":       {"10"},
+		"refresh_token_hours":    {"48"},
+	})
+	if err != nil {
+		t.Fatalf("parseSessionPolicyForm() error = %v", err)
+	}
+	if _, err := record.sessionPolicy(); err == nil {
+		t.Fatal("sessionPolicy accepted a duration that overflows time.Duration")
 	}
 }
 

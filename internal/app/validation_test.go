@@ -36,7 +36,7 @@ func TestBearerTokenMatchesRequiresExactlyOneBearerCredential(t *testing.T) {
 }
 
 func TestApplicationValidationComponentReportsBothDirections(t *testing.T) {
-	pages, err := template.New("pages").Parse(pageTemplates)
+	pages, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
 	if err != nil {
 		t.Fatalf("parse templates: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestApplicationValidationComponentReportsBothDirections(t *testing.T) {
 }
 
 func TestApplicationValidationComponentPollsOnlyOngoingRuns(t *testing.T) {
-	pages, err := template.New("pages").Parse(pageTemplates)
+	pages, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
 	if err != nil {
 		t.Fatalf("parse templates: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestReleaseRevisionDisplayIsShortWithoutChangingValidationValue(t *testing.
 		ReleaseRevision:      digest,
 		DurationMilliseconds: &duration,
 	})
-	pages, err := template.New("pages").Parse(pageTemplates)
+	pages, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
 	if err != nil {
 		t.Fatalf("parse templates: %v", err)
 	}
