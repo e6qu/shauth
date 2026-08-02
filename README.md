@@ -199,9 +199,25 @@ Each validation page exposes the exact authenticated username, email,
 normalized role, and immutable release revision through documented
 `data-testid` fields, while the product launch page remains authoritative for
 the user-visible identity and logout controls. The passwordless validation identity is entered only by
-short-lived, single-use Shauth browser bootstraps. A distinct read-only bearer
-credential protects `GET /api/v1/apps/validations`, the closed machine-readable
-status contract used by post-deployment acceptance gates.
+short-lived, single-use Shauth browser bootstraps. A distinct bearer
+credential, supplied through `SHAUTH_VALIDATION_STATUS_TOKEN`, protects the
+closed machine-readable application API used by operators and post-deployment
+acceptance gates:
+
+- `GET /api/v1/apps` returns the `shauth.apps/v1` catalog: every registered
+  app's coordinates, live health observation, and latest validation result per
+  direction.
+- `GET /api/v1/apps/validations` returns the `shauth.app-validations/v1`
+  status contract with the latest run per app and direction. Terminal runs
+  carry `duration_ms`, and runs proven against a second relying party carry
+  the `witness` app slug.
+- `GET /api/v1/apps/validations/history?slug=<slug>&limit=<n>` returns the
+  `shauth.app-validation-history/v1` contract with durable runs ordered newest
+  first. `slug` is optional; `limit` defaults to 50 and is capped at 500.
+- `POST /internal/apps/validations/enqueue` queues both browser checks for one
+  app (`{"slug":"<slug>"}`) or for every app (empty or `{}` body) and answers
+  `202` with the `shauth.app-validation-enqueue/v1` receipt. It lives under
+  `/internal/` because bearer-token requests carry no browser CSRF token.
 
 ## Native relying-party gateway
 

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -340,7 +341,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /apps", s.apps)
 	mux.HandleFunc("GET /apps/{id}/validation", s.appValidationStatus)
+	mux.HandleFunc("GET /api/v1/apps", s.applicationsAPI)
 	mux.HandleFunc("GET /api/v1/apps/validations", s.applicationValidationStatusAPI)
+	mux.HandleFunc("GET /api/v1/apps/validations/history", s.applicationValidationHistoryAPI)
 	mux.HandleFunc("GET /login", s.login)
 	mux.HandleFunc("POST /login", s.passwordLogin)
 	mux.HandleFunc("GET /logout", s.logoutConfirm)
@@ -385,6 +388,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/users/{id}/sessions/revoke", s.adminRevokeSessions)
 	mux.HandleFunc("POST /admin/sessions/{id}/revoke", s.adminRevokeSession)
 	mux.HandleFunc("POST /internal/sessions/reset", s.sessionResetAPI)
+	// csrfPosts exempts only /oauth2/token and /internal/ paths from browser
+	// CSRF enforcement, so this bearer-token POST must live under /internal/.
+	mux.HandleFunc("POST /internal/apps/validations/enqueue", s.applicationValidationEnqueueAPI)
 	mux.HandleFunc("GET /monitoring", s.monitoring)
 	return securityHeaders(csrfPosts(s.config.PublicURL, mux))
 }
@@ -1355,6 +1361,20 @@ func bearerTokenMatches(r *http.Request, expected string) bool {
 	return len(provided) == len(expected) && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }
 
+// requireValidationStatusToken authorizes the closed machine-readable
+// application API with the shared read-and-trigger bearer credential.
+func (s *Server) requireValidationStatusToken(w http.ResponseWriter, r *http.Request) bool {
+	if s.config.ValidationStatusToken == "" {
+		http.Error(w, "application validation status is not configured", http.StatusServiceUnavailable)
+		return false
+	}
+	if !bearerTokenMatches(r, s.config.ValidationStatusToken) {
+		http.Error(w, "validation status authentication failed", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 type validationStatusRecord struct {
 	Slug                   string     `json:"slug"`
 	ReleaseRevision        string     `json:"release_revision"`
@@ -1364,17 +1384,29 @@ type validationStatusRecord struct {
 	ValidationContractHash string     `json:"validation_contract_hash"`
 	StartedAt              *time.Time `json:"started_at,omitempty"`
 	CompletedAt            *time.Time `json:"completed_at,omitempty"`
+	DurationMS             *int64     `json:"duration_ms,omitempty"`
 	Failure                string     `json:"failure,omitempty"`
+	Witness                string     `json:"witness,omitempty"`
+}
+
+func newValidationStatusRecord(run identity.AppValidationRun) validationStatusRecord {
+	record := validationStatusRecord{
+		Slug: run.AppSlug, ReleaseRevision: run.ReleaseRevision, Direction: run.Direction,
+		Status: run.Status, RequestedAt: run.RequestedAt, ValidationContractHash: run.ValidationContractHash,
+		StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Failure: run.Failure,
+	}
+	if run.Status == identity.ValidationPassed || run.Status == identity.ValidationFailed {
+		record.DurationMS = run.DurationMilliseconds
+	}
+	if run.Witness != nil {
+		record.Witness = run.Witness.AppSlug
+	}
+	return record
 }
 
 func (s *Server) applicationValidationStatusAPI(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if s.config.ValidationStatusToken == "" {
-		http.Error(w, "application validation status is not configured", http.StatusServiceUnavailable)
-		return
-	}
-	if !bearerTokenMatches(r, s.config.ValidationStatusToken) {
-		http.Error(w, "validation status authentication failed", http.StatusUnauthorized)
+	if !s.requireValidationStatusToken(w, r) {
 		return
 	}
 	runs, err := s.store.LatestAppValidationRuns(r.Context())
@@ -1386,11 +1418,7 @@ func (s *Server) applicationValidationStatusAPI(w http.ResponseWriter, r *http.R
 	records := make([]validationStatusRecord, 0, len(runs)*2)
 	for _, directions := range runs {
 		for _, run := range directions {
-			records = append(records, validationStatusRecord{
-				Slug: run.AppSlug, ReleaseRevision: run.ReleaseRevision, Direction: run.Direction,
-				Status: run.Status, RequestedAt: run.RequestedAt, ValidationContractHash: run.ValidationContractHash,
-				StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Failure: run.Failure,
-			})
+			records = append(records, newValidationStatusRecord(run))
 		}
 	}
 	sort.Slice(records, func(i, j int) bool {
@@ -1404,6 +1432,185 @@ func (s *Server) applicationValidationStatusAPI(w http.ResponseWriter, r *http.R
 		"schema_version": "shauth.app-validations/v1",
 		"observed_at":    time.Now().UTC(),
 		"validations":    records,
+	})
+}
+
+type appHealthRecord struct {
+	Healthy    bool   `json:"healthy"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+type appValidationsRecord struct {
+	FromShauth *validationStatusRecord `json:"from_shauth"`
+	FromApp    *validationStatusRecord `json:"from_app"`
+}
+
+type appRecord struct {
+	Slug            string               `json:"slug"`
+	Name            string               `json:"name"`
+	Description     string               `json:"description,omitempty"`
+	ReleaseRevision string               `json:"release_revision"`
+	LaunchURL       string               `json:"launch_url"`
+	HealthURL       string               `json:"health_url,omitempty"`
+	MonitoringURL   string               `json:"monitoring_url,omitempty"`
+	ValidationURL   string               `json:"validation_url"`
+	SignedOutURL    string               `json:"signed_out_url"`
+	OIDCClientID    string               `json:"oidc_client_id"`
+	CreatedAt       time.Time            `json:"created_at"`
+	Health          appHealthRecord      `json:"health"`
+	Validations     appValidationsRecord `json:"validations"`
+}
+
+func newAppRecord(view managedAppView) appRecord {
+	record := appRecord{
+		Slug: view.Slug, Name: view.Name, Description: view.Description,
+		ReleaseRevision: view.ReleaseRevision, LaunchURL: view.LaunchURL,
+		HealthURL: view.HealthURL, MonitoringURL: view.MonitoringURL,
+		ValidationURL: view.ValidationURL, SignedOutURL: view.SignedOutURL,
+		OIDCClientID: view.OIDCClientID, CreatedAt: view.CreatedAt,
+		Health: appHealthRecord{Healthy: view.Healthy, StatusCode: view.StatusCode, Error: view.StatusError},
+	}
+	if view.FromShauth != nil {
+		fromShauth := newValidationStatusRecord(view.FromShauth.AppValidationRun)
+		record.Validations.FromShauth = &fromShauth
+	}
+	if view.FromApp != nil {
+		fromApp := newValidationStatusRecord(view.FromApp.AppValidationRun)
+		record.Validations.FromApp = &fromApp
+	}
+	return record
+}
+
+func (s *Server) applicationsAPI(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if !s.requireValidationStatusToken(w, r) {
+		return
+	}
+	views, err := s.appViews(r.Context())
+	if err != nil {
+		log.Printf("list applications: %v", err)
+		http.Error(w, "could not list applications", http.StatusInternalServerError)
+		return
+	}
+	records := make([]appRecord, 0, len(views))
+	for _, view := range views {
+		records = append(records, newAppRecord(view))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "shauth.apps/v1",
+		"observed_at":    time.Now().UTC(),
+		"apps":           records,
+	})
+}
+
+func parseValidationHistoryLimit(raw string) (int, error) {
+	if raw == "" {
+		return 50, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > 500 {
+		return 0, fmt.Errorf("limit must be a whole number between 1 and 500")
+	}
+	return limit, nil
+}
+
+func (s *Server) applicationValidationHistoryAPI(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if !s.requireValidationStatusToken(w, r) {
+		return
+	}
+	limit, err := parseValidationHistoryLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	runs, err := s.store.AppValidationRunHistory(r.Context(), strings.TrimSpace(r.URL.Query().Get("slug")), limit)
+	if err != nil {
+		log.Printf("list application validation history: %v", err)
+		http.Error(w, "could not list application validation history", http.StatusInternalServerError)
+		return
+	}
+	records := make([]validationStatusRecord, 0, len(runs))
+	for _, run := range runs {
+		records = append(records, newValidationStatusRecord(run))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "shauth.app-validation-history/v1",
+		"observed_at":    time.Now().UTC(),
+		"runs":           records,
+	})
+}
+
+type validationEnqueueRequest struct {
+	Slug string `json:"slug"`
+}
+
+type validationEnqueueRecord struct {
+	Slug      string `json:"slug"`
+	Direction string `json:"direction"`
+}
+
+func decodeValidationEnqueueRequest(reader io.Reader) (validationEnqueueRequest, error) {
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return validationEnqueueRequest{}, err
+	}
+	var request validationEnqueueRequest
+	if len(bytes.TrimSpace(body)) == 0 {
+		return request, nil
+	}
+	if err := decodeSingleJSONBody(bytes.NewReader(body), &request); err != nil {
+		return validationEnqueueRequest{}, err
+	}
+	request.Slug = strings.TrimSpace(request.Slug)
+	return request, nil
+}
+
+// applicationValidationEnqueueAPI is the token-authorized twin of the Apps
+// page's "Run both checks again" button. An empty or {} body queues both
+// browser checks for every app; {"slug":"<slug>"} queues one app.
+func (s *Server) applicationValidationEnqueueAPI(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if !s.requireValidationStatusToken(w, r) {
+		return
+	}
+	request, err := decodeValidationEnqueueRequest(http.MaxBytesReader(w, r.Body, 4*1024))
+	if err != nil {
+		http.Error(w, "invalid validation enqueue request", http.StatusBadRequest)
+		return
+	}
+	slugs := []string{request.Slug}
+	if request.Slug == "" {
+		if slugs, err = s.store.EnqueueAllAppValidations(r.Context(), time.Now()); err != nil {
+			log.Printf("enqueue application validations: %v", err)
+			http.Error(w, "could not queue application validations", http.StatusInternalServerError)
+			return
+		}
+	} else if err := s.store.EnqueueAppValidationsBySlug(r.Context(), request.Slug, time.Now()); err != nil {
+		if errors.Is(err, identity.ErrManagedAppNotFound) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "managed app not found"})
+			return
+		}
+		log.Printf("enqueue application validations: %v", err)
+		http.Error(w, "could not queue application validations", http.StatusInternalServerError)
+		return
+	}
+	enqueued := make([]validationEnqueueRecord, 0, len(slugs)*2)
+	for _, slug := range slugs {
+		for _, direction := range []string{identity.ValidationFromShauth, identity.ValidationFromApp} {
+			enqueued = append(enqueued, validationEnqueueRecord{Slug: slug, Direction: direction})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": "shauth.app-validation-enqueue/v1",
+		"enqueued":       enqueued,
 	})
 }
 
