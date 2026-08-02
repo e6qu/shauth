@@ -57,6 +57,20 @@ const oidcLogoutContentSecurityPolicy = "default-src 'none'; script-src 'unsafe-
 
 var oidcClientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{2,127}$`)
 
+// deletableOIDCClientID accepts any identifier the provider could hold, not
+// only ones Shauth would create. The registration pattern is a policy for new
+// clients; applying it to deletion would leave a client registered outside
+// that policy listed forever with no way to remove it. The identifier is still
+// constrained to a single safe path segment and is escaped before use.
+func deletableOIDCClientID(clientID string) bool {
+	if clientID == "" || len(clientID) > 128 || clientID == "." || clientID == ".." {
+		return false
+	}
+	return !strings.ContainsFunc(clientID, func(character rune) bool {
+		return character <= ' ' || character == '' || character == '/' || character == '\\' || character == '?' || character == '#'
+	})
+}
+
 type oidcClient struct {
 	ID                     string   `json:"client_id"`
 	Name                   string   `json:"client_name"`
@@ -351,8 +365,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/github-mappings", s.githubMappingsAPI)
 	mux.HandleFunc("GET /api/v1/connectors", s.connectorsAPI)
 	mux.HandleFunc("GET /api/v1/monitoring", s.monitoringAPI)
+	mux.HandleFunc("GET /api/v1/invitations", s.invitationsAPI)
 	mux.HandleFunc("POST /internal/users", s.createUserAPI)
+	mux.HandleFunc("POST /internal/users/{id}/disable", s.disableUserAPI)
+	mux.HandleFunc("POST /internal/users/{id}/enable", s.enableUserAPI)
 	mux.HandleFunc("POST /internal/invitations", s.createInvitationAPI)
+	mux.HandleFunc("POST /internal/invitations/{id}/revoke", s.revokeInvitationAPI)
 	mux.HandleFunc("POST /internal/sessions/{id}/revoke", s.revokeSessionAPI)
 	mux.HandleFunc("PUT /internal/session-policy", s.updateSessionPolicyAPI)
 	mux.HandleFunc("POST /internal/oidc-clients", s.createOIDCClientAPI)
@@ -399,6 +417,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/users", s.adminCreateUser)
 	mux.HandleFunc("POST /admin/invitations", s.adminInvite)
 	mux.HandleFunc("GET /admin/invitations", s.adminInvitations)
+	mux.HandleFunc("POST /admin/invitations/{id}/revoke", s.adminRevokeInvitation)
+	mux.HandleFunc("POST /admin/users/{id}/disable", s.adminDisableUser)
+	mux.HandleFunc("POST /admin/users/{id}/enable", s.adminEnableUser)
 	mux.HandleFunc("GET /accept-invitation", s.acceptInvitation)
 	mux.HandleFunc("POST /accept-invitation", s.acceptInvitationPost)
 	mux.HandleFunc("GET /admin/users/{id}/sessions", s.adminUserSessions)
@@ -1831,7 +1852,7 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := r.PathValue("id")
-	if !oidcClientIDPattern.MatchString(clientID) {
+	if !deletableOIDCClientID(clientID) {
 		http.Error(w, "invalid client ID", http.StatusBadRequest)
 		return
 	}
@@ -1924,14 +1945,20 @@ func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request
 
 func parseSessionPolicyForm(values url.Values) (identity.SessionPolicy, error) {
 	var record sessionPolicyRecord
-	for name, target := range map[string]*int64{
-		"browser_absolute_hours": &record.BrowserAbsoluteHours,
-		"browser_idle_minutes":   &record.BrowserIdleMinutes,
-		"oidc_sso_hours":         &record.OIDCSSOHours,
-		"access_token_minutes":   &record.AccessTokenMinutes,
-		"id_token_minutes":       &record.IDTokenMinutes,
-		"refresh_token_hours":    &record.RefreshTokenHours,
+	// Ordered so a form with several unparseable fields always reports the
+	// same one; map iteration would name a different field each submission.
+	for _, field := range []struct {
+		name   string
+		target *int64
+	}{
+		{"browser_absolute_hours", &record.BrowserAbsoluteHours},
+		{"browser_idle_minutes", &record.BrowserIdleMinutes},
+		{"oidc_sso_hours", &record.OIDCSSOHours},
+		{"access_token_minutes", &record.AccessTokenMinutes},
+		{"id_token_minutes", &record.IDTokenMinutes},
+		{"refresh_token_hours", &record.RefreshTokenHours},
 	} {
+		name, target := field.name, field.target
 		value, err := strconv.ParseInt(strings.TrimSpace(values.Get(name)), 10, 64)
 		if err != nil {
 			return identity.SessionPolicy{}, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(name, "_", " "))
@@ -2416,7 +2443,74 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "invitations", map[string]any{"SignedIn": true, "IsAdmin": true})
+	invitations, err := s.store.ListInvitations(r.Context(), time.Now())
+	if err != nil {
+		http.Error(w, "could not query invitations", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "invitations", map[string]any{"SignedIn": true, "IsAdmin": true, "Invitations": invitations, "Error": r.URL.Query().Get("error")})
+}
+
+func (s *Server) adminRevokeInvitation(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := s.store.RevokeInvitation(r.Context(), r.PathValue("id"), time.Now()); err != nil {
+		http.Redirect(w, r, "/admin/invitations?error="+url.QueryEscape("that invitation is no longer active"), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/invitations", http.StatusSeeOther)
+}
+
+// adminDisableUser is the browser twin of disableUserAPI: it ends every
+// session and disables the account, so a compromised credential cannot sign
+// in again.
+func (s *Server) adminDisableUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	userID := r.PathValue("id")
+	actor, _, err := s.current(r)
+	if err != nil {
+		http.Error(w, "sign-in required", http.StatusUnauthorized)
+		return
+	}
+	if actor.ID == userID {
+		http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions?error="+url.QueryEscape("you cannot disable the account you are signed in with"), http.StatusSeeOther)
+		return
+	}
+	hydraSessionIDs, err := s.store.DisableUser(r.Context(), userID, time.Now())
+	if err != nil {
+		if errors.Is(err, identity.ErrValidationUserProtected) {
+			http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions?error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+			return
+		}
+		http.Error(w, "could not disable the account", http.StatusInternalServerError)
+		return
+	}
+	for _, hydraSessionID := range hydraSessionIDs {
+		if err := s.revokeHydraLoginSession(r.Context(), hydraSessionID); err != nil {
+			http.Error(w, "account disabled and local sessions ended, but OAuth session revocation did not complete", http.StatusBadGateway)
+			return
+		}
+	}
+	if err := s.revokeHydraSubjectSessions(r.Context(), userID); err != nil {
+		http.Error(w, "account disabled and local sessions ended, but OAuth session revocation did not complete", http.StatusBadGateway)
+		return
+	}
+	http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions", http.StatusSeeOther)
+}
+
+func (s *Server) adminEnableUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	userID := r.PathValue("id")
+	if err := s.store.EnableUser(r.Context(), userID, time.Now()); err != nil {
+		http.Error(w, "could not enable the account", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/admin/users/"+url.PathEscape(userID)+"/sessions", http.StatusSeeOther)
 }
 func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "accept-invitation", map[string]any{"Token": r.URL.Query().Get("token")})
@@ -2440,12 +2534,17 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
 	sessions, err := s.store.ListSessions(r.Context(), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "could not query sessions", 500)
 		return
 	}
-	s.render(w, "sessions", map[string]any{"SignedIn": true, "IsAdmin": true, "Sessions": sessions, "UserID": r.PathValue("id")})
+	s.render(w, "sessions", map[string]any{"SignedIn": true, "IsAdmin": true, "Sessions": sessions, "UserID": r.PathValue("id"), "Account": user, "Error": r.URL.Query().Get("error")})
 }
 func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {

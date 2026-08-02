@@ -4,6 +4,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"net/http"
@@ -35,8 +36,12 @@ func adminAPIEndpoints(server *Server) map[string]adminAPIEndpoint {
 		"github mappings":       {http.MethodGet, "/api/v1/github-mappings", nil, false, server.githubMappingsAPI},
 		"connectors":            {http.MethodGet, "/api/v1/connectors", nil, false, server.connectorsAPI},
 		"monitoring":            {http.MethodGet, "/api/v1/monitoring", nil, false, server.monitoringAPI},
+		"invitations":           {http.MethodGet, "/api/v1/invitations", nil, false, server.invitationsAPI},
 		"create user":           {http.MethodPost, "/internal/users", nil, true, server.createUserAPI},
+		"disable user":          {http.MethodPost, "/internal/users/5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a/disable", map[string]string{"id": "5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a"}, true, server.disableUserAPI},
+		"enable user":           {http.MethodPost, "/internal/users/5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a/enable", map[string]string{"id": "5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a"}, true, server.enableUserAPI},
 		"create invitation":     {http.MethodPost, "/internal/invitations", nil, true, server.createInvitationAPI},
+		"revoke invitation":     {http.MethodPost, "/internal/invitations/5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a/revoke", map[string]string{"id": "5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a"}, true, server.revokeInvitationAPI},
 		"revoke session":        {http.MethodPost, "/internal/sessions/5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a/revoke", map[string]string{"id": "5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a"}, true, server.revokeSessionAPI},
 		"update session policy": {http.MethodPut, "/internal/session-policy", nil, true, server.updateSessionPolicyAPI},
 		"create oidc client":    {http.MethodPost, "/internal/oidc-clients", nil, true, server.createOIDCClientAPI},
@@ -160,6 +165,21 @@ func TestAdminAPIPathIdentifiersAreValidatedBeforeStorageAccess(t *testing.T) {
 	}
 }
 
+func TestDeletableOIDCClientIDAcceptsForeignIdentifiersButNotPathSegments(t *testing.T) {
+	// A client registered outside Shauth's naming policy must still be
+	// removable, or it stays listed forever with no way to delete it.
+	for _, accepted := range []string{"bleephub", "Legacy-Client", "9lives", strings.Repeat("c", 128)} {
+		if !deletableOIDCClientID(accepted) {
+			t.Fatalf("deletableOIDCClientID(%q) rejected a removable client", accepted)
+		}
+	}
+	for _, rejected := range []string{"", ".", "..", "a/b", "a\\b", "a?b", "a#b", "with space", "tab\tid", "null\x00id", strings.Repeat("c", 129)} {
+		if deletableOIDCClientID(rejected) {
+			t.Fatalf("deletableOIDCClientID(%q) accepted an unsafe identifier", rejected)
+		}
+	}
+}
+
 func TestSessionPolicyRecordValidatesUnits(t *testing.T) {
 	valid := sessionPolicyRecord{
 		BrowserAbsoluteHours: 720, BrowserIdleMinutes: 720, OIDCSSOHours: 720,
@@ -200,7 +220,7 @@ func TestUserRecordReportsIdentitySourceAndOmitsEmptyFields(t *testing.T) {
 	created := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	local, err := json.Marshal(newUserRecord(identity.User{
 		ID: "5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6a", Username: "operator", Email: "operator@example.test",
-		EmailVerified: true, Role: identity.RoleAdmin, CreatedAt: created,
+		EmailVerified: true, IdentitySource: identity.IdentitySourceLocal, Role: identity.RoleAdmin, CreatedAt: created,
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -229,6 +249,71 @@ func TestUserRecordReportsIdentitySourceAndOmitsEmptyFields(t *testing.T) {
 		if !strings.Contains(string(federated), expected) {
 			t.Fatalf("federated user record omitted %s: %s", expected, federated)
 		}
+	}
+
+	// An Entra account carries no GitHub login, so guessing the source from
+	// that field alone would publish it as a local account. The record must
+	// report only what the store resolved.
+	entra, err := json.Marshal(newUserRecord(identity.User{
+		ID: "5f61a1a1-27b6-4e8c-9e3f-1f2e3d4c5b6c", Username: "entra-user", Email: "entra-user@example.test",
+		IdentitySource: identity.IdentitySourceEntra, Role: identity.RoleDeveloper, CreatedAt: created,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(entra), `"identity_source":"entra"`) {
+		t.Fatalf("Microsoft Entra ID account was not reported as federated: %s", entra)
+	}
+}
+
+func TestWriteAdminAPIStoreErrorSeparatesRejectionFromFailure(t *testing.T) {
+	for name, expectation := range map[string]struct {
+		err            error
+		status         int
+		wantMessage    string
+		forbiddenParts []string
+	}{
+		"invalid input": {
+			// A real validation rejection from the store, so the caller is
+			// told exactly which value it must correct.
+			err:         identity.ValidateManagedApp(identity.ManagedApp{}),
+			status:      http.StatusBadRequest,
+			wantMessage: "app slug must be between 3 and 63 characters",
+		},
+		"duplicate": {
+			err:    fmt.Errorf("create user: %w", identity.ErrAlreadyExists),
+			status: http.StatusConflict, wantMessage: "create user already exists",
+		},
+		"database failure": {
+			err:         fmt.Errorf(`create user: ERROR: duplicate key value violates unique constraint "users_email_key" (SQLSTATE 23505)`),
+			status:      http.StatusInternalServerError,
+			wantMessage: "could not complete the request",
+			// A raw database error must never reach the caller.
+			forbiddenParts: []string{"SQLSTATE", "users_email_key", "constraint"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			writeAdminAPIStoreError(response, "create user", expectation.err)
+			if response.Code != expectation.status {
+				t.Fatalf("status = %d, want %d", response.Code, expectation.status)
+			}
+			if response.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf("content type = %q, want JSON", response.Header().Get("Content-Type"))
+			}
+			var failure map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
+				t.Fatalf("decode failure body: %v: %s", err, response.Body.String())
+			}
+			if expectation.wantMessage != "" && failure["error"] != expectation.wantMessage {
+				t.Fatalf("error = %q, want %q", failure["error"], expectation.wantMessage)
+			}
+			for _, forbidden := range expectation.forbiddenParts {
+				if strings.Contains(response.Body.String(), forbidden) {
+					t.Fatalf("response leaked internal database detail %q: %s", forbidden, response.Body.String())
+				}
+			}
+		})
 	}
 }
 

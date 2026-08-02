@@ -151,7 +151,7 @@ func TestAdminAPIUserLifecycleAndSearch(t *testing.T) {
 	}
 
 	duplicate := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users", adminAPIAcceptanceWriteToken, body)
-	if duplicate.Code != http.StatusBadRequest {
+	if duplicate.Code != http.StatusConflict {
 		t.Fatalf("duplicate user status = %d, body = %s", duplicate.Code, duplicate.Body.String())
 	}
 	invalidRole := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users", adminAPIAcceptanceWriteToken, `{"username":"another","email":"another@example.test","password":"a-long-acceptance-password","role":"owner"}`)
@@ -524,6 +524,197 @@ func TestAdminAPIMonitoringSnapshot(t *testing.T) {
 	}
 	if len(envelope.Infrastructure) != 0 {
 		t.Fatalf("infrastructure = %#v, no sources are configured", envelope.Infrastructure)
+	}
+}
+
+// Revoking sessions alone is not containment: a local account can sign in
+// again immediately. Disabling must end every session and block sign-in.
+func TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt(t *testing.T) {
+	_, handler, store := newAdminAPIAcceptanceServer(t)
+	ctx := context.Background()
+	const password = "a-long-acceptance-password"
+	user, err := store.CreatePasswordUser(ctx, "containment", "containment@example.test", password, identity.RoleDeveloper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateSession(ctx, user.ID, "curl/8 acceptance", net.ParseIP("192.0.2.20"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticatePassword(ctx, "containment", password); err != nil {
+		t.Fatalf("the account could not authenticate before being disabled: %v", err)
+	}
+
+	disabled := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users/"+user.ID+"/disable", adminAPIAcceptanceWriteToken, "")
+	if disabled.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disabled.Code, disabled.Body.String())
+	}
+	var receipt struct {
+		SchemaVersion string     `json:"schema_version"`
+		User          userRecord `json:"user"`
+	}
+	if err := json.Unmarshal(disabled.Body.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode disable receipt: %v: %s", err, disabled.Body.String())
+	}
+	if receipt.SchemaVersion != "shauth.user/v1" || receipt.User.DisabledAt == nil {
+		t.Fatalf("disable receipt = %#v", receipt)
+	}
+
+	// The credential is still correct, so this proves containment rather
+	// than a rejected password.
+	if _, err := store.AuthenticatePassword(ctx, "containment", password); err == nil {
+		t.Fatal("a disabled account authenticated with a valid password")
+	}
+	sessions, err := store.ListSessions(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range sessions {
+		if session.Active || session.RevokedAt == nil {
+			t.Fatalf("disabling the account left a live session: %#v", session)
+		}
+	}
+
+	// Disabling is idempotent so a failed provider revocation can be retried.
+	if again := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users/"+user.ID+"/disable", adminAPIAcceptanceWriteToken, ""); again.Code != http.StatusOK {
+		t.Fatalf("repeated disable status = %d, body = %s", again.Code, again.Body.String())
+	}
+
+	enabled := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users/"+user.ID+"/enable", adminAPIAcceptanceWriteToken, "")
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, body = %s", enabled.Code, enabled.Body.String())
+	}
+	// Decoded into a fresh value: disabled_at is omitted for an enabled
+	// account, so reusing the disable receipt would keep its stale value.
+	var enabledReceipt struct {
+		SchemaVersion string     `json:"schema_version"`
+		User          userRecord `json:"user"`
+	}
+	if err := json.Unmarshal(enabled.Body.Bytes(), &enabledReceipt); err != nil {
+		t.Fatal(err)
+	}
+	if enabledReceipt.User.DisabledAt != nil {
+		t.Fatalf("enable receipt still reported a disabled account: %#v", enabledReceipt.User)
+	}
+	if _, err := store.AuthenticatePassword(ctx, "containment", password); err != nil {
+		t.Fatalf("an enabled account could not authenticate: %v", err)
+	}
+	// Enabling restores sign-in but must not resurrect the revoked sessions.
+	sessions, err = store.ListSessions(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range sessions {
+		if session.Active {
+			t.Fatalf("enabling the account resurrected a revoked session: %#v", session)
+		}
+	}
+
+	missing := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users/"+acceptanceUUID(t)+"/disable", adminAPIAcceptanceWriteToken, "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown user disable status = %d, body = %s", missing.Code, missing.Body.String())
+	}
+}
+
+// The validation identity drives every application check; disabling it would
+// stop validation without containing a real account.
+func TestAdminAPIRefusesToDisableTheValidationIdentity(t *testing.T) {
+	_, handler, store := newAdminAPIAcceptanceServer(t)
+	validation, err := store.EnsureValidationUser(context.Background(), "shauth-validator", "shauth-validator@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users/"+validation.ID+"/disable", adminAPIAcceptanceWriteToken, "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusConflict, response.Body.String())
+	}
+	reloaded, err := store.UserByID(context.Background(), validation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.DisabledAt != nil {
+		t.Fatal("the validation identity was disabled")
+	}
+}
+
+// An invitation grants account creation at a chosen role. One sent to the
+// wrong address must be listable and withdrawable.
+func TestAdminAPIInvitationsAreListableAndRevocable(t *testing.T) {
+	pool, handler, store := newAdminAPIAcceptanceServer(t)
+	ctx := context.Background()
+	raw, invitation, err := store.CreateInvitation(ctx, "wrong-address@example.test", identity.RoleAdmin, "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listed := adminAPIAcceptanceRequest(t, handler, http.MethodGet, "https://auth.example.test/api/v1/invitations", adminAPIAcceptanceReadToken, "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", listed.Code, listed.Body.String())
+	}
+	var envelope struct {
+		SchemaVersion string             `json:"schema_version"`
+		Invitations   []invitationRecord `json:"invitations"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode invitations envelope: %v: %s", err, listed.Body.String())
+	}
+	if envelope.SchemaVersion != "shauth.invitations/v1" || len(envelope.Invitations) != 1 {
+		t.Fatalf("invitations envelope = %#v", envelope)
+	}
+	if got := envelope.Invitations[0]; got.ID != invitation.ID || got.State != identity.InvitationPending || got.Role != string(identity.RoleAdmin) {
+		t.Fatalf("listed invitation = %#v", got)
+	}
+	// The single-use token is stored only as a hash; listing must not
+	// reproduce a working invitation link.
+	if strings.Contains(listed.Body.String(), raw) {
+		t.Fatalf("the invitation listing leaked its token: %s", listed.Body.String())
+	}
+
+	revoked := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/invitations/"+invitation.ID+"/revoke", adminAPIAcceptanceWriteToken, "")
+	if revoked.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d, body = %s", revoked.Code, revoked.Body.String())
+	}
+
+	// A revoked invitation must no longer create an account.
+	if _, err := store.AcceptInvitation(ctx, raw, "should-not-exist", "a-long-acceptance-password", time.Now()); err == nil {
+		t.Fatal("a revoked invitation created an account")
+	}
+	var users int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE username='should-not-exist'`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if users != 0 {
+		t.Fatalf("a revoked invitation created %d accounts", users)
+	}
+
+	if err := json.Unmarshal(adminAPIAcceptanceRequest(t, handler, http.MethodGet, "https://auth.example.test/api/v1/invitations", adminAPIAcceptanceReadToken, "").Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Invitations[0].State != identity.InvitationRevoked || envelope.Invitations[0].RevokedAt == nil {
+		t.Fatalf("revoked invitation = %#v", envelope.Invitations[0])
+	}
+
+	again := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/invitations/"+invitation.ID+"/revoke", adminAPIAcceptanceWriteToken, "")
+	if again.Code != http.StatusNotFound {
+		t.Fatalf("second revoke status = %d, body = %s", again.Code, again.Body.String())
+	}
+}
+
+// A duplicate account is the caller's mistake, not a service failure, and the
+// answer must never carry PostgreSQL constraint detail.
+func TestAdminAPIRejectsDuplicateUserWithoutLeakingDatabaseDetail(t *testing.T) {
+	_, handler, _ := newAdminAPIAcceptanceServer(t)
+	body := `{"username":"duplicate","email":"duplicate@example.test","password":"a-long-acceptance-password","role":"developer"}`
+	if created := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users", adminAPIAcceptanceWriteToken, body); created.Code != http.StatusCreated {
+		t.Fatalf("first create status = %d, body = %s", created.Code, created.Body.String())
+	}
+	duplicate := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users", adminAPIAcceptanceWriteToken, body)
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate status = %d, want %d: %s", duplicate.Code, http.StatusConflict, duplicate.Body.String())
+	}
+	for _, forbidden := range []string{"SQLSTATE", "constraint", "users_email_key", "users_username_key"} {
+		if strings.Contains(duplicate.Body.String(), forbidden) {
+			t.Fatalf("duplicate response leaked database detail %q: %s", forbidden, duplicate.Body.String())
+		}
 	}
 }
 

@@ -60,6 +60,20 @@ variable "entra_tenant_id" {
   type        = string
   default     = null
   description = "Specific Microsoft Entra ID tenant UUID. Set together with entra_client_id and entra_oauth_secret_arn."
+  # Shauth rejects a non-specific tenant such as "common" and any malformed
+  # UUID at startup. Rejecting it here fails the plan instead of leaving a
+  # deployment that only fails when the container starts.
+  validation {
+    condition     = var.entra_tenant_id == null || can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", var.entra_tenant_id))
+    error_message = "entra_tenant_id must be a specific Microsoft Entra ID tenant UUID."
+  }
+  validation {
+    condition = (
+      (var.entra_tenant_id == null && var.entra_client_id == null && var.entra_oauth_secret_arn == null) ||
+      (var.entra_tenant_id != null && var.entra_client_id != null && var.entra_oauth_secret_arn != null)
+    )
+    error_message = "entra_tenant_id, entra_client_id, and entra_oauth_secret_arn must be set together."
+  }
 }
 variable "entra_client_id" {
   type    = string
@@ -158,5 +172,10 @@ variable "monitoring_sources" {
       !can(regex("[[:space:][:cntrl:]]", source.bearer_token))
     ])
     error_message = "Monitoring sources require a name, an HTTPS URL, and a bearer token of at least 32 non-whitespace characters."
+  }
+  # Shauth rejects duplicate source names at startup, so reject them here too.
+  validation {
+    condition     = length(distinct([for source in var.monitoring_sources : trimspace(source.name)])) == length(var.monitoring_sources)
+    error_message = "Each monitoring source requires a distinct name."
   }
 }

@@ -13,20 +13,21 @@ The module creates the regional AWS Certificate Manager
 certificate and Route 53 alias for `domain_name` and applies conservative
 default-route throttling.
 
-The Cloud Map service name is suffixed with `-srv` so an older A-record
-service can be replaced safely: Terraform creates the SRV service, moves the
-Amazon ECS and API Gateway registrations, then removes the retired service.
-The module waits for the Amazon ECS service to reach steady state before
-Terraform retires the previous Cloud Map service.
+The Cloud Map service name is suffixed with `-srv` because SRV records carry
+the live task port. The module waits for the Amazon ECS service to reach
+steady state before Terraform completes.
 
 Pass pinned multi-architecture image manifests such as
 `ghcr.io/e6qu/shauth:0123456789ab` and
 `ghcr.io/e6qu/shauth-validator:0123456789ab`, and the ARN of the GitHub OAuth client
 secret stored in AWS Secrets Manager, together with the separate Secrets
 Manager ARNs for the Shauth and Ory Hydra database URLs created by `fck-rds`.
-The module creates a runtime secret containing generated Hydra and
-bootstrap-admin secrets. It creates a second validator-only secret containing
-the independent worker queue token. The validation identity has no password;
+The module creates a runtime secret containing the generated Hydra and
+bootstrap-admin secrets together with the `bootstrap_apps` and
+`monitoring_sources` configuration, which carry their own client secrets and
+bearer tokens. It creates a separate secret for each closed-API bearer
+credential, so a consumer can be granted exactly one boundary without
+receiving the others. The validation identity has no password;
 the worker exchanges its queue credential for hashed, short-lived, single-use
 browser bootstrap links.
 The supplied Shauth image also provides the patched `/hydra` binary; the task
@@ -36,8 +37,9 @@ points. The provider is fully built before deployment.
 Set `entra_tenant_id`, `entra_client_id`, and `entra_oauth_secret_arn` together
 to enable Microsoft Entra ID as an additional upstream identity source. The
 tenant is a specific tenant UUID and the secret ARN names a JSON secret with a
-`client_secret` key. Omitting all three leaves the connector disabled; partial
-configuration is rejected during Terraform validation.
+`client_secret` key. Omitting all three leaves the connector disabled. Partial
+configuration and a non-specific or malformed tenant are rejected by variable
+validation, which fails the plan; Shauth applies the identical rule at startup.
 
 The caller supplies the shared VPC, private subnet IDs, Amazon ECS cluster,
 and Route 53 hosted zone so Shauth can coexist with the other `dev` services.
@@ -86,10 +88,30 @@ application origin. Managed applications receive and validate ordinary OIDC
 artifacts and never receive or directly accept validator credentials.
 
 The module creates a separate `${var.name}/validation-status-reader` secret.
-Its read-only bearer token authorizes `GET /api/v1/apps/validations`, which
-returns the latest durable result for both directions of every registered app
-without exposing browser sessions, OIDC artifacts, or validator-control
-credentials.
+Its read-only bearer token authorizes the application API, including
+`GET /api/v1/apps/validations`, which returns the latest durable result for
+both directions of every registered app without exposing browser sessions,
+OIDC artifacts, or validator-control credentials.
+
+Three further single-credential secrets carry the remaining closed-API bearer
+tokens, each generated here and injected only into the Shauth container:
+
+- `${var.name}/session-reset` authorizes `POST /internal/sessions/reset`,
+  which clears every session for one account without an admin browser login.
+- `${var.name}/admin-api-reader` authorizes the read-only administration
+  contracts under `/api/v1/`.
+- `${var.name}/admin-api-writer` authorizes the state-changing administration
+  endpoints under `/internal/`.
+
+Reads never accept the write credential and writes never accept the read
+credential, so a read-only consumer never holds a state-changing secret. Each
+secret ARN is exported as an output and granted individually to the task
+execution role, which enumerates secret ARNs explicitly rather than by
+wildcard. Every credential secret also has a `*_CONFIG_VERSION` environment
+entry so rotating a secret produces a new task-definition revision instead of
+leaving the running task on the superseded value. `terraform test` asserts
+that every credential the application supports reaches the container, is
+granted to the execution role, and has a redeploy trigger.
 
 `monitoring_sources` supplies deployment-neutral, authenticated HTTPS
 coordinates that publish the `e6qu.monitoring/v1` observation contract. The

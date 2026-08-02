@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -83,11 +84,39 @@ type LogoutCorrelationGrant struct {
 	CleanupAttempts         int
 }
 type Invitation struct {
-	ID        string
-	Email     string
-	Role      Role
-	ExpiresAt time.Time
+	ID         string
+	Email      string
+	Role       Role
+	State      string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	AcceptedAt *time.Time
+	RevokedAt  *time.Time
+	InvitedBy  string
 }
+
+// Invitation states reported by ListInvitations. Only a pending invitation
+// can still create an account.
+const (
+	InvitationPending  = "pending"
+	InvitationAccepted = "accepted"
+	InvitationRevoked  = "revoked"
+	InvitationExpired  = "expired"
+)
+
+func invitationState(invitation Invitation, now time.Time) string {
+	switch {
+	case invitation.AcceptedAt != nil:
+		return InvitationAccepted
+	case invitation.RevokedAt != nil:
+		return InvitationRevoked
+	case !invitation.ExpiresAt.After(now):
+		return InvitationExpired
+	default:
+		return InvitationPending
+	}
+}
+
 type GitHubRoleMapping struct {
 	ID        string
 	Kind      string
@@ -276,7 +305,7 @@ func (s *Store) CreateGitHubRoleMapping(ctx context.Context, kind, target string
 	err := s.pool.QueryRow(ctx, `INSERT INTO github_role_mappings (id,kind,target,role,created_at) VALUES ($1::uuid,$2,$3,$4,now()) RETURNING id::text,kind,target,role,created_at`, randomUUID(), kind, normalizeGitHubTarget(kind, target), role).
 		Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.Role, &mapping.CreatedAt)
 	if err != nil {
-		return GitHubRoleMapping{}, fmt.Errorf("create GitHub role mapping: %w", err)
+		return GitHubRoleMapping{}, classifyWriteError("create GitHub role mapping", err)
 	}
 	return mapping, nil
 }
@@ -325,7 +354,7 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 	defer tx.Rollback(ctx)
 	err = tx.QueryRow(ctx, `INSERT INTO managed_apps (id,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,monitoring_url,validation_url,signed_out_url,release_revision,created_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10,$11,$12,now()) RETURNING id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at`, randomUUID(), app.Slug, app.Name, app.Description, app.LaunchURL, app.OIDCClientID, app.OIDCContractHash, app.HealthURL, app.MonitoringURL, app.ValidationURL, app.SignedOutURL, app.ReleaseRevision).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if err != nil {
-		return ManagedApp{}, fmt.Errorf("create managed app: %w", err)
+		return ManagedApp{}, classifyWriteError("create managed app", err)
 	}
 	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
 		return ManagedApp{}, err
@@ -1034,13 +1063,13 @@ func (s *Store) ExpireAbandonedAppValidation(ctx context.Context, now time.Time)
 
 func validateGitHubRoleMapping(kind, target string, role Role) error {
 	if kind != "user" && kind != "organization" && kind != "team" {
-		return fmt.Errorf("GitHub mapping kind must be user, organization, or team")
+		return invalidInput("GitHub mapping kind must be user, organization, or team")
 	}
 	if strings.TrimSpace(target) == "" || (kind == "team" && len(strings.Split(strings.TrimSpace(target), "/")) != 2) {
-		return fmt.Errorf("GitHub mapping target is invalid")
+		return invalidInput("GitHub mapping target is invalid")
 	}
 	if role != RoleDeveloper && role != RoleAdmin {
-		return fmt.Errorf("GitHub mapping role is invalid")
+		return invalidInput("GitHub mapping role is invalid")
 	}
 	return nil
 }
@@ -1048,49 +1077,49 @@ func validateGitHubRoleMapping(kind, target string, role Role) error {
 // ValidateManagedApp checks app-owned endpoint coordinates.
 func ValidateManagedApp(app ManagedApp) error {
 	if len(app.Slug) < 3 || len(app.Slug) > 63 {
-		return fmt.Errorf("app slug must be between 3 and 63 characters")
+		return invalidInput("app slug must be between 3 and 63 characters")
 	}
 	for index, character := range app.Slug {
 		if !(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') && character != '-' || (character == '-' && (index == 0 || index == len(app.Slug)-1)) {
-			return fmt.Errorf("app slug must use lowercase letters, digits, and interior hyphens")
+			return invalidInput("app slug must use lowercase letters, digits, and interior hyphens")
 		}
 	}
 	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" {
-		return fmt.Errorf("app name, description, and OIDC client ID are required")
+		return invalidInput("app name, description, and OIDC client ID are required")
 	}
 	if !oidcContractHashPattern.MatchString(app.OIDCContractHash) {
-		return fmt.Errorf("app OIDC registration contract hash must be a lowercase SHA-256 digest")
+		return invalidInput("app OIDC registration contract hash must be a lowercase SHA-256 digest")
 	}
 	if !immutableReleaseRevisionPattern.MatchString(app.ReleaseRevision) {
-		return fmt.Errorf("app release revision must be a 12–64 character lowercase hexadecimal commit or a sha256 digest")
+		return invalidInput("app release revision must be a 12–64 character lowercase hexadecimal commit or a sha256 digest")
 	}
 	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
 	if err != nil || !validManagedAppURL(launchURL) {
-		return fmt.Errorf("app launch URL must use HTTPS unless it targets loopback")
+		return invalidInput("app launch URL must use HTTPS unless it targets loopback")
 	}
 	healthURL, err := url.ParseRequestURI(strings.TrimSpace(app.HealthURL))
 	if err != nil || !validManagedAppURL(healthURL) {
-		return fmt.Errorf("app health URL must use HTTPS unless it targets loopback")
+		return invalidInput("app health URL must use HTTPS unless it targets loopback")
 	}
 	if !sameURLOrigin(launchURL, healthURL) {
-		return fmt.Errorf("app launch and health URLs must use one application origin")
+		return invalidInput("app launch and health URLs must use one application origin")
 	}
 	for label, raw := range map[string]string{"validation": app.ValidationURL, "signed-out": app.SignedOutURL} {
 		coordinate, err := url.ParseRequestURI(raw)
 		if err != nil || !validManagedAppURL(coordinate) {
-			return fmt.Errorf("app %s URL must use HTTPS unless it targets loopback", label)
+			return invalidInput("app %s URL must use HTTPS unless it targets loopback", label)
 		}
 		if !sameURLOrigin(launchURL, coordinate) {
-			return fmt.Errorf("app launch and %s URLs must use one application origin", label)
+			return invalidInput("app launch and %s URLs must use one application origin", label)
 		}
 	}
 	if app.MonitoringURL != "" {
 		monitoringURL, err := url.ParseRequestURI(app.MonitoringURL)
 		if err != nil || !validManagedAppURL(monitoringURL) {
-			return fmt.Errorf("app monitoring URL must use HTTPS unless it targets loopback")
+			return invalidInput("app monitoring URL must use HTTPS unless it targets loopback")
 		}
 		if !sameURLOrigin(launchURL, monitoringURL) {
-			return fmt.Errorf("app launch and monitoring URLs must use one application origin")
+			return invalidInput("app launch and monitoring URLs must use one application origin")
 		}
 	}
 	return nil
@@ -1122,10 +1151,10 @@ func normalizeGitHubTarget(kind, target string) string {
 func (s *Store) CreatePasswordUser(ctx context.Context, username, email, password string, role Role) (User, error) {
 	username, email = strings.TrimSpace(username), strings.ToLower(strings.TrimSpace(email))
 	if username == "" || email == "" || len(password) < 14 {
-		return User{}, fmt.Errorf("username, email, and a password of at least 14 characters are required")
+		return User{}, invalidInput("username, email, and a password of at least 14 characters are required")
 	}
 	if role != RoleDeveloper && role != RoleAdmin {
-		return User{}, fmt.Errorf("invalid role")
+		return User{}, invalidInput("invalid role")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -1282,17 +1311,17 @@ func (s *Store) ConsumeValidationBrowserBootstrap(ctx context.Context, raw strin
 func (s *Store) CreateInvitation(ctx context.Context, email string, role Role, invitedBy string, now time.Time) (string, Invitation, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" || (role != RoleDeveloper && role != RoleAdmin) {
-		return "", Invitation{}, fmt.Errorf("valid email and role are required")
+		return "", Invitation{}, invalidInput("valid email and role are required")
 	}
 	raw, err := randomToken()
 	if err != nil {
 		return "", Invitation{}, err
 	}
 	hash := sha256.Sum256([]byte(raw))
-	invitation := Invitation{ID: randomUUID(), Email: email, Role: role, ExpiresAt: now.UTC().Add(7 * 24 * time.Hour)}
+	invitation := Invitation{ID: randomUUID(), Email: email, Role: role, State: InvitationPending, CreatedAt: now.UTC(), ExpiresAt: now.UTC().Add(7 * 24 * time.Hour), InvitedBy: invitedBy}
 	err = s.pool.QueryRow(ctx, `INSERT INTO invitations (id,email,role,token_hash,invited_by,created_at,expires_at) VALUES ($1::uuid,$2,$3,$4,$5::uuid,$6,$7) RETURNING id::text`, invitation.ID, email, role, hash[:], nullable(invitedBy), now.UTC(), invitation.ExpiresAt).Scan(&invitation.ID)
 	if err != nil {
-		return "", Invitation{}, fmt.Errorf("create invitation: %w", err)
+		return "", Invitation{}, classifyWriteError("create invitation", err)
 	}
 	return raw, invitation, nil
 }
@@ -1312,25 +1341,51 @@ func (s *Store) AcceptInvitation(ctx context.Context, raw, username, password st
 	return user, nil
 }
 
+// ErrInvitationNotRevocable reports that no unaccepted, unrevoked invitation
+// matches the requested identifier.
+var ErrInvitationNotRevocable = errors.New("active invitation not found")
+
 func (s *Store) RevokeInvitation(ctx context.Context, id string, now time.Time) error {
 	command, err := s.pool.Exec(ctx, `UPDATE invitations SET revoked_at=$2 WHERE id=$1::uuid AND accepted_at IS NULL AND revoked_at IS NULL`, id, now.UTC())
 	if err != nil {
 		return fmt.Errorf("revoke invitation: %w", err)
 	}
 	if command.RowsAffected() != 1 {
-		return fmt.Errorf("active invitation not found")
+		return ErrInvitationNotRevocable
 	}
 	return nil
+}
+
+// ListInvitations reports every invitation and its current state, newest
+// first. The single-use token is stored only as a hash and is never
+// returned; an operator who needs a new link revokes and re-invites.
+func (s *Store) ListInvitations(ctx context.Context, now time.Time) ([]Invitation, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id::text,email,role,created_at,expires_at,accepted_at,revoked_at,COALESCE(invited_by::text,'') FROM invitations ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list invitations: %w", err)
+	}
+	defer rows.Close()
+	var invitations []Invitation
+	for rows.Next() {
+		var invitation Invitation
+		if err := rows.Scan(&invitation.ID, &invitation.Email, &invitation.Role, &invitation.CreatedAt, &invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt, &invitation.InvitedBy); err != nil {
+			return nil, fmt.Errorf("scan invitation: %w", err)
+		}
+		invitation.State = invitationState(invitation, now)
+		invitations = append(invitations, invitation)
+	}
+	return invitations, rows.Err()
 }
 
 func (s *Store) insertUser(ctx context.Context, id, username, email string, emailVerified bool, hash []byte, githubID *int64, githubLogin string, role Role) (User, error) {
 	var user User
 	err := s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,github_id,github_login,role,created_at)
-	VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, emailVerified, hash, githubID, nullable(githubLogin), role).
-		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at`, id, username, email, emailVerified, hash, githubID, nullable(githubLogin), role).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err != nil {
-		return User{}, fmt.Errorf("create user: %w", err)
+		return User{}, classifyWriteError("create user", err)
 	}
+	user.FederatedIdentity = federatedIdentityLabel(user.IdentitySource, user.GitHubLogin)
 	return user, nil
 }
 
@@ -1495,8 +1550,134 @@ func federatedIdentityLabel(source, githubLogin string) string {
 	}
 }
 
+// InvalidInputError reports a caller-supplied value the store rejected. It is
+// distinct from an infrastructure failure so a caller can answer "your
+// request is wrong" without reporting a database outage as a client error,
+// and without echoing internal database detail.
+type InvalidInputError struct{ cause error }
+
+func (err InvalidInputError) Error() string {
+	if err.cause == nil {
+		return "invalid input"
+	}
+	return err.cause.Error()
+}
+func (err InvalidInputError) Unwrap() error { return err.cause }
+
+func invalidInput(format string, args ...any) error {
+	return InvalidInputError{cause: fmt.Errorf(format, args...)}
+}
+
+// ErrAlreadyExists reports that a uniqueness constraint rejected the record.
+var ErrAlreadyExists = errors.New("record already exists")
+
+// classifyWriteError maps a PostgreSQL unique-constraint violation onto
+// ErrAlreadyExists so callers can answer 409 instead of leaking the
+// constraint name and SQLSTATE of the underlying database.
+func classifyWriteError(context string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return fmt.Errorf("%s: %w", context, ErrAlreadyExists)
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
 // ErrUserNotFound reports that no account matches the requested identifier.
 var ErrUserNotFound = errors.New("user not found")
+
+// ErrValidationUserProtected reports that the dedicated browser-validation
+// identity may not be disabled. Disabling it would stop every application
+// validation without containing a real account.
+var ErrValidationUserProtected = errors.New("the validation identity cannot be disabled")
+
+// DisableUser contains an account in one transaction: it ends every active
+// browser session and its refresh-token families and marks the account
+// disabled, so a compromised credential cannot simply sign in again. It
+// returns the correlated Ory Hydra login sessions the caller must also
+// revoke. Disabling an already disabled account is a no-op that still
+// reports the remaining provider sessions, so a failed revocation can be
+// retried safely.
+func (s *Store) DisableUser(ctx context.Context, userID string, now time.Time) ([]string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin account disable: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var isValidation bool
+	// The account is locked without requiring disabled_at IS NULL, because
+	// lockActiveUser would refuse the retry of an already disabled account.
+	if err := tx.QueryRow(ctx, `SELECT is_validation FROM users WHERE id=$1::uuid FOR UPDATE`, userID).Scan(&isValidation); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("lock account for disable: %w", err)
+	}
+	if isValidation {
+		return nil, ErrValidationUserProtected
+	}
+	rows, err := tx.Query(ctx, `SELECT id::text FROM sessions WHERE user_id=$1::uuid AND revoked_at IS NULL ORDER BY id FOR UPDATE`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot account sessions for disable: %w", err)
+	}
+	var sessionIDs []string
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan account session for disable: %w", err)
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("snapshot account sessions for disable: %w", err)
+	}
+	// Provider sessions are collected for every browser session the account
+	// ever had, not only the ones revoked by this call, so retrying after a
+	// failed Ory Hydra revocation still reports the sessions to remove.
+	hydraRows, err := tx.Query(ctx, `SELECT DISTINCT h.hydra_session_id
+	FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
+	WHERE s.user_id=$1::uuid ORDER BY h.hydra_session_id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot account Ory Hydra login sessions: %w", err)
+	}
+	var hydraSessionIDs []string
+	for hydraRows.Next() {
+		var hydraSessionID string
+		if err := hydraRows.Scan(&hydraSessionID); err != nil {
+			hydraRows.Close()
+			return nil, fmt.Errorf("scan account Ory Hydra login session: %w", err)
+		}
+		hydraSessionIDs = append(hydraSessionIDs, hydraSessionID)
+	}
+	hydraRows.Close()
+	if err := hydraRows.Err(); err != nil {
+		return nil, fmt.Errorf("snapshot account Ory Hydra login sessions: %w", err)
+	}
+	if err := revokeSessionSnapshot(ctx, tx, sessionIDs, now); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET disabled_at=COALESCE(disabled_at,$2) WHERE id=$1::uuid`, userID, now.UTC()); err != nil {
+		return nil, fmt.Errorf("disable account: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit account disable: %w", err)
+	}
+	return hydraSessionIDs, nil
+}
+
+// EnableUser restores a disabled account. It grants no session; the account
+// holder must authenticate again.
+func (s *Store) EnableUser(ctx context.Context, userID string, now time.Time) error {
+	command, err := s.pool.Exec(ctx, `UPDATE users SET disabled_at=NULL WHERE id=$1::uuid`, userID)
+	if err != nil {
+		return fmt.Errorf("enable account: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return ErrUserNotFound
+	}
+	return nil
+}
 
 func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
 	var user User

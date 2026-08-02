@@ -28,12 +28,29 @@ locals {
     { name = "SHAUTH_RUNTIME_CONFIG_VERSION", value = aws_secretsmanager_secret_version.runtime.version_id },
     { name = "SHAUTH_VALIDATOR_CONFIG_VERSION", value = aws_secretsmanager_secret_version.validator.version_id },
     { name = "SHAUTH_VALIDATION_STATUS_CONFIG_VERSION", value = aws_secretsmanager_secret_version.validation_status.version_id },
+    { name = "SHAUTH_SESSION_RESET_CONFIG_VERSION", value = aws_secretsmanager_secret_version.session_reset.version_id },
+    { name = "SHAUTH_ADMIN_API_READ_CONFIG_VERSION", value = aws_secretsmanager_secret_version.admin_api_reader.version_id },
+    { name = "SHAUTH_ADMIN_API_WRITE_CONFIG_VERSION", value = aws_secretsmanager_secret_version.admin_api_writer.version_id },
     { name = "SHAUTH_VALIDATION_USERNAME", value = "shauth-validator" },
     { name = "SHAUTH_VALIDATION_EMAIL", value = "shauth-validator@${local.invitation_email_domain}" },
     ], local.entra_enabled ? [
     { name = "ENTRA_TENANT_ID", value = var.entra_tenant_id },
     { name = "ENTRA_CLIENT_ID", value = var.entra_client_id },
   ] : [])
+  # Every AWS Secrets Manager secret the Shauth task must read. The execution
+  # role enumerates these explicitly, so a secret injected into the container
+  # without an entry here leaves the task unable to start.
+  execution_secret_arns = concat([
+    aws_secretsmanager_secret.runtime.arn,
+    aws_secretsmanager_secret.validator.arn,
+    aws_secretsmanager_secret.validation_status.arn,
+    aws_secretsmanager_secret.session_reset.arn,
+    aws_secretsmanager_secret.admin_api_reader.arn,
+    aws_secretsmanager_secret.admin_api_writer.arn,
+    var.github_oauth_secret_arn,
+    var.database_url_secret_arn,
+    var.hydra_database_url_secret_arn,
+  ], local.entra_enabled ? [var.entra_oauth_secret_arn] : [])
   shauth_secrets = concat([
     { name = "DATABASE_URL", valueFrom = var.database_url_secret_arn },
     { name = "GITHUB_CLIENT_SECRET", valueFrom = "${var.github_oauth_secret_arn}:client_secret::" },
@@ -42,6 +59,9 @@ locals {
     { name = "SHAUTH_MONITORING_SOURCES_JSON", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_MONITORING_SOURCES_JSON::" },
     { name = "SHAUTH_VALIDATOR_TOKEN", valueFrom = "${aws_secretsmanager_secret.validator.arn}:SHAUTH_VALIDATOR_TOKEN::" },
     { name = "SHAUTH_VALIDATION_STATUS_TOKEN", valueFrom = "${aws_secretsmanager_secret.validation_status.arn}:SHAUTH_VALIDATION_STATUS_TOKEN::" },
+    { name = "SHAUTH_SESSION_RESET_TOKEN", valueFrom = "${aws_secretsmanager_secret.session_reset.arn}:SHAUTH_SESSION_RESET_TOKEN::" },
+    { name = "SHAUTH_ADMIN_API_READ_TOKEN", valueFrom = "${aws_secretsmanager_secret.admin_api_reader.arn}:SHAUTH_ADMIN_API_READ_TOKEN::" },
+    { name = "SHAUTH_ADMIN_API_WRITE_TOKEN", valueFrom = "${aws_secretsmanager_secret.admin_api_writer.arn}:SHAUTH_ADMIN_API_WRITE_TOKEN::" },
     ], local.entra_enabled ? [
     { name = "ENTRA_CLIENT_SECRET", valueFrom = "${var.entra_oauth_secret_arn}:client_secret::" },
   ] : [])
@@ -123,6 +143,18 @@ resource "random_password" "validation_status_token" {
   length  = 64
   special = false
 }
+resource "random_password" "session_reset_token" {
+  length  = 64
+  special = false
+}
+resource "random_password" "admin_api_read_token" {
+  length  = 64
+  special = false
+}
+resource "random_password" "admin_api_write_token" {
+  length  = 64
+  special = false
+}
 
 resource "aws_secretsmanager_secret" "runtime" {
   name                    = "${var.name}/runtime"
@@ -163,6 +195,48 @@ resource "aws_secretsmanager_secret_version" "validation_status" {
   secret_id = aws_secretsmanager_secret.validation_status.id
   secret_string = jsonencode({
     SHAUTH_VALIDATION_STATUS_TOKEN = random_password.validation_status_token.result
+  })
+}
+
+# Each closed-API credential authorizes a distinct security boundary and lives
+# in its own secret, so an operator or agent can be granted exactly one of them
+# without also receiving the others or the runtime secret.
+resource "aws_secretsmanager_secret" "session_reset" {
+  name                    = "${var.name}/session-reset"
+  recovery_window_in_days = 7
+  tags                    = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "session_reset" {
+  secret_id = aws_secretsmanager_secret.session_reset.id
+  secret_string = jsonencode({
+    SHAUTH_SESSION_RESET_TOKEN = random_password.session_reset_token.result
+  })
+}
+
+resource "aws_secretsmanager_secret" "admin_api_reader" {
+  name                    = "${var.name}/admin-api-reader"
+  recovery_window_in_days = 7
+  tags                    = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "admin_api_reader" {
+  secret_id = aws_secretsmanager_secret.admin_api_reader.id
+  secret_string = jsonencode({
+    SHAUTH_ADMIN_API_READ_TOKEN = random_password.admin_api_read_token.result
+  })
+}
+
+resource "aws_secretsmanager_secret" "admin_api_writer" {
+  name                    = "${var.name}/admin-api-writer"
+  recovery_window_in_days = 7
+  tags                    = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "admin_api_writer" {
+  secret_id = aws_secretsmanager_secret.admin_api_writer.id
+  secret_string = jsonencode({
+    SHAUTH_ADMIN_API_WRITE_TOKEN = random_password.admin_api_write_token.result
   })
 }
 
@@ -235,27 +309,15 @@ resource "aws_iam_role_policy" "validator_secrets" {
 }
 data "aws_iam_policy_document" "secrets" {
   statement {
-    actions = ["secretsmanager:GetSecretValue"]
-    resources = concat([
-      aws_secretsmanager_secret.runtime.arn,
-      aws_secretsmanager_secret.validator.arn,
-      aws_secretsmanager_secret.validation_status.arn,
-      var.github_oauth_secret_arn,
-      var.database_url_secret_arn,
-      var.hydra_database_url_secret_arn,
-    ], local.entra_enabled ? [var.entra_oauth_secret_arn] : [])
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = local.execution_secret_arns
   }
 }
 
-check "entra_configuration" {
-  assert {
-    condition = (
-      (var.entra_tenant_id == null && var.entra_client_id == null && var.entra_oauth_secret_arn == null) ||
-      local.entra_enabled
-    )
-    error_message = "entra_tenant_id, entra_client_id, and entra_oauth_secret_arn must be set together."
-  }
-}
+# The Microsoft Entra ID connector is validated by variable validation rather
+# than a check block: a check assertion only emits a warning, so a partial
+# connector configuration would otherwise apply silently and disable the
+# connector instead of failing the plan.
 data "aws_iam_policy_document" "task" {
   statement {
     actions   = ["ses:SendEmail", "ses:SendRawEmail"]
