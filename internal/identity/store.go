@@ -1346,22 +1346,27 @@ func (s *Store) InvitationState(ctx context.Context, raw string, now time.Time) 
 // ListInvitations reports every invitation and its current state, newest
 // first. The single-use token is stored only as a hash and is never
 // returned; an operator who needs a new link revokes and re-invites.
-func (s *Store) ListInvitations(ctx context.Context, now time.Time) ([]Invitation, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,email,role,created_at,expires_at,accepted_at,revoked_at,COALESCE(invited_by::text,'') FROM invitations ORDER BY created_at DESC`)
+func (s *Store) ListInvitations(ctx context.Context, now time.Time, page Page) ([]Invitation, int, error) {
+	page = page.normalized()
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM invitations`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count invitations: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,email,role,created_at,expires_at,accepted_at,revoked_at,COALESCE(invited_by::text,'') FROM invitations ORDER BY created_at DESC, id LIMIT $1 OFFSET $2`, page.Limit, page.Offset)
 	if err != nil {
-		return nil, fmt.Errorf("list invitations: %w", err)
+		return nil, 0, fmt.Errorf("list invitations: %w", err)
 	}
 	defer rows.Close()
 	var invitations []Invitation
 	for rows.Next() {
 		var invitation Invitation
 		if err := rows.Scan(&invitation.ID, &invitation.Email, &invitation.Role, &invitation.CreatedAt, &invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt, &invitation.InvitedBy); err != nil {
-			return nil, fmt.Errorf("scan invitation: %w", err)
+			return nil, 0, fmt.Errorf("scan invitation: %w", err)
 		}
 		invitation.State = invitationState(invitation, now)
 		invitations = append(invitations, invitation)
 	}
-	return invitations, rows.Err()
+	return invitations, total, rows.Err()
 }
 
 func (s *Store) insertUser(ctx context.Context, id, username, email string, emailVerified bool, hash []byte, githubID *int64, githubLogin string, role Role) (User, error) {
@@ -1508,22 +1513,30 @@ func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (Use
 	return user, session, nil
 }
 
-func (s *Store) ListUsers(ctx context.Context, query string) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC`, strings.TrimSpace(query))
+// ListUsers reports one bounded page of accounts matching the query, newest
+// first, with the total number of matches so a caller can page through them.
+func (s *Store) ListUsers(ctx context.Context, query string, page Page) ([]User, int, error) {
+	page = page.normalized()
+	query = strings.TrimSpace(query)
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%'`, query).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count users: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, query, page.Limit, page.Offset)
 	if err != nil {
-		return nil, fmt.Errorf("list users: %w", err)
+		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
 	defer rows.Close()
 	var users []User
 	for rows.Next() {
 		var u User
 		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.EmailVerified, &u.GitHubLogin, &u.IdentitySource, &u.Role, &u.DisabledAt, &u.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		u.FederatedIdentity = federatedIdentityLabel(u.IdentitySource, u.GitHubLogin)
 		users = append(users, u)
 	}
-	return users, rows.Err()
+	return users, total, rows.Err()
 }
 
 func federatedIdentityLabel(source, githubLogin string) string {
@@ -1572,6 +1585,30 @@ func classifyWriteError(context string, err error) error {
 		return fmt.Errorf("%s: %w", context, ErrAlreadyExists)
 	}
 	return fmt.Errorf("%s: %w", context, err)
+}
+
+// Page bounds a listing. A zero Limit means the caller accepts the store's
+// default window rather than the whole table, because an unbounded list is a
+// denial-of-service waiting for the directory to grow.
+type Page struct {
+	Limit  int
+	Offset int
+}
+
+const defaultPageLimit = 100
+const maximumPageLimit = 500
+
+func (page Page) normalized() Page {
+	if page.Limit <= 0 {
+		page.Limit = defaultPageLimit
+	}
+	if page.Limit > maximumPageLimit {
+		page.Limit = maximumPageLimit
+	}
+	if page.Offset < 0 {
+		page.Offset = 0
+	}
+	return page
 }
 
 // ErrUserNotFound reports that no account matches the requested identifier.

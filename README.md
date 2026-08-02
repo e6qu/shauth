@@ -215,9 +215,13 @@ acceptance gates:
   `shauth.app-validation-history/v1` contract with durable runs ordered newest
   first. `slug` is optional; `limit` defaults to 50 and is capped at 500.
 - `POST /internal/apps/validations/enqueue` queues both browser checks for one
-  app (`{"slug":"<slug>"}`) or for every app (empty or `{}` body) and answers
-  `202` with the `shauth.app-validation-enqueue/v1` receipt. It lives under
-  `/internal/` because bearer-token requests carry no browser CSRF token.
+  app (`{"slug":"<slug>"}`) or for every app (an omitted `slug`) and answers
+  `202` with the `shauth.app-validation-enqueue/v1` receipt. A present but
+  empty slug is rejected rather than silently queuing every app. It lives
+  under `/internal/` because bearer-token requests carry no browser CSRF
+  token, and it requires `SHAUTH_ADMIN_API_WRITE_TOKEN`: queuing starts real
+  browser sessions and global logouts against every registered relying party,
+  so the read-only status credential above cannot trigger it.
 
 ## Administration API
 
@@ -235,11 +239,17 @@ disabled, answering `503`.
 
 Reads return an `observed_at` timestamp and a versioned envelope:
 
-- `GET /api/v1/users?q=<query>` — `shauth.users/v1`: user catalog with
+List endpoints answer a bounded window. `GET /api/v1/users` and
+`GET /api/v1/invitations` accept `limit` (default 100, maximum 500) and
+`offset`, and report a `page` object carrying `limit`, `offset`, `returned`,
+`total`, and `has_more`, so a consumer can page through a directory instead of
+receiving an unbounded array.
+
+- `GET /api/v1/users?q=<query>&limit=<n>&offset=<n>` — `shauth.users/v1`: user catalog with
   machine-readable `identity_source` (`local`, `github`, or `entra`),
   verification, role, and disabled state; `q` filters by username, email, or
   GitHub login exactly like the users page.
-- `GET /api/v1/invitations` — `shauth.invitations/v1`: every invitation with
+- `GET /api/v1/invitations?limit=<n>&offset=<n>` — `shauth.invitations/v1`: invitations with
   its state (`pending`, `accepted`, `revoked`, or `expired`). The single-use
   token is stored only as a hash and is never returned.
 - `GET /api/v1/users/{id}/sessions` — `shauth.user-sessions/v1`: the account

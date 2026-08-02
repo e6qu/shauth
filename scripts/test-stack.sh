@@ -556,6 +556,17 @@ process.stdin.on("end", () => {
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/users)" = 401 ]
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" http://localhost:8080/api/v1/users)" = 401 ]
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" --header 'Content-Type: application/json' --data '{}' http://localhost:8080/internal/users)" = 401 ]
+
+# The application status credential is read-only: queuing validations starts
+# real browser sessions and global logouts, so it must be refused there.
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_VALIDATION_STATUS_TOKEN}" --header 'Content-Type: application/json' --data '{}' http://localhost:8080/internal/apps/validations/enqueue)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" --header 'Content-Type: application/json' --data '{}' http://localhost:8080/internal/apps/validations/enqueue)" = 401 ]
+
+# A list endpoint answers a bounded window and reports what remains.
+admin_users_page=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?limit=1')
+printf '%s' "$admin_users_page" | grep -q '"limit":1'
+printf '%s' "$admin_users_page" | grep -q '"has_more":true'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?limit=501')" = 400 ]
 admin_users_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?q=admin')
 printf '%s' "$admin_users_response" | grep -q '"schema_version":"shauth.users/v1"'
 printf '%s' "$admin_users_response" | grep -q '"username":"admin"'

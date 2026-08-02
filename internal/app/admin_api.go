@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,15 +101,50 @@ func writeOperationFailure(w http.ResponseWriter, action string, err error) {
 	writeAdminAPIError(w, status, message)
 }
 
+// requestedPage reads the bounded window a caller asked for. A list endpoint
+// must never return an unbounded array: the directory only grows.
+func requestedPage(r *http.Request) (identity.Page, error) {
+	page := identity.Page{}
+	for name, target := range map[string]*int{"limit": &page.Limit, "offset": &page.Offset} {
+		raw := strings.TrimSpace(r.URL.Query().Get(name))
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 || (name == "limit" && (value < 1 || value > 500)) {
+			return identity.Page{}, identity.Invalid("%s must be a whole number between 1 and 500", name)
+		}
+		*target = value
+	}
+	return page, nil
+}
+
+// pageEnvelope reports the window a listing answered with and how many
+// records match in total, so a consumer knows whether more remain.
+func pageEnvelope(page identity.Page, returned, total int) map[string]any {
+	limit := page.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	return map[string]any{
+		"limit": limit, "offset": page.Offset, "returned": returned, "total": total,
+		"has_more": page.Offset+returned < total,
+	}
+}
+
 func (s *Server) usersAPI(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if !s.requireAdminAPIReadToken(w, r) {
 		return
 	}
-	users, err := s.store.ListUsers(r.Context(), r.URL.Query().Get("q"))
+	page, err := requestedPage(r)
 	if err != nil {
-		log.Printf("list users: %v", err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not list users")
+		writeOperationFailure(w, "list users", err)
+		return
+	}
+	users, total, err := s.store.ListUsers(r.Context(), r.URL.Query().Get("q"), page)
+	if err != nil {
+		writeOperationFailure(w, "list users", err)
 		return
 	}
 	records := make([]userRecord, 0, len(users))
@@ -118,6 +154,7 @@ func (s *Server) usersAPI(w http.ResponseWriter, r *http.Request) {
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
 		"schema_version": "shauth.users/v1",
 		"observed_at":    time.Now().UTC(),
+		"page":           pageEnvelope(page, len(records), total),
 		"users":          records,
 	})
 }
@@ -639,10 +676,14 @@ func (s *Server) invitationsAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAPIReadToken(w, r) {
 		return
 	}
-	invitations, err := s.store.ListInvitations(r.Context(), time.Now())
+	page, err := requestedPage(r)
 	if err != nil {
-		log.Printf("list invitations: %v", err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not list invitations")
+		writeOperationFailure(w, "list invitations", err)
+		return
+	}
+	invitations, total, err := s.store.ListInvitations(r.Context(), time.Now(), page)
+	if err != nil {
+		writeOperationFailure(w, "list invitations", err)
 		return
 	}
 	records := make([]invitationRecord, 0, len(invitations))
@@ -652,6 +693,7 @@ func (s *Server) invitationsAPI(w http.ResponseWriter, r *http.Request) {
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
 		"schema_version": "shauth.invitations/v1",
 		"observed_at":    time.Now().UTC(),
+		"page":           pageEnvelope(page, len(records), total),
 		"invitations":    records,
 	})
 }

@@ -25,6 +25,7 @@ import (
 )
 
 const acceptanceStatusToken = "apps-api-acceptance-status-token-0123456789ab"
+const acceptanceWriteToken = "apps-api-acceptance-write-token-0123456789abc"
 
 func acceptanceUUID(t *testing.T) string {
 	t.Helper()
@@ -81,7 +82,7 @@ func newAcceptanceServer(t *testing.T) (*pgxpool.Pool, http.Handler) {
 		t.Fatal(err)
 	}
 	server := &Server{
-		config:      config.Config{PublicURL: publicURL, HydraPublicURL: publicURL, ValidationStatusToken: acceptanceStatusToken},
+		config:      config.Config{PublicURL: publicURL, HydraPublicURL: publicURL, ValidationStatusToken: acceptanceStatusToken, AdminAPIWriteToken: acceptanceWriteToken},
 		store:       store,
 		managedApps: managedapps.New(),
 		hydraPublic: httputil.NewSingleHostReverseProxy(publicURL),
@@ -107,7 +108,13 @@ func acceptanceAPIRequest(t *testing.T, handler http.Handler, method, target, bo
 	} else {
 		request = httptest.NewRequest(method, target, strings.NewReader(body))
 	}
-	request.Header.Set("Authorization", "Bearer "+acceptanceStatusToken)
+	// Reads carry the status credential; queuing is a state change and
+	// carries the administration write credential.
+	token := acceptanceStatusToken
+	if method != http.MethodGet {
+		token = acceptanceWriteToken
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
