@@ -339,8 +339,14 @@ func TestAdminAPISessionPolicyReadAndUpdate(t *testing.T) {
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid policy status = %d, body = %s", invalid.Code, invalid.Body.String())
 	}
-	if envelope := read(); envelope.Policy != updatedRecord {
-		t.Fatalf("policy changed after a rejected update: %#v", envelope)
+	rejected := read()
+	if withoutChangeTime(rejected.Policy) != updatedRecord {
+		t.Fatalf("policy changed after a rejected update: %#v", rejected)
+	}
+	// A refused change must not move the change time either, or the record
+	// claims the policy was touched when nothing was stored.
+	if !rejected.Policy.UpdatedAt.Equal(after.Policy.UpdatedAt) {
+		t.Fatalf("a rejected update moved the change time to %s from %s", rejected.Policy.UpdatedAt, after.Policy.UpdatedAt)
 	}
 }
 

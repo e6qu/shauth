@@ -19,7 +19,7 @@ func TestTrafficCountsEachRouteByItsPatternNotItsPath(t *testing.T) {
 	mux.HandleFunc("GET /admin/users/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("POST /admin/users", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
-	handler := counters.observe(mux)
+	handler := counters.observe(mux, mux)
 
 	for _, id := range []string{"a", "b", "c"} {
 		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/admin/users/"+id, nil))
@@ -69,7 +69,7 @@ func TestTrafficRecordsAHandlerThatNeverWroteAStatus(t *testing.T) {
 	counters := newTraffic()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
-	counters.observe(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	counters.observe(mux, mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	report := counters.report()
 	if len(report.Routes) != 1 || report.Routes[0].LastStatus != http.StatusOK {
@@ -84,7 +84,7 @@ func TestTrafficCountsARequestWhoseHandlerPanicked(t *testing.T) {
 	counters := newTraffic()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) { panic("handler failed") })
-	handler := counters.observe(mux)
+	handler := counters.observe(mux, mux)
 
 	func() {
 		defer func() { _ = recover() }()
@@ -145,5 +145,29 @@ func TestTrafficBoundsItsSeriesEvenIfTheRouteTableGrows(t *testing.T) {
 	}
 	if report.Requests != 20 {
 		t.Fatalf("requests = %d, want every request counted even once series overflowed", report.Requests)
+	}
+}
+
+// TestTrafficAttributesARefusalMadeBeforeRouting covers requests a middleware
+// turns away before the route table runs. Those refusals are exactly what an
+// operator investigates, so they must name the route they targeted rather
+// than pile into one nameless series.
+func TestTrafficAttributesARefusalMadeBeforeRouting(t *testing.T) {
+	t.Parallel()
+	counters := newTraffic()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /admin/users", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	refuse := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) })
+	counters.observe(mux, refuse).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/admin/users", nil))
+
+	report := counters.report()
+	if len(report.Routes) != 1 {
+		t.Fatalf("series = %d, want one", len(report.Routes))
+	}
+	if report.Routes[0].Pattern != "/admin/users" || report.Routes[0].Method != http.MethodPost {
+		t.Fatalf("refused request recorded as %s %s, want the route it targeted", report.Routes[0].Method, report.Routes[0].Pattern)
+	}
+	if report.Routes[0].ByStatusClass["4xx"] != 1 {
+		t.Fatalf("outcomes = %v, want the refusal counted as 4xx", report.Routes[0].ByStatusClass)
 	}
 }

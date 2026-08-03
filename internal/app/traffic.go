@@ -58,17 +58,26 @@ func newTraffic() *traffic {
 	return &traffic{routes: make(map[routeKey]*routeStat), maxRoutes: maxTrackedRoutes}
 }
 
-// observe wraps the routed handler. ServeMux records the matched pattern on
-// the request itself, so the route is read after the handler returns rather
-// than by matching the request a second time.
-func (t *traffic) observe(next http.Handler) http.Handler {
+// observe wraps the whole chain. ServeMux records the matched pattern on the
+// request itself, so the route is normally read after the handler returns
+// rather than by matching the request a second time. A request refused before
+// routing -- by the CSRF check, for instance -- carries no pattern, and those
+// are the refusals an operator most wants attributed to a real route, so the
+// route table is consulted for them.
+func (t *traffic) observe(mux *http.ServeMux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		started := time.Now()
 		t.begin()
 		// Deferred so a handler that panics is still counted and its
 		// failure still shows up as a 5xx.
-		defer func() { t.finish(r.Method, r.Pattern, recorder.status, time.Since(started)) }()
+		defer func() {
+			pattern := r.Pattern
+			if pattern == "" {
+				_, pattern = mux.Handler(r)
+			}
+			t.finish(r.Method, pattern, recorder.status, time.Since(started))
+		}()
 		next.ServeHTTP(recorder, r)
 	})
 }

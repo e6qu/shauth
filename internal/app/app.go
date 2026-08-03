@@ -457,7 +457,7 @@ func (s *Server) Handler() http.Handler {
 	// Outermost, so a request refused by CSRF or rejected before routing is
 	// still counted: those refusals are exactly what an operator is looking
 	// for when something stops working.
-	return s.traffic.observe(securityHeaders(csrfPosts(s.config.PublicURL, mux)))
+	return s.traffic.observe(mux, securityHeaders(csrfPosts(s.config.PublicURL, mux)))
 }
 
 func securityHeaders(next http.Handler) http.Handler {
