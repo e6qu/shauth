@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -31,6 +32,13 @@ const adminAPIAcceptanceWriteToken = "admin-api-acceptance-write-token-012345678
 // PostgreSQL (an isolated schema clone) and the real Ory Hydra
 // administration endpoint provided by the acceptance stack.
 func newAdminAPIAcceptanceServer(t *testing.T) (*pgxpool.Pool, http.Handler, *identity.Store) {
+	pool, server, store := newAdminAPIAcceptanceService(t)
+	return pool, server.Handler(), store
+}
+
+// newAdminAPIAcceptanceService exposes the server itself, for the operations
+// no transport reaches with a bearer token.
+func newAdminAPIAcceptanceService(t *testing.T) (*pgxpool.Pool, *Server, *identity.Store) {
 	t.Helper()
 	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
 	if databaseURL == "" {
@@ -64,7 +72,6 @@ func newAdminAPIAcceptanceServer(t *testing.T) (*pgxpool.Pool, http.Handler, *id
 		CREATE SCHEMA %[1]s;
 		CREATE TABLE %[1]s.users (LIKE public.users INCLUDING ALL);
 		CREATE TABLE %[1]s.sessions (LIKE public.sessions INCLUDING ALL);
-		CREATE TABLE %[1]s.refresh_tokens (LIKE public.refresh_tokens INCLUDING ALL);
 		CREATE TABLE %[1]s.invitations (LIKE public.invitations INCLUDING ALL);
 		CREATE TABLE %[1]s.github_role_mappings (LIKE public.github_role_mappings INCLUDING ALL);
 		CREATE TABLE %[1]s.session_policy (LIKE public.session_policy INCLUDING ALL);
@@ -115,7 +122,7 @@ func newAdminAPIAcceptanceServer(t *testing.T) (*pgxpool.Pool, http.Handler, *id
 		monitoringClient: monitoring.NewClient(),
 		hydraPublic:      httputil.NewSingleHostReverseProxy(hydraPublicURL),
 	}
-	return pool, server.Handler(), store
+	return pool, server, store
 }
 
 func adminAPIAcceptanceRequest(t *testing.T, handler http.Handler, method, target, token, body string) *httptest.ResponseRecorder {
@@ -284,8 +291,12 @@ func TestAdminAPISessionPolicyReadAndUpdate(t *testing.T) {
 	}
 
 	defaults := sessionPolicyRecord{BrowserAbsoluteHours: 720, BrowserIdleMinutes: 720, OIDCSSOHours: 720, AccessTokenMinutes: 15, IDTokenMinutes: 15, RefreshTokenHours: 720}
-	if envelope := read(); envelope.SchemaVersion != "shauth.session-policy/v1" || envelope.Policy != defaults {
-		t.Fatalf("default policy envelope = %#v", envelope)
+	initial := read()
+	if initial.SchemaVersion != "shauth.session-policy/v1" || withoutChangeTime(initial.Policy) != defaults {
+		t.Fatalf("default policy envelope = %#v", initial)
+	}
+	if initial.Policy.UpdatedAt.IsZero() {
+		t.Fatal("the policy contract did not report when the policy last changed")
 	}
 
 	updatedRecord := sessionPolicyRecord{BrowserAbsoluteHours: 480, BrowserIdleMinutes: 360, OIDCSSOHours: 480, AccessTokenMinutes: 30, IDTokenMinutes: 30, RefreshTokenHours: 480}
@@ -309,8 +320,12 @@ func TestAdminAPISessionPolicyReadAndUpdate(t *testing.T) {
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update status = %d, body = %s", updated.Code, updated.Body.String())
 	}
-	if envelope := read(); envelope.Policy != updatedRecord {
-		t.Fatalf("updated policy envelope = %#v", envelope)
+	after := read()
+	if withoutChangeTime(after.Policy) != updatedRecord {
+		t.Fatalf("updated policy envelope = %#v", after)
+	}
+	if !after.Policy.UpdatedAt.After(initial.Policy.UpdatedAt) {
+		t.Fatalf("policy change time = %s, want it later than the previous %s", after.Policy.UpdatedAt, initial.Policy.UpdatedAt)
 	}
 	var storedAccessSeconds int64
 	if err := pool.QueryRow(context.Background(), `SELECT access_token_lifetime_seconds FROM session_policy WHERE singleton=TRUE`).Scan(&storedAccessSeconds); err != nil {
@@ -324,8 +339,14 @@ func TestAdminAPISessionPolicyReadAndUpdate(t *testing.T) {
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid policy status = %d, body = %s", invalid.Code, invalid.Body.String())
 	}
-	if envelope := read(); envelope.Policy != updatedRecord {
-		t.Fatalf("policy changed after a rejected update: %#v", envelope)
+	rejected := read()
+	if withoutChangeTime(rejected.Policy) != updatedRecord {
+		t.Fatalf("policy changed after a rejected update: %#v", rejected)
+	}
+	// A refused change must not move the change time either, or the record
+	// claims the policy was touched when nothing was stored.
+	if !rejected.Policy.UpdatedAt.Equal(after.Policy.UpdatedAt) {
+		t.Fatalf("a rejected update moved the change time to %s from %s", rejected.Policy.UpdatedAt, after.Policy.UpdatedAt)
 	}
 }
 
@@ -933,4 +954,83 @@ func TestAdminAPIMetricsCountDurableState(t *testing.T) {
 	if envelope.Build.Revision == "" {
 		t.Fatal("metrics did not report which build produced them")
 	}
+}
+
+// TestAcceptingAnInvitationIsRecordedAndSurvivesARejectedUsername covers the
+// one path that turns an invitation into an account. It is the only way an
+// account appears without an administrator creating it, so it has to leave
+// the same trail, and a correctable mistake must not consume the link.
+func TestAcceptingAnInvitationIsRecordedAndSurvivesARejectedUsername(t *testing.T) {
+	pool, server, store := newAdminAPIAcceptanceService(t)
+	ctx := context.Background()
+	now := time.Now()
+	if _, err := store.CreatePasswordUser(ctx, "occupied", "occupied@example.test", "occupied-account-password", identity.RoleDeveloper); err != nil {
+		t.Fatalf("create the account holding the contested username: %v", err)
+	}
+	raw, invitation, err := store.CreateInvitation(ctx, "recipient@example.test", identity.RoleDeveloper, "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/accept-invitation", nil)
+	request.Header.Set("X-Forwarded-For", "203.0.113.20")
+	request.RemoteAddr = "10.0.0.5:41234"
+
+	if _, err := server.claimInvitation(ctx, raw, "occupied", "recipient-account-password", visitorActor(request)); err == nil {
+		t.Fatal("accepting with an occupied username created an account")
+	}
+	if state, err := store.InvitationState(ctx, raw, now); err != nil || state != identity.InvitationPending {
+		t.Fatalf("invitation state after a refused username = %q (%v), want it still usable", state, err)
+	}
+
+	user, err := server.claimInvitation(ctx, raw, "recipient", "recipient-account-password", visitorActor(request))
+	if err != nil {
+		t.Fatalf("accept invitation: %v", err)
+	}
+	if user.Email != "recipient@example.test" || user.Role != identity.RoleDeveloper {
+		t.Fatalf("accepted account = %#v, want the invited address and role", user)
+	}
+
+	events, _, err := store.ListAuditEvents(ctx, identity.AuditFilter{SubjectUserID: user.ID}, identity.Page{})
+	if err != nil {
+		t.Fatalf("read the audit record: %v", err)
+	}
+	recorded := map[string]identity.AuditEvent{}
+	for _, event := range events {
+		recorded[event.EventType] = event
+	}
+	for _, expected := range []string{identity.AuditInvitationAccepted, identity.AuditAccountCreated} {
+		event, ok := recorded[expected]
+		if !ok {
+			t.Fatalf("no %s event was recorded for the account the invitation created: %#v", expected, events)
+		}
+		if event.ActorUserID != "" {
+			t.Fatalf("%s named actor %q, but the recipient had no account yet", expected, event.ActorUserID)
+		}
+		// The recipient's own address, not the gateway's, or the record
+		// says every acceptance came from the same place.
+		if event.RemoteAddress == nil || event.RemoteAddress.String() != "203.0.113.20" {
+			t.Fatalf("%s recorded address %v, want the recipient's", expected, event.RemoteAddress)
+		}
+		if event.Details["username"] != "recipient" {
+			t.Fatalf("%s recorded detail %v, want the chosen username", expected, event.Details)
+		}
+	}
+
+	var accepted int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM invitations WHERE id=$1::uuid AND accepted_at IS NOT NULL`, invitation.ID).Scan(&accepted); err != nil {
+		t.Fatal(err)
+	}
+	if accepted != 1 {
+		t.Fatalf("invitation accepted rows = %d, want the invitation spent exactly once", accepted)
+	}
+	if _, err := server.claimInvitation(ctx, raw, "recipient-again", "recipient-account-password", visitorActor(request)); !errors.Is(err, identity.ErrInvitationNotAcceptable) {
+		t.Fatalf("reusing a spent invitation = %v, want %v", err, identity.ErrInvitationNotAcceptable)
+	}
+}
+
+// withoutChangeTime compares only the lifetimes, so an assertion never has to
+// predict the moment the policy was written.
+func withoutChangeTime(record sessionPolicyRecord) sessionPolicyRecord {
+	record.UpdatedAt = time.Time{}
+	return record
 }

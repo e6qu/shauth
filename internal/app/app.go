@@ -271,6 +271,7 @@ type Server struct {
 	mailer           mailer.Invitations
 	managedApps      *managedapps.Controller
 	monitoringClient *monitoring.Client
+	traffic          *traffic
 }
 
 func New(cfg config.Config, store *identity.Store) (*Server, error) {
@@ -291,7 +292,7 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 	appController := managedapps.New()
 	proxy := httputil.NewSingleHostReverseProxy(cfg.HydraPublicURL)
 	proxy.ModifyResponse = ensureRedirectBody
-	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, monitoringClient: monitoring.NewClient(), oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
+	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, monitoringClient: monitoring.NewClient(), traffic: newTraffic(), oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy Hydra public request %s: %v", r.URL.Path, err)
 		server.failPage(w, r, http.StatusBadGateway, "The authorization provider is unavailable. Please try signing in again shortly.")
@@ -371,6 +372,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/audit-events", s.auditEventsAPI)
 	mux.HandleFunc("GET /api/v1/users/{id}/audit-events", s.auditEventsAPI)
 	mux.HandleFunc("GET /api/v1/metrics", s.metricsAPI)
+	mux.HandleFunc("GET /api/v1/metrics/requests", s.requestMetricsAPI)
 	mux.HandleFunc("GET /api/v1/health/deep", s.deepHealthAPI)
 	mux.HandleFunc("GET /api/v1/sessions/{id}", s.sessionAPI)
 	mux.HandleFunc("GET /api/v1/logout-grants", s.logoutGrantsAPI)
@@ -449,7 +451,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /favicon.svg", serveFavicon)
 	mux.HandleFunc("GET /favicon.ico", serveFavicon)
 	mux.HandleFunc("/", s.notFound)
-	return securityHeaders(csrfPosts(s.config.PublicURL, mux))
+	if s.traffic == nil {
+		s.traffic = newTraffic()
+	}
+	// Outermost, so a request refused by CSRF or rejected before routing is
+	// still counted: those refusals are exactly what an operator is looking
+	// for when something stops working.
+	return s.traffic.observe(mux, securityHeaders(csrfPosts(s.config.PublicURL, mux)))
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -1143,7 +1151,13 @@ func (s *Server) finalizeProviderLogout(ctx context.Context, grant identity.Logo
 	if err := s.revokeOtherHydraSessions(ctx, grant.ActiveHydraSessionIDs); err != nil {
 		return err
 	}
-	return s.store.CompleteLogoutCorrelationGrant(ctx, grant.ID, time.Now())
+	if err := s.store.CompleteLogoutCorrelationGrant(ctx, grant.ID, time.Now()); err != nil {
+		return err
+	}
+	s.record(ctx, logoutActor(grant), identity.AuditLogoutCompleted, grant.SubjectID, map[string]any{
+		"grant_id": grant.ID, "provider_sessions": len(grant.ActiveHydraSessionIDs), "attempts": grant.CleanupAttempts,
+	})
+	return nil
 }
 
 func (s *Server) scheduleLogoutRecovery(ctx context.Context, grant identity.LogoutCorrelationGrant, cause error) {
@@ -1151,6 +1165,19 @@ func (s *Server) scheduleLogoutRecovery(ctx context.Context, grant identity.Logo
 	if err := s.store.FailLogoutCorrelationGrant(ctx, grant.ID, cause.Error(), retryAt); err != nil {
 		log.Printf("schedule abandoned Ory Hydra logout recovery: %v", err)
 	}
+	// A logout that does not complete leaves relying-party sessions alive,
+	// which is the failure this product exists to prevent. It belongs in the
+	// durable record, not only in a log line.
+	s.record(ctx, logoutActor(grant), identity.AuditLogoutFailed, grant.SubjectID, map[string]any{
+		"grant_id": grant.ID, "attempt": grant.CleanupAttempts + 1, "retry_at": retryAt.UTC(), "error": cause.Error(),
+	})
+}
+
+// logoutActor names the person whose sessions a logout is ending. A logout
+// finished by the background recovery loop has no request behind it, so it
+// records no address rather than a misleading one.
+func logoutActor(grant identity.LogoutCorrelationGrant) actor {
+	return actor{UserID: grant.SubjectID, SessionID: grant.BrowserSessionID}
 }
 
 func logoutRecoveryDelay(attempt int) time.Duration {
@@ -2014,6 +2041,13 @@ func (s *Server) adminSessionPolicy(w http.ResponseWriter, r *http.Request) {
 // submission shows what the operator typed rather than reverting to the
 // stored policy and hiding their edit.
 func (s *Server) renderSessionPolicy(w http.ResponseWriter, r *http.Request, status int, message string, policy sessionPolicyRecord) {
+	if policy.UpdatedAt.IsZero() {
+		// A rejected edit carries only what the operator typed, so read
+		// the stored change time instead of dropping it from the page.
+		if stored, err := s.store.SessionPolicy(r.Context()); err == nil {
+			policy.UpdatedAt = stored.UpdatedAt
+		}
+	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
@@ -2395,23 +2429,31 @@ func (s *Server) bootstrapApps(ctx context.Context) error {
 		}
 	}
 	for _, registration := range registrations {
-		if registration.clientExists {
-			if err := s.updateHydraClient(ctx, registration.input); err != nil {
-				return fmt.Errorf("update bootstrap OAuth client %q: %w", registration.input.ID, err)
-			}
-		} else if err := s.createHydraClient(ctx, registration.input); err != nil {
-			return fmt.Errorf("create bootstrap OAuth client %q: %w", registration.input.ID, err)
-		}
-		if _, err := s.store.ReconcileBootstrapManagedApp(ctx, registration.managedApp); err != nil {
-			if !registration.clientExists {
-				if rollbackErr := s.deleteHydraClient(ctx, registration.input.ID); rollbackErr != nil {
-					return fmt.Errorf("reconcile bootstrap managed app %q: %v; remove newly created OAuth client: %w", registration.managedApp.Slug, err, rollbackErr)
+		// The same lock an operator's delete takes, so a client registered
+		// here cannot be removed before its catalog row lands.
+		err := s.store.WithOIDCClientLock(ctx, registration.input.ID, func(ctx context.Context) error {
+			if registration.clientExists {
+				if err := s.updateHydraClient(ctx, registration.input); err != nil {
+					return fmt.Errorf("update bootstrap OAuth client %q: %w", registration.input.ID, err)
 				}
+			} else if err := s.createHydraClient(ctx, registration.input); err != nil {
+				return fmt.Errorf("create bootstrap OAuth client %q: %w", registration.input.ID, err)
 			}
-			return fmt.Errorf("reconcile bootstrap managed app %q: %w", registration.managedApp.Slug, err)
-		}
-		if err := s.assertHydraClientReconciled(ctx, registration.input); err != nil {
-			return fmt.Errorf("verify bootstrap OAuth client %q: %w", registration.input.ID, err)
+			if _, err := s.store.ReconcileBootstrapManagedApp(ctx, registration.managedApp); err != nil {
+				if !registration.clientExists {
+					if rollbackErr := s.deleteHydraClient(ctx, registration.input.ID); rollbackErr != nil {
+						return fmt.Errorf("reconcile bootstrap managed app %q: %v; remove newly created OAuth client: %w", registration.managedApp.Slug, err, rollbackErr)
+					}
+				}
+				return fmt.Errorf("reconcile bootstrap managed app %q: %w", registration.managedApp.Slug, err)
+			}
+			if err := s.assertHydraClientReconciled(ctx, registration.input); err != nil {
+				return fmt.Errorf("verify bootstrap OAuth client %q: %w", registration.input.ID, err)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 	}
 	return s.assertManagedAppRegistrations(ctx)
@@ -2683,13 +2725,13 @@ func (s *Server) acceptInvitationPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := r.Form.Get("token")
-	user, err := s.store.AcceptInvitation(r.Context(), token, r.Form.Get("username"), r.Form.Get("password"), time.Now())
+	user, err := s.claimInvitation(r.Context(), token, r.Form.Get("username"), r.Form.Get("password"), visitorActor(r))
 	if err != nil {
-		// The token may still be good and only the chosen username or
-		// password rejected, so keep the recipient on the form with the
-		// reason rather than burning their invitation on a bare 400.
+		// The invitation survives a rejected username or password, so keep
+		// the recipient on the form with the reason instead of spending
+		// their one link on a correctable mistake.
 		state, stateErr := s.store.InvitationState(r.Context(), token, time.Now())
-		if stateErr != nil || state != identity.InvitationPending {
+		if stateErr != nil || state != identity.InvitationPending || errors.Is(err, identity.ErrInvitationNotAcceptable) {
 			s.failPage(w, r, http.StatusGone, invitationRejection(state))
 			return
 		}
@@ -2703,6 +2745,7 @@ func (s *Server) acceptInvitationPost(w http.ResponseWriter, r *http.Request) {
 	if !s.startSession(w, r, user) {
 		return
 	}
+	s.recordSignIn(r, identity.AuditSignInSucceeded, "invitation", user.Username, user.ID, "")
 	http.Redirect(w, r, "/", 303)
 }
 
@@ -2934,8 +2977,12 @@ func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshot := s.monitoringSnapshot(r.Context())
+	// The same report /api/v1/metrics/requests serves, so the page and the
+	// machine contract cannot drift apart.
+	report := s.traffic.report()
 	s.render(w, "monitoring", s.view(r, "Monitoring", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Snapshot": snapshot, "Now": time.Now().UTC(),
+		"Traffic": report, "BusiestRoutes": report.Busiest(8),
 	}))
 }
 func (s *Server) hydraReady(ctx context.Context) bool {

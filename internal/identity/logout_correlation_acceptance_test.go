@@ -31,8 +31,8 @@ func TestLogoutCorrelationGrantIsAtomicAndExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	userID, sessionID, familyID := randomUUID(), randomUUID(), randomUUID()
-	futureSessionID, futureFamilyID := randomUUID(), randomUUID()
+	userID, sessionID := randomUUID(), randomUUID()
+	futureSessionID := randomUUID()
 	suffix := strings.ReplaceAll(userID, "-", "")
 	now := time.Now().UTC()
 	if _, err := pool.Exec(ctx, `INSERT INTO users(id,username,email,role,created_at,email_verified) VALUES ($1::uuid,$2,$3,'developer',$4,TRUE)`, userID, "logout-"+suffix, "logout-"+suffix+"@example.test", now); err != nil {
@@ -44,7 +44,7 @@ func TestLogoutCorrelationGrantIsAtomicAndExpires(t *testing.T) {
 		_, _ = pool.Exec(ctx, `DELETE FROM sessions WHERE id=ANY($1::uuid[])`, []string{sessionID, futureSessionID})
 		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE id=$1::uuid`, userID)
 	}()
-	if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,user_id,refresh_family_id,created_at,last_seen_at,expires_at,user_agent,remote_address) VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$4,$5,'logout acceptance','127.0.0.1')`, sessionID, userID, familyID, now, now.Add(time.Hour)); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,user_id,created_at,last_seen_at,expires_at,user_agent,remote_address) VALUES ($1::uuid,$2::uuid,$3,$3,$4,'logout acceptance','127.0.0.1')`, sessionID, userID, now, now.Add(time.Hour)); err != nil {
 		t.Fatalf("create acceptance session: %v", err)
 	}
 	for _, providerSessionID := range []string{"provider-current-a", "provider-current-b", "provider-remote"} {
@@ -57,7 +57,7 @@ func TestLogoutCorrelationGrantIsAtomicAndExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,user_id,refresh_family_id,created_at,last_seen_at,expires_at,user_agent,remote_address) VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$4,$5,'future logout acceptance','127.0.0.1')`, futureSessionID, userID, futureFamilyID, now.Add(time.Second), now.Add(time.Hour)); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,user_id,created_at,last_seen_at,expires_at,user_agent,remote_address) VALUES ($1::uuid,$2::uuid,$3,$3,$4,'future logout acceptance','127.0.0.1')`, futureSessionID, userID, now.Add(time.Second), now.Add(time.Hour)); err != nil {
 		t.Fatalf("create future acceptance session: %v", err)
 	}
 	if err := store.RevokeSessions(ctx, createdGrant.ActiveBrowserSessionIDs, now.Add(2*time.Second)); err != nil {
@@ -187,8 +187,7 @@ func TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot(t *testing
 		t.Fatal(err)
 	}
 	userID := randomUUID()
-	initiatorSessionID, initiatorFamilyID := randomUUID(), randomUUID()
-	witnessSessionID, witnessFamilyID := randomUUID(), randomUUID()
+	initiatorSessionID, witnessSessionID := randomUUID(), randomUUID()
 	suffix := strings.ReplaceAll(userID, "-", "")
 	now := time.Now().UTC()
 	if _, err := pool.Exec(ctx, `INSERT INTO users(id,username,email,role,created_at,email_verified) VALUES ($1::uuid,$2,$3,'developer',$4,TRUE)`, userID, "mixed-logout-"+suffix, "mixed-logout-"+suffix+"@example.test", now); err != nil {
@@ -200,8 +199,8 @@ func TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot(t *testing
 		_, _ = pool.Exec(ctx, `DELETE FROM sessions WHERE id=ANY($1::uuid[])`, []string{initiatorSessionID, witnessSessionID})
 		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE id=$1::uuid`, userID)
 	}()
-	for _, session := range []struct{ id, family string }{{initiatorSessionID, initiatorFamilyID}, {witnessSessionID, witnessFamilyID}} {
-		if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,user_id,refresh_family_id,created_at,last_seen_at,expires_at,user_agent,remote_address) VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$4,$5,'mixed logout acceptance','127.0.0.1')`, session.id, userID, session.family, now, now.Add(time.Hour)); err != nil {
+	for _, sessionID := range []string{initiatorSessionID, witnessSessionID} {
+		if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,user_id,created_at,last_seen_at,expires_at,user_agent,remote_address) VALUES ($1::uuid,$2::uuid,$3,$3,$4,'mixed logout acceptance','127.0.0.1')`, sessionID, userID, now, now.Add(time.Hour)); err != nil {
 			t.Fatalf("create acceptance session: %v", err)
 		}
 	}
@@ -486,7 +485,6 @@ func deleteLogoutAcceptanceUser(t *testing.T, ctx context.Context, pool *pgxpool
 		`DELETE FROM logout_correlation_grants WHERE subject_id=$1::uuid`,
 		`DELETE FROM managed_apps WHERE oidc_client_id='stale-client-' || replace($1::text,'-','')`,
 		`DELETE FROM hydra_login_sessions WHERE browser_session_id IN (SELECT id FROM sessions WHERE user_id=$1::uuid)`,
-		`DELETE FROM refresh_tokens WHERE session_id IN (SELECT id FROM sessions WHERE user_id=$1::uuid)`,
 		`DELETE FROM sessions WHERE user_id=$1::uuid`,
 		`DELETE FROM users WHERE id=$1::uuid`,
 	} {

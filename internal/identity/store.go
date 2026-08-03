@@ -215,8 +215,9 @@ func (s *Store) LockBootstrapManagedApps(ctx context.Context) (func(), error) {
 
 func (s *Store) SessionPolicy(ctx context.Context) (SessionPolicy, error) {
 	var absoluteSeconds, idleSeconds, oidcSeconds, accessSeconds, idSeconds, refreshSeconds int64
-	err := s.pool.QueryRow(ctx, `SELECT browser_absolute_lifetime_seconds,browser_idle_timeout_seconds,oidc_session_lifetime_seconds,access_token_lifetime_seconds,id_token_lifetime_seconds,refresh_token_lifetime_seconds FROM session_policy WHERE singleton=TRUE`).
-		Scan(&absoluteSeconds, &idleSeconds, &oidcSeconds, &accessSeconds, &idSeconds, &refreshSeconds)
+	var updatedAt time.Time
+	err := s.pool.QueryRow(ctx, `SELECT browser_absolute_lifetime_seconds,browser_idle_timeout_seconds,oidc_session_lifetime_seconds,access_token_lifetime_seconds,id_token_lifetime_seconds,refresh_token_lifetime_seconds,updated_at FROM session_policy WHERE singleton=TRUE`).
+		Scan(&absoluteSeconds, &idleSeconds, &oidcSeconds, &accessSeconds, &idSeconds, &refreshSeconds, &updatedAt)
 	if err != nil {
 		return SessionPolicy{}, fmt.Errorf("read session policy: %w", err)
 	}
@@ -227,6 +228,7 @@ func (s *Store) SessionPolicy(ctx context.Context) (SessionPolicy, error) {
 		AccessTokenLifetime:     time.Duration(accessSeconds) * time.Second,
 		IDTokenLifetime:         time.Duration(idSeconds) * time.Second,
 		RefreshTokenLifetime:    time.Duration(refreshSeconds) * time.Second,
+		UpdatedAt:               updatedAt.UTC(),
 	}
 	if err := policy.Validate(); err != nil {
 		return SessionPolicy{}, fmt.Errorf("stored session policy: %w", err)
@@ -611,6 +613,29 @@ func (s *Store) DeleteManagedApp(ctx context.Context, ref ManagedAppRef) error {
 		return fmt.Errorf("commit delete managed app: %w", err)
 	}
 	return nil
+}
+
+// oidcClientLockSeed keeps the advisory-lock namespace for OAuth client
+// identifiers distinct from every other advisory lock this service takes.
+const oidcClientLockSeed int64 = 0x53484f4944434c49
+
+// WithOIDCClientLock runs an operation while holding an exclusive lock on one
+// OAuth client identifier. Deleting a client and registering an app against it
+// each read the provider and then write, so without this they can interleave
+// and leave a catalog entry pointing at a client that no longer exists —
+// single sign-on for that application is broken from that moment on. The lock
+// is transaction-scoped, so PostgreSQL releases it even if this process dies
+// mid-operation.
+func (s *Store) WithOIDCClientLock(ctx context.Context, clientID string, run func(context.Context) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin OAuth client lock: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,$2))`, strings.TrimSpace(clientID), oidcClientLockSeed); err != nil {
+		return fmt.Errorf("lock OAuth client: %w", err)
+	}
+	return run(ctx)
 }
 
 func (s *Store) ManagedAppUsesOIDCClient(ctx context.Context, clientID string) (bool, error) {
@@ -1115,18 +1140,32 @@ func normalizeGitHubTarget(kind, target string) string {
 }
 
 func (s *Store) CreatePasswordUser(ctx context.Context, username, email, password string, role Role) (User, error) {
-	username, email = strings.TrimSpace(username), strings.ToLower(strings.TrimSpace(email))
-	if username == "" || email == "" || len(password) < 14 {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
 		return User{}, invalidInput("username, email, and a password of at least 14 characters are required")
+	}
+	username, hash, err := passwordCredential(username, password)
+	if err != nil {
+		return User{}, err
 	}
 	if role != RoleDeveloper && role != RoleAdmin {
 		return User{}, invalidInput("invalid role")
 	}
+	return insertUser(ctx, s.pool, randomUUID(), username, email, true, hash, nil, "", role)
+}
+
+// passwordCredential validates and hashes a local credential before any
+// transaction opens, so the deliberately slow hash never holds a row lock.
+func passwordCredential(username, password string) (string, []byte, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || len(password) < 14 {
+		return "", nil, invalidInput("username, email, and a password of at least 14 characters are required")
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return User{}, fmt.Errorf("hash password: %w", err)
+		return "", nil, fmt.Errorf("hash password: %w", err)
 	}
-	return s.insertUser(ctx, randomUUID(), username, email, true, hash, nil, "", role)
+	return username, hash, nil
 }
 
 // EnsureBootstrapAdmin creates the explicitly configured break-glass admin on
@@ -1292,17 +1331,40 @@ func (s *Store) CreateInvitation(ctx context.Context, email string, role Role, i
 	return raw, invitation, nil
 }
 
+// ErrInvitationNotAcceptable reports that the presented link matches no
+// invitation that can still create an account.
+var ErrInvitationNotAcceptable = errors.New("invitation can no longer be accepted")
+
+// AcceptInvitation claims the invitation and creates its account in one
+// transaction. Claiming first and creating afterwards would spend the
+// invitation on a username that was already taken, leaving the recipient with
+// a link that reports itself as already used and no account to sign in to.
 func (s *Store) AcceptInvitation(ctx context.Context, raw, username, password string, now time.Time) (User, error) {
-	hash := sha256.Sum256([]byte(raw))
-	var email string
-	var role Role
-	err := s.pool.QueryRow(ctx, `UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>$2 RETURNING email,role`, hash[:], now.UTC()).Scan(&email, &role)
-	if err != nil {
-		return User{}, fmt.Errorf("accept invitation: %w", err)
-	}
-	user, err := s.CreatePasswordUser(ctx, username, email, password, role)
+	username, credential, err := passwordCredential(username, password)
 	if err != nil {
 		return User{}, err
+	}
+	tokenHash := sha256.Sum256([]byte(raw))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return User{}, fmt.Errorf("begin invitation acceptance: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var email string
+	var role Role
+	err = tx.QueryRow(ctx, `UPDATE invitations SET accepted_at=$2 WHERE token_hash=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>$2 RETURNING email,role`, tokenHash[:], now.UTC()).Scan(&email, &role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrInvitationNotAcceptable
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("claim invitation: %w", err)
+	}
+	user, err := insertUser(ctx, tx, randomUUID(), username, strings.ToLower(strings.TrimSpace(email)), true, credential, nil, "", role)
+	if err != nil {
+		return User{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, fmt.Errorf("commit invitation acceptance: %w", err)
 	}
 	return user, nil
 }
@@ -1369,9 +1431,16 @@ func (s *Store) ListInvitations(ctx context.Context, now time.Time, page Page) (
 	return invitations, total, rows.Err()
 }
 
-func (s *Store) insertUser(ctx context.Context, id, username, email string, emailVerified bool, hash []byte, githubID *int64, githubLogin string, role Role) (User, error) {
+// rowQuerier is satisfied by both the pool and a transaction, so one account
+// insert serves the standalone path and the invitation claim that has to roll
+// the invitation back when the chosen username is refused.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func insertUser(ctx context.Context, db rowQuerier, id, username, email string, emailVerified bool, hash []byte, githubID *int64, githubLogin string, role Role) (User, error) {
 	var user User
-	err := s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,github_id,github_login,role,created_at)
+	err := db.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,github_id,github_login,role,created_at)
 	VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at`, id, username, email, emailVerified, hash, githubID, nullable(githubLogin), role).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err != nil {
@@ -1444,7 +1513,7 @@ func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, logi
 	if login == "" || email == "" {
 		return User{}, fmt.Errorf("GitHub account must provide login and verified email")
 	}
-	return s.insertUser(ctx, randomUUID(), login, email, true, nil, &githubID, login, role)
+	return insertUser(ctx, s.pool, randomUUID(), login, email, true, nil, &githubID, login, role)
 }
 
 func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, username, email string, emailVerified bool) (User, error) {
@@ -1493,7 +1562,6 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, rem
 	}
 	tokenHash := sha256.Sum256([]byte(raw))
 	id := randomUUID()
-	family := randomUUID()
 	expiry := now.UTC().Add(policy.BrowserAbsoluteLifetime)
 	var session Session
 	tx, err := s.pool.Begin(ctx)
@@ -1504,8 +1572,8 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, rem
 	if err := lockActiveUser(ctx, tx, userID); err != nil {
 		return "", Session{}, err
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO sessions (id,user_id,refresh_family_id,browser_token_hash,created_at,last_seen_at,expires_at,user_agent,remote_address)
-	VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$5,$6,$7,$8) RETURNING id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address`, id, userID, family, tokenHash[:], now.UTC(), expiry, userAgent, remoteIP).
+	err = tx.QueryRow(ctx, `INSERT INTO sessions (id,user_id,browser_token_hash,created_at,last_seen_at,expires_at,user_agent,remote_address)
+	VALUES ($1::uuid,$2::uuid,$3,$4,$4,$5,$6,$7) RETURNING id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address`, id, userID, tokenHash[:], now.UTC(), expiry, userAgent, remoteIP).
 		Scan(&session.ID, &session.UserID, &session.CreatedAt, &session.LastSeen, &session.ExpiresAt, &session.RevokedAt, &session.UserAgent, &session.RemoteIP)
 	if err != nil {
 		return "", Session{}, fmt.Errorf("create session: %w", err)
@@ -1645,8 +1713,8 @@ var ErrUserNotFound = errors.New("user not found")
 var ErrValidationUserProtected = errors.New("the validation identity cannot be disabled")
 
 // DisableUser contains an account in one transaction: it ends every active
-// browser session and its refresh-token families and marks the account
-// disabled, so a compromised credential cannot simply sign in again. It
+// browser session and marks the account disabled, so a compromised credential
+// cannot simply sign in again. It
 // returns the correlated Ory Hydra login sessions the caller must also
 // revoke. Disabling an already disabled account is a no-op that still
 // reports the remaining provider sessions, so a failed revocation can be
@@ -1996,13 +2064,7 @@ func hydraSessionIDsForBrowsers(ctx context.Context, tx pgx.Tx, browserSessionID
 }
 
 func revokeSessionSnapshot(ctx context.Context, tx pgx.Tx, sessionIDs []string, now time.Time) error {
-	_, err := tx.Exec(ctx, `WITH revoked AS (
-		UPDATE sessions SET revoked_at=$2
-		WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL
-		RETURNING refresh_family_id
-	)
-	UPDATE refresh_tokens SET revoked_at=$2
-	WHERE family_id IN (SELECT refresh_family_id FROM revoked) AND revoked_at IS NULL`, sessionIDs, now.UTC())
+	_, err := tx.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL`, sessionIDs, now.UTC())
 	if err != nil {
 		return fmt.Errorf("revoke browser session snapshot: %w", err)
 	}
@@ -2249,30 +2311,19 @@ func (s *Store) ActiveUserHydraLoginSessionIDs(ctx context.Context, userID strin
 var ErrActiveSessionNotFound = errors.New("active session not found")
 
 func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) error {
-	tx, err := s.pool.Begin(ctx)
+	command, err := s.pool.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL`, id, now.UTC())
 	if err != nil {
-		return fmt.Errorf("begin session revocation: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	var familyID string
-	if err := tx.QueryRow(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL RETURNING refresh_family_id::text`, id, now.UTC()).Scan(&familyID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrActiveSessionNotFound
-		}
 		return fmt.Errorf("revoke session: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at=$2 WHERE family_id=$1::uuid AND revoked_at IS NULL`, familyID, now.UTC()); err != nil {
-		return fmt.Errorf("revoke session refresh tokens: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit session revocation: %w", err)
+	if command.RowsAffected() == 0 {
+		return ErrActiveSessionNotFound
 	}
 	return nil
 }
 
-// RevokeSessions ends only the browser and refresh-token families captured by
-// a logout snapshot. Replaying it is safe and cannot revoke sessions created
-// after that snapshot.
+// RevokeSessions ends only the browser sessions captured by a logout
+// snapshot. Replaying it is safe and cannot revoke sessions created after
+// that snapshot.
 func (s *Store) RevokeSessions(ctx context.Context, sessionIDs []string, now time.Time) error {
 	ids, err := normalizedOptionalSessionIDs(sessionIDs)
 	if err != nil {
@@ -2281,16 +2332,7 @@ func (s *Store) RevokeSessions(ctx context.Context, sessionIDs []string, now tim
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err = s.pool.Exec(ctx, `WITH revoked AS (
-		UPDATE sessions
-		SET revoked_at=$2
-		WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL
-		RETURNING refresh_family_id
-	)
-	UPDATE refresh_tokens
-	SET revoked_at=$2
-	WHERE family_id IN (SELECT refresh_family_id FROM revoked) AND revoked_at IS NULL`, ids, now.UTC())
-	if err != nil {
+	if _, err := s.pool.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL`, ids, now.UTC()); err != nil {
 		return fmt.Errorf("revoke browser session snapshot: %w", err)
 	}
 	return nil

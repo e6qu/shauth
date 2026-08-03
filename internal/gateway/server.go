@@ -170,12 +170,27 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/shauth/logout/complete", server.providerLogoutComplete)
 	mux.HandleFunc("GET /auth/frontchannel-logout", server.frontchannelLogout)
 	mux.HandleFunc("POST /auth/backchannel-logout", server.backchannelLogout)
-	mux.HandleFunc("GET /auth/healthz", func(response http.ResponseWriter, _ *http.Request) {
-		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = response.Write([]byte("ok"))
-	})
+	mux.HandleFunc("GET /auth/healthz", server.healthz)
 	mux.Handle("/", server.requireSession(server.proxy))
 	return server.securityHeaders(mux)
+}
+
+// healthz answers only after proving the session store is still reachable.
+// Shauth's catalog polls this endpoint to decide whether an application is
+// healthy, so a static "ok" reported a working application while every
+// request to it was in fact being turned away at the door.
+func (server *Server) healthz(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	response.Header().Set("Cache-Control", "no-store")
+	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
+	defer cancel()
+	if err := server.store.Ping(ctx); err != nil {
+		log.Printf("gateway health check: %v", err)
+		response.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = response.Write([]byte("session store unavailable\n"))
+		return
+	}
+	_, _ = response.Write([]byte("ok"))
 }
 
 func (server *Server) signedOut(response http.ResponseWriter, _ *http.Request) {

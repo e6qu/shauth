@@ -256,7 +256,9 @@ receiving an unbounded array.
   plus every browser session's created/last-seen/expiry times, user agent,
   remote address, revocation state, and computed `active` flag.
 - `GET /api/v1/session-policy` — `shauth.session-policy/v1`: durable session
-  lifetimes in the same units as the administration form.
+  lifetimes in the same units as the administration form, with `updated_at`
+  reporting when the policy last changed. `/admin/audit?event_type=session_policy.updated`
+  reports who changed it.
 - `GET /api/v1/oidc-clients` — `shauth.oidc-clients/v1`: the Ory Hydra client
   catalog as Shauth manages it (never any client secret).
 - `GET /api/v1/github-mappings` — `shauth.github-role-mappings/v1`: GitHub
@@ -333,9 +335,11 @@ publish: what happened, how much of it, and which dependency is at fault.
   `GET /api/v1/users/{id}/audit-events` — `shauth.audit-events/v1`: the
   durable record of every security-relevant action. Sign-in outcomes,
   including why a sign-in was refused; session and account changes; every
-  invitation, client, application, access rule and policy change. Each event
-  carries who acted, on whom, from which address and session, and a detail
-  object. The person signing in is always told only that the pair did not
+  invitation, client, application, access rule and policy change; accepting
+  an invitation, which is the one way an account appears without an
+  administrator creating it; and whether each global logout completed or is
+  being retried, with the error that stopped it. Each event carries who
+  acted, on whom, from which address and session, and a detail object. The person signing in is always told only that the pair did not
   work, while the record keeps the reason, so a disabled account is
   distinguishable from a mistyped name without telling an attacker which.
   A token-authorized write records no person, because bearer credentials are
@@ -354,6 +358,19 @@ publish: what happened, how much of it, and which dependency is at fault.
   application registration has drifted from what was recorded — drift means
   single sign-on is already broken for that relying party. `/healthz` remains
   the shallow, unauthenticated probe the container scheduler uses.
+- `GET /api/v1/metrics/requests` — `shauth.request-metrics/v1`: what this
+  instance has served since it started, by route: request counts, outcomes by
+  status class, mean, ninety-fifth-percentile and slowest response times, the
+  bucketed distribution those percentiles were taken from, the status and time
+  of the most recent request, and the number in flight. The route is always
+  the pattern the route table matched, never the requested path, so an
+  identifier in a URL can never create a series. A request refused before
+  routing, by the CSRF check for instance, is attributed to the route it
+  targeted rather than to a nameless series. These counters
+  are process-local and reset on restart, which is what makes them the right
+  answer to "what is this instance doing now" and the wrong answer to "how
+  many accounts exist" — that is `/api/v1/metrics`. The `Requests served`
+  section of `/monitoring` renders the same report.
 
 Debugging a specific failure:
 
@@ -474,6 +491,15 @@ email, normalized role, and `APPLICATION_RELEASE_REVISION` through the common
 `validation-username`, `validation-email`, `validation-role`, and
 `validation-release` test markers. The validation page signs out through the
 same real relying-party logout flow used by the application UI.
+
+`GET /auth/healthz` answers `200 ok` only while the gateway can reach its own
+session store, and `503` when it cannot. Shauth's catalog polls this endpoint
+to decide whether the application is up, and a gateway without its session
+store cannot admit or refuse a single request — so reporting ready would tell
+an operator the application is working while every request to it is being
+turned away. A deployment that also uses this URL as a load-balancer health
+check will therefore drain the target during a database outage, which is the
+same fail-closed answer.
 
 Each gateway deployment uses its relying party's distinct PostgreSQL database,
 not Shauth's identity database. `/shauth-gateway` applies its embedded,

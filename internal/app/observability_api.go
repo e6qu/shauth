@@ -144,6 +144,24 @@ func (s *Server) metricsAPI(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requestMetricsAPI reports what this instance has actually served: which
+// routes are used, which are failing, and how slow they are. Nothing else
+// observes status codes, so without it a rising error rate is only visible by
+// reading container logs by hand.
+func (s *Server) requestMetricsAPI(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if !s.requireAdminAPIReadToken(w, r) {
+		return
+	}
+	report := s.traffic.report()
+	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
+		"schema_version": "shauth.request-metrics/v1",
+		"observed_at":    time.Now().UTC(),
+		"build":          buildRecord(),
+		"traffic":        report,
+	})
+}
+
 func buildRecord() map[string]any {
 	return map[string]any{
 		"revision": version.Revision(), "started_at": version.StartedAt(),

@@ -35,9 +35,11 @@ Terraform, a particular cloud provider, or how a relying party is deployed.
 - Authentication and authorization always fail closed. Never expose an
   application because a token, session store, identity provider, or logout
   endpoint is unavailable.
-- Sessions, refresh-token families, users, roles, and revocation state live in
-  PostgreSQL. Tests must use the real PostgreSQL and Ory Hydra integrations, not
-  in-memory replacements or canned HTTP responses.
+- Browser sessions, users, roles, and revocation state live in PostgreSQL. Ory
+  Hydra issues, rotates, and revokes OAuth tokens and owns their storage;
+  Shauth revokes them by ending the correlated Ory Hydra login sessions rather
+  than by keeping a second copy. Tests must use the real PostgreSQL and Ory
+  Hydra integrations, not in-memory replacements or canned HTTP responses.
 - Secrets come from runtime secret injection and must never be logged, committed,
   returned to browsers, or reused across unrelated security boundaries.
 
