@@ -88,6 +88,8 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ghcr.io/e6qu/shauth:${{ steps.sha.outputs.short_sha }}-amd64
+          build-args: |
+            SHAUTH_REVISION=${{ github.sha }}
           provenance: false
           sbom: false
       - uses: docker/build-push-action@v6
@@ -126,6 +128,8 @@ jobs:
           push: true
           platforms: linux/arm64
           tags: ghcr.io/e6qu/shauth:${{ steps.sha.outputs.short_sha }}-arm64
+          build-args: |
+            SHAUTH_REVISION=${{ github.sha }}
           provenance: false
           sbom: false
       - uses: docker/build-push-action@v6

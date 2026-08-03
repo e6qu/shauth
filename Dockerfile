@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 FROM golang:1.26.5-alpine AS build
+# The revision this image was built from, stamped into the binaries so every
+# page and contract can report exactly which build is serving it.
+ARG SHAUTH_REVISION=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth ./cmd/shauth
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-migrate ./cmd/shauth-migrate
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-healthcheck ./cmd/shauth-healthcheck
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/shauth-gateway ./cmd/shauth-gateway
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth ./cmd/shauth
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth-migrate ./cmd/shauth-migrate
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth-healthcheck ./cmd/shauth-healthcheck
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth-gateway ./cmd/shauth-gateway
 
 FROM golang:1.26.5-alpine AS hydra-build
 ARG HYDRA_COMMIT=0b84568fffccf151dc5e6c7955fdfb738555bf4b

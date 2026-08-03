@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/e6qu/shauth/internal/identity"
+	"github.com/e6qu/shauth/internal/version"
 )
 
 func parsePages(t *testing.T) *template.Template {
@@ -92,8 +93,8 @@ func TestPagesRenderTheirOwnTitle(t *testing.T) {
 // debug syntax with microseconds and a type suffix.
 func TestTimestampsRenderAsReadableText(t *testing.T) {
 	helpers := templateHelpers()
-	moment := helpers["moment"].(func(time.Time) string)
-	iso := helpers["iso"].(func(time.Time) string)
+	moment := helpers["moment"].(func(any) string)
+	iso := helpers["iso"].(func(any) string)
 	value := time.Date(2026, 7, 20, 12, 30, 0, 0, time.UTC)
 	if got := moment(value); got != "20 Jul 2026 12:30 UTC" {
 		t.Fatalf("moment = %q", got)
@@ -101,8 +102,12 @@ func TestTimestampsRenderAsReadableText(t *testing.T) {
 	if got := iso(value); got != "2026-07-20T12:30:00Z" {
 		t.Fatalf("iso = %q", got)
 	}
-	if got := moment(time.Time{}); got != "never" {
+	if got := moment(time.Time{}); got != "unknown" {
 		t.Fatalf("zero time = %q, want a word rather than a zero date", got)
+	}
+	// A page that omits a timestamp must still render.
+	if got := moment(nil); got != "unknown" {
+		t.Fatalf("missing time = %q, want a word rather than a render failure", got)
 	}
 	if strings.Contains(moment(value), "+0000") || strings.Contains(moment(value), "m=") {
 		t.Fatal("moment leaked Go time formatting")
@@ -219,5 +224,63 @@ func TestOperationFailuresClassifyIdenticallyForBothTransports(t *testing.T) {
 				t.Fatalf("failure leaked internal detail: %q", message)
 			}
 		})
+	}
+}
+
+// Every page must say which build produced it, so an operator reading any
+// screen can tell exactly which revision is serving them.
+func TestEveryPageCarriesTheBuildNotice(t *testing.T) {
+	if !strings.Contains(pageTemplates, `class="build-notice"`) {
+		t.Fatal("the shared footer does not carry a build notice")
+	}
+	for _, expected := range []string{"{{.Revision}}", "{{iso .StartedAt}}", "{{moment .StartedAt}}"} {
+		if !strings.Contains(pageTemplates, expected) {
+			t.Fatalf("the build notice omits %s", expected)
+		}
+	}
+	// The notice lives in the shared footer, so every page that renders the
+	// footer reports it.
+	footers := strings.Count(pageTemplates, `{{template "footer" .}}`)
+	if footers < 12 {
+		t.Fatalf("only %d pages render the shared footer", footers)
+	}
+}
+
+// A stacked table row on a narrow screen keeps the column heading that gives
+// each value its meaning.
+func TestTableCellsCarryTheirColumnLabel(t *testing.T) {
+	tables := regexp.MustCompile(`(?s)<table>.*?</table>`)
+	for _, table := range tables.FindAllString(pageTemplates, -1) {
+		headers := regexp.MustCompile(`<th scope="col">`).FindAllString(table, -1)
+		if len(headers) == 0 {
+			continue
+		}
+		for _, cell := range regexp.MustCompile(`<td(?: [^>]*)?>`).FindAllString(table, -1) {
+			if strings.Contains(cell, "colspan") {
+				continue
+			}
+			if !strings.Contains(cell, "data-label=") {
+				t.Errorf("a table cell has no column label for narrow screens: %s", cell)
+			}
+		}
+	}
+	// Narrow screens must stack rather than force a minimum table width.
+	if !strings.Contains(pageTemplates, "@media(max-width:60rem){.table-wrap") {
+		t.Fatal("tables do not stack on narrow screens")
+	}
+	if strings.Contains(pageTemplates, ".table-wrap table{min-width:36rem}") {
+		t.Fatal("a forced table minimum width can push a narrow page wider than its viewport")
+	}
+}
+
+func TestVersionReportsAShortRevisionAndStartTime(t *testing.T) {
+	if version.Short() == "" {
+		t.Fatal("no revision is reported")
+	}
+	if len(version.Short()) > 12 {
+		t.Fatalf("short revision %q is longer than the display form used elsewhere", version.Short())
+	}
+	if version.StartedAt().IsZero() || version.StartedAt().Location() != time.UTC {
+		t.Fatalf("start time = %v, want a UTC instant", version.StartedAt())
 	}
 }

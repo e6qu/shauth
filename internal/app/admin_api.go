@@ -22,6 +22,7 @@ import (
 
 	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/monitoring"
+	"github.com/e6qu/shauth/internal/version"
 )
 
 var uuidPathPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -576,6 +577,7 @@ func (s *Server) monitoringAPI(w http.ResponseWriter, r *http.Request) {
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
 		"schema_version":     "shauth.monitoring/v1",
 		"observed_at":        time.Now().UTC(),
+		"build":              map[string]any{"revision": version.Revision(), "started_at": version.StartedAt()},
 		"active_sessions":    active,
 		"postgresql_healthy": postgresHealthy,
 		"hydra_healthy":      s.hydraReady(r.Context()),

@@ -567,6 +567,23 @@ admin_users_page=$(curl --fail --silent --show-error --header "Authorization: Be
 printf '%s' "$admin_users_page" | grep -q '"limit":1'
 printf '%s' "$admin_users_page" | grep -q '"has_more":true'
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?limit=501')" = 400 ]
+
+# Every page reports the build serving it, and the machine contract reports
+# the same facts.
+curl --fail --silent --show-error http://localhost:8080/login | grep -q 'class="build-notice"'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'class="build-notice"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/monitoring | grep -q '"revision"'
+
+# Each application and account has a screen of its own that can be linked to.
+app_slug=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT slug FROM managed_apps ORDER BY slug LIMIT 1")
+[ -n "$app_slug" ]
+curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/apps/${app_slug}" | grep -q 'Validation history'
+admin_user_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username='admin'")
+curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_user_id}" | grep -q 'Account state'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_user_id}/sessions")" = 301 ]
+
+# A narrow screen stacks table rows instead of scrolling the page sideways.
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'data-label="Role"'
 admin_users_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?q=admin')
 printf '%s' "$admin_users_response" | grep -q '"schema_version":"shauth.users/v1"'
 printf '%s' "$admin_users_response" | grep -q '"username":"admin"'
