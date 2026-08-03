@@ -30,6 +30,9 @@ func TestGatewayHealthFollowsItsSessionStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect PostgreSQL: %v", err)
 	}
+	// Closed explicitly below to make the store unreachable; this is the
+	// safety net for an earlier failure.
+	t.Cleanup(pool.Close)
 	issuer, err := url.Parse("https://auth.example.test")
 	if err != nil {
 		t.Fatal(err)

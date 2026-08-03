@@ -335,9 +335,11 @@ publish: what happened, how much of it, and which dependency is at fault.
   `GET /api/v1/users/{id}/audit-events` — `shauth.audit-events/v1`: the
   durable record of every security-relevant action. Sign-in outcomes,
   including why a sign-in was refused; session and account changes; every
-  invitation, client, application, access rule and policy change. Each event
-  carries who acted, on whom, from which address and session, and a detail
-  object. The person signing in is always told only that the pair did not
+  invitation, client, application, access rule and policy change; accepting
+  an invitation, which is the one way an account appears without an
+  administrator creating it; and whether each global logout completed or is
+  being retried, with the error that stopped it. Each event carries who
+  acted, on whom, from which address and session, and a detail object. The person signing in is always told only that the pair did not
   work, while the record keeps the reason, so a disabled account is
   distinguishable from a mistyped name without telling an attacker which.
   A token-authorized write records no person, because bearer credentials are
@@ -486,6 +488,15 @@ email, normalized role, and `APPLICATION_RELEASE_REVISION` through the common
 `validation-username`, `validation-email`, `validation-role`, and
 `validation-release` test markers. The validation page signs out through the
 same real relying-party logout flow used by the application UI.
+
+`GET /auth/healthz` answers `200 ok` only while the gateway can reach its own
+session store, and `503` when it cannot. Shauth's catalog polls this endpoint
+to decide whether the application is up, and a gateway without its session
+store cannot admit or refuse a single request — so reporting ready would tell
+an operator the application is working while every request to it is being
+turned away. A deployment that also uses this URL as a load-balancer health
+check will therefore drain the target during a database outage, which is the
+same fail-closed answer.
 
 Each gateway deployment uses its relying party's distinct PostgreSQL database,
 not Shauth's identity database. `/shauth-gateway` applies its embedded,
