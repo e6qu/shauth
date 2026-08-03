@@ -917,10 +917,15 @@ if [ "$attempt" -eq 30 ] || [ "$remaining_developer_mappings" != 0 ]; then
   exit 1
 fi
 curl --fail --silent --show-error http://localhost:4445/admin/clients/gateway-integration | grep -q '"backchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/backchannel-logout"'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Ory Hydra authorization provider'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Active browser sessions'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'PostgreSQL session store'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'No infrastructure source configured'
+# The page names every dependency the deep check knows, not the two it used
+# to summarise, so these assert the store and the provider by the names both
+# the page and the contract use for them.
+monitoring_after_restart=$(curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring)
+printf '%s' "$monitoring_after_restart" | grep -q 'hydra_public'
+printf '%s' "$monitoring_after_restart" | grep -q 'hydra_admin'
+printf '%s' "$monitoring_after_restart" | grep -q 'postgresql'
+printf '%s' "$monitoring_after_restart" | grep -q 'Active browser sessions'
+printf '%s' "$monitoring_after_restart" | grep -q 'No infrastructure source configured'
 attempt=0
 while [ "$attempt" -lt 30 ]; do
   if curl --fail --silent http://localhost:8080/.well-known/openid-configuration 2>/dev/null | grep -q 'issuer'; then
