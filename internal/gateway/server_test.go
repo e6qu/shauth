@@ -118,8 +118,10 @@ func TestGatewayAuthHandlersRetainGatewaySecurityPolicy(t *testing.T) {
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	// No session store is configured here, and health answers for what it
+	// can actually prove rather than for what it hopes.
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 	}
 	wantCSP := "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://auth.example.test"
 	if actual := response.Header().Get("Content-Security-Policy"); actual != wantCSP {

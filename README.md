@@ -256,7 +256,9 @@ receiving an unbounded array.
   plus every browser session's created/last-seen/expiry times, user agent,
   remote address, revocation state, and computed `active` flag.
 - `GET /api/v1/session-policy` — `shauth.session-policy/v1`: durable session
-  lifetimes in the same units as the administration form.
+  lifetimes in the same units as the administration form, with `updated_at`
+  reporting when the policy last changed. `/admin/audit?event_type=session_policy.updated`
+  reports who changed it.
 - `GET /api/v1/oidc-clients` — `shauth.oidc-clients/v1`: the Ory Hydra client
   catalog as Shauth manages it (never any client secret).
 - `GET /api/v1/github-mappings` — `shauth.github-role-mappings/v1`: GitHub
@@ -354,6 +356,16 @@ publish: what happened, how much of it, and which dependency is at fault.
   application registration has drifted from what was recorded — drift means
   single sign-on is already broken for that relying party. `/healthz` remains
   the shallow, unauthenticated probe the container scheduler uses.
+- `GET /api/v1/metrics/requests` — `shauth.request-metrics/v1`: what this
+  instance has served since it started, by route: request counts, outcomes by
+  status class, mean, ninety-fifth-percentile and slowest response times, the
+  status and time of the most recent request, and the number in flight. The
+  route is always the pattern the route table matched, never the requested
+  path, so an identifier in a URL can never create a series. These counters
+  are process-local and reset on restart, which is what makes them the right
+  answer to "what is this instance doing now" and the wrong answer to "how
+  many accounts exist" — that is `/api/v1/metrics`. The `Requests served`
+  section of `/monitoring` renders the same report.
 
 Debugging a specific failure:
 

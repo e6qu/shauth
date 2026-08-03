@@ -46,6 +46,10 @@ func (a actor) isSelf(userID string) bool { return a.UserID != "" && a.UserID ==
 // from is recorded instead, which is what an operator has to work with.
 func tokenActor(r *http.Request) actor { return actor{Address: clientIP(r)} }
 
+// visitorActor describes somebody acting before they have an account or a
+// session, such as an invitation recipient. Only the address is knowable.
+func visitorActor(r *http.Request) actor { return actor{Address: clientIP(r)} }
+
 // browserActor describes the signed-in administrator performing an action,
 // including the session and address they acted from.
 func browserActor(r *http.Request, user identity.User, session identity.Session) actor {
@@ -213,6 +217,22 @@ func (s *Server) createInvitation(ctx context.Context, email, role string, reque
 	return invitation, nil
 }
 
+// claimInvitation turns one invitation into an account. The recipient is not
+// signed in yet, so the record carries the address the link was used from and
+// names the account it created as its subject. Both the acceptance and the
+// account creation are recorded: an operator asking how an account came to
+// exist should find it under the same event type as every other account.
+func (s *Server) claimInvitation(ctx context.Context, token, username, password string, requester actor) (identity.User, error) {
+	user, err := s.store.AcceptInvitation(ctx, token, username, password, time.Now())
+	if err != nil {
+		return identity.User{}, err
+	}
+	details := map[string]any{"username": user.Username, "email": user.Email, "role": string(user.Role), "via": "invitation"}
+	s.record(ctx, requester, identity.AuditInvitationAccepted, user.ID, details)
+	s.record(ctx, requester, identity.AuditAccountCreated, user.ID, details)
+	return user, nil
+}
+
 // revokeInvitation withdraws an unaccepted invitation so a link sent to the
 // wrong address can no longer create an account.
 func (s *Server) revokeInvitation(ctx context.Context, invitationID string, requester actor) error {
@@ -307,12 +327,14 @@ func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyR
 		}
 		return sessionPolicyRecord{}, dependencyFailure("the OAuth client lifetimes could not be updated, so the previous policy was restored", err)
 	}
-	if err := s.store.UpdateSessionPolicy(ctx, policy, time.Now()); err != nil {
+	changedAt := time.Now().UTC()
+	if err := s.store.UpdateSessionPolicy(ctx, policy, changedAt); err != nil {
 		if rollbackErr := s.applyHydraSessionPolicy(ctx, previous); rollbackErr != nil {
 			log.Printf("restore Ory Hydra session policy after PostgreSQL update failed: %v", rollbackErr)
 		}
 		return sessionPolicyRecord{}, err
 	}
+	policy.UpdatedAt = changedAt
 	s.record(ctx, requester, identity.AuditSessionPolicyUpdated, "", map[string]any{
 		"previous": newSessionPolicyRecord(previous), "applied": newSessionPolicyRecord(policy),
 	})
@@ -345,18 +367,27 @@ func (s *Server) deleteOIDCClient(ctx context.Context, clientID string, requeste
 	if !deletableOIDCClientID(clientID) {
 		return identity.Invalid("OAuth client identifier is invalid")
 	}
-	used, err := s.store.ManagedAppUsesOIDCClient(ctx, clientID)
-	if err != nil {
-		return fmt.Errorf("verify connected apps: %w", err)
-	}
-	if used {
-		return errOIDCClientInUse
-	}
-	if err := s.deleteHydraClient(ctx, clientID); err != nil {
-		if errors.Is(err, errHydraClientNotFound) {
-			return err
+	// Registering an app against this client checks the provider and then
+	// writes the catalog row, so the usage check and the deletion have to
+	// hold the same lock or the two can cross and strand the app.
+	err := s.store.WithOIDCClientLock(ctx, clientID, func(ctx context.Context) error {
+		used, err := s.store.ManagedAppUsesOIDCClient(ctx, clientID)
+		if err != nil {
+			return fmt.Errorf("verify connected apps: %w", err)
 		}
-		return dependencyFailure("the OAuth client could not be deleted", err)
+		if used {
+			return errOIDCClientInUse
+		}
+		if err := s.deleteHydraClient(ctx, clientID); err != nil {
+			if errors.Is(err, errHydraClientNotFound) {
+				return err
+			}
+			return dependencyFailure("the OAuth client could not be deleted", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	s.record(ctx, requester, identity.AuditOIDCClientDeleted, "", map[string]any{"client_id": clientID})
 	return nil
@@ -390,29 +421,36 @@ func (s *Server) deleteGitHubMapping(ctx context.Context, mappingID string, requ
 // Connect client, enforcing the one-origin and logout-bridge invariants that
 // make single sign-out reachable for every relying party.
 func (s *Server) createApp(ctx context.Context, app identity.ManagedApp, requester actor) (identity.ManagedApp, error) {
-	clients, err := s.hydraClients(ctx)
-	if err != nil {
-		return identity.ManagedApp{}, dependencyFailure("the OAuth client could not be verified", err)
-	}
-	var registered *oidcClient
-	for _, client := range clients {
-		if client.ID == app.OIDCClientID {
-			match := client
-			registered = &match
-			break
+	// Held against deleteOIDCClient: verifying the client and writing the
+	// catalog row must be one step, or the client can be deleted in between
+	// and the new app is registered against nothing.
+	var created identity.ManagedApp
+	err := s.store.WithOIDCClientLock(ctx, app.OIDCClientID, func(ctx context.Context) error {
+		clients, err := s.hydraClients(ctx)
+		if err != nil {
+			return dependencyFailure("the OAuth client could not be verified", err)
 		}
-	}
-	if registered == nil {
-		return identity.ManagedApp{}, identity.Invalid("register the OIDC client before adding its app")
-	}
-	app.OIDCContractHash = oidcClientContractHash(*registered)
-	if err := identity.ValidateManagedApp(app); err != nil {
-		return identity.ManagedApp{}, err
-	}
-	if err := validateManagedAppClient(app, *registered); err != nil {
-		return identity.ManagedApp{}, err
-	}
-	created, err := s.store.CreateManagedApp(ctx, app)
+		var registered *oidcClient
+		for _, client := range clients {
+			if client.ID == app.OIDCClientID {
+				match := client
+				registered = &match
+				break
+			}
+		}
+		if registered == nil {
+			return identity.Invalid("register the OIDC client before adding its app")
+		}
+		app.OIDCContractHash = oidcClientContractHash(*registered)
+		if err := identity.ValidateManagedApp(app); err != nil {
+			return err
+		}
+		if err := validateManagedAppClient(app, *registered); err != nil {
+			return err
+		}
+		created, err = s.store.CreateManagedApp(ctx, app)
+		return err
+	})
 	if err != nil {
 		return identity.ManagedApp{}, err
 	}

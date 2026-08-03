@@ -612,6 +612,36 @@ for dependency in postgresql hydra_public hydra_admin managed_app_registration v
 	printf '%s' "$deep_health" | grep -q "\"name\":\"${dependency}\""
 done
 
+# Request metrics describe what this instance actually served. The route is
+# reported by its registered pattern, so a path carrying an identifier must
+# not appear verbatim and create a series per identifier.
+request_metrics=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/metrics/requests)
+printf '%s' "$request_metrics" | grep -q '"schema_version":"shauth.request-metrics/v1"'
+printf '%s' "$request_metrics" | grep -q '"pattern":"/api/v1/metrics/requests"'
+printf '%s' "$request_metrics" | grep -q '"by_status_class"'
+if printf '%s' "$request_metrics" | grep -q '"pattern":"/admin/users/[0-9a-f]'; then
+	echo 'request metrics recorded a request path instead of its route pattern' >&2
+	exit 1
+fi
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/metrics/requests)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" http://localhost:8080/api/v1/metrics/requests)" = 401 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Busiest routes'
+
+# The session policy reports when it last changed, so an operator can tell a
+# policy that was moved from one that never was.
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/session-policy | grep -q '"updated_at":'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/session-policy | grep -q 'Last changed'
+
+# The retired refresh-token schema must be gone rather than left as a durable
+# claim nothing honours.
+[ -z "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT to_regclass('public.refresh_tokens')")" ]
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM information_schema.columns WHERE table_name='sessions' AND column_name='refresh_family_id'")" = 0 ]
+
+# A relying party reports itself healthy only while it can reach its own
+# session store, because that is what Shauth's catalog polls to decide the
+# application is up.
+curl --fail --silent --show-error http://gateway-integration.localhost:5556/auth/healthz | grep -q '^ok$'
+
 # A person can review and end their own sessions; an administrator's view of
 # someone else stays behind the administration credential.
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/api/v1/me/sessions | grep -q '"schema_version":"shauth.my-sessions/v1"'

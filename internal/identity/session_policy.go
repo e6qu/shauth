@@ -15,6 +15,10 @@ type SessionPolicy struct {
 	AccessTokenLifetime     time.Duration
 	IDTokenLifetime         time.Duration
 	RefreshTokenLifetime    time.Duration
+	// UpdatedAt is when the stored policy last changed. It answers the
+	// first question during an incident about session lifetimes: whether
+	// anybody moved them, and when.
+	UpdatedAt time.Time
 }
 
 func DefaultSessionPolicy() SessionPolicy {

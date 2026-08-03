@@ -257,6 +257,9 @@ type sessionPolicyRecord struct {
 	AccessTokenMinutes   int64 `json:"access_token_minutes"`
 	IDTokenMinutes       int64 `json:"id_token_minutes"`
 	RefreshTokenHours    int64 `json:"refresh_token_hours"`
+	// UpdatedAt reports when the stored policy last changed. It is a read
+	// result, so a request that supplies it is ignored rather than obeyed.
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
 func newSessionPolicyRecord(policy identity.SessionPolicy) sessionPolicyRecord {
@@ -267,6 +270,7 @@ func newSessionPolicyRecord(policy identity.SessionPolicy) sessionPolicyRecord {
 		AccessTokenMinutes:   int64(policy.AccessTokenLifetime / time.Minute),
 		IDTokenMinutes:       int64(policy.IDTokenLifetime / time.Minute),
 		RefreshTokenHours:    int64(policy.RefreshTokenLifetime / time.Hour),
+		UpdatedAt:            policy.UpdatedAt,
 	}
 }
 

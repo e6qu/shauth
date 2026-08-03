@@ -53,6 +53,16 @@ func NewStore(pool *pgxpool.Pool, clientID, issuer, secret string, tombstoneLife
 	return &Store{pool: pool, clientID: clientID, issuer: issuer, aead: aead, tombstoneLifetime: tombstoneLifetime}, nil
 }
 
+// Ping reports whether the session store can still be reached. Every request
+// this gateway admits or refuses depends on it, so it is the one dependency
+// the health endpoint has to prove.
+func (store *Store) Ping(ctx context.Context) error {
+	if store == nil || store.pool == nil {
+		return fmt.Errorf("gateway session store is not configured")
+	}
+	return store.pool.Ping(ctx)
+}
+
 func (store *Store) Create(ctx context.Context, session Session, browserToken []byte, now time.Time) error {
 	nonce := make([]byte, store.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
