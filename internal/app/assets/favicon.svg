@@ -1,12 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Shauth">
+<!-- The same mark the site header draws: a shield for the trust boundary and a
+     keyhole for the credential. Keeping one artwork means the browser tab, the
+     header and the application catalog cannot drift apart. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Shauth">
   <title>Shauth</title>
   <defs>
     <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#6d28d9"/>
+      <stop offset="0" stop-color="#7c3aed"/>
       <stop offset="1" stop-color="#a21caf"/>
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="14" fill="url(#mark)"/>
-  <path d="M43 21c-4-5-16-5-19 2c-3 7 7 9 11 10c8 2 11 6 8 11c-3 5-15 5-19 0"
-        fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect width="32" height="32" rx="9" fill="url(#mark)"/>
+  <path d="M16 6.5 24 9.7v6.6c0 5-3.3 9.3-8 10.7-4.7-1.4-8-5.7-8-10.7V9.7l8-3.2Z"
+        fill="none" stroke="#fff" stroke-width="2.1" stroke-linejoin="round"/>
+  <circle cx="16" cy="14.4" r="2.5" fill="#fff"/>
+  <path d="M16 16.9v3.6" stroke="#fff" stroke-width="2.1" stroke-linecap="round"/>
 </svg>

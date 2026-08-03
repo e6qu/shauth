@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -308,5 +309,73 @@ func TestClientIPResolvesThroughATrustedProxyOnly(t *testing.T) {
 				t.Fatalf("clientIP = %v, want %s", got, expectation.want)
 			}
 		})
+	}
+}
+
+// TestIconsAreDecorativeAndInheritColour locks the two properties that make a
+// shared icon set safe to use anywhere: it is never announced twice beside
+// the text it accompanies, and it takes the colour of whatever it sits in.
+func TestIconsAreDecorativeAndInheritColour(t *testing.T) {
+	t.Parallel()
+	icons := regexp.MustCompile(`\{\{define "(icon-[a-z]+)"\}\}(.*?)\{\{end\}\}`)
+	matches := icons.FindAllStringSubmatch(pageTemplates, -1)
+	if len(matches) < 10 {
+		t.Fatalf("found %d icons, want the whole set", len(matches))
+	}
+	for _, match := range matches {
+		name, markup := match[1], match[2]
+		if !strings.Contains(markup, `aria-hidden="true"`) {
+			t.Errorf("%s is announced to a screen reader beside the text it decorates", name)
+		}
+		if !strings.Contains(markup, `focusable="false"`) {
+			t.Errorf("%s is reachable by keyboard, which stops on a decoration", name)
+		}
+		if !strings.Contains(markup, "viewBox=") {
+			t.Errorf("%s has no viewBox, so it cannot scale with its text", name)
+		}
+		switch name {
+		// The Microsoft mark may not be recoloured, and the brand mark
+		// carries its own gradient; every other icon takes its colour
+		// from the button, link, or chip it sits in.
+		case "icon-microsoft", "icon-brand":
+		default:
+			if !strings.Contains(markup, "currentColor") {
+				t.Errorf("%s does not inherit currentColor", name)
+			}
+			if strings.Contains(markup, "#") {
+				t.Errorf("%s hardcodes a colour: %s", name, markup)
+			}
+		}
+	}
+}
+
+// TestSignInOffersEachProvidersOwnMark is the request this set exists for: a
+// person recognises "Continue with GitHub" by the Octocat, not by a lozenge.
+func TestSignInOffersEachProvidersOwnMark(t *testing.T) {
+	t.Parallel()
+	pages, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered bytes.Buffer
+	if err := pages.ExecuteTemplate(&rendered, "login", map[string]any{
+		"Title": "Sign in", "EntraEnabled": true, "Next": "/", "Revision": "abc", "StartedAt": time.Now(),
+	}); err != nil {
+		t.Fatalf("render the sign-in page: %v", err)
+	}
+	page := rendered.String()
+	// The Octocat's own path data, so a placeholder cannot pass for it.
+	if !strings.Contains(page, "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59") {
+		t.Fatal("the GitHub button does not carry the GitHub mark")
+	}
+	for _, colour := range []string{"#f25022", "#7fba00", "#00a4ef", "#ffb900"} {
+		if !strings.Contains(page, colour) {
+			t.Fatalf("the Microsoft button is missing %s of its four brand colours", colour)
+		}
+	}
+	for _, glyph := range []string{"◆", "◇"} {
+		if strings.Contains(page, glyph) {
+			t.Fatalf("the sign-in page still shows the %q placeholder", glyph)
+		}
 	}
 }

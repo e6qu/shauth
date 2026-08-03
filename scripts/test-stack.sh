@@ -630,6 +630,45 @@ fi
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" http://localhost:8080/api/v1/metrics/requests)" = 401 ]
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Busiest routes'
 
+# What this instance reported is readable without opening a container. The
+# buffer mirrors the container stream, so a line that never reached standard
+# error is a line the endpoint invented.
+service_logs=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/logs?limit=500')
+printf '%s' "$service_logs" | grep -q '"schema_version":"shauth.logs/v1"'
+printf '%s' "$service_logs" | grep -q '"level":"info"'
+printf '%s' "$service_logs" | grep -q 'shauth listening on'
+compose logs --no-color shauth | grep -q 'shauth listening on'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/logs)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/logs?level=shouting')" = 400 ]
+# A credential must never be readable through the log surface.
+if printf '%s' "$service_logs" | grep -qF "$SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"; then
+	echo 'the service log contains credential material' >&2
+	exit 1
+fi
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/logs | grep -q 'Service log'
+
+# Sessions are listable across accounts and endable by token, not only one
+# account at a time from a browser.
+all_sessions=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/sessions?state=active')
+printf '%s' "$all_sessions" | grep -q '"schema_version":"shauth.sessions/v1"'
+printf '%s' "$all_sessions" | grep -q '"username":"admin"'
+printf '%s' "$all_sessions" | grep -q '"active":true'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/sessions?state=nonsense')" = 400 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/sessions)" = 401 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/sessions | grep -q 'Signed-in sessions'
+
+# The monitoring page reports every dependency the deep check knows, not two
+# of them, and reads the durable counts.
+monitoring_page=$(curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring)
+printf '%s' "$monitoring_page" | grep -q 'Dependencies'
+printf '%s' "$monitoring_page" | grep -q 'managed_app_registration'
+printf '%s' "$monitoring_page" | grep -q 'Connected apps'
+
+# Sign-in offers each provider's own mark rather than a geometric stand-in.
+login_page=$(curl --fail --silent --show-error http://localhost:8080/login)
+printf '%s' "$login_page" | grep -q 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59'
+printf '%s' "$login_page" | grep -q 'aria-hidden="true" focusable="false"'
+
 # The session policy reports when it last changed, so an operator can tell a
 # policy that was moved from one that never was.
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/session-policy | grep -q '"updated_at":'
@@ -878,10 +917,15 @@ if [ "$attempt" -eq 30 ] || [ "$remaining_developer_mappings" != 0 ]; then
   exit 1
 fi
 curl --fail --silent --show-error http://localhost:4445/admin/clients/gateway-integration | grep -q '"backchannel_logout_uri":"http://gateway-integration.localhost:5556/auth/backchannel-logout"'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Ory Hydra authorization provider'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Active browser sessions'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'PostgreSQL session store'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'No infrastructure source configured'
+# The page names every dependency the deep check knows, not the two it used
+# to summarise, so these assert the store and the provider by the names both
+# the page and the contract use for them.
+monitoring_after_restart=$(curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring)
+printf '%s' "$monitoring_after_restart" | grep -q 'hydra_public'
+printf '%s' "$monitoring_after_restart" | grep -q 'hydra_admin'
+printf '%s' "$monitoring_after_restart" | grep -q 'postgresql'
+printf '%s' "$monitoring_after_restart" | grep -q 'Active browser sessions'
+printf '%s' "$monitoring_after_restart" | grep -q 'No infrastructure source configured'
 attempt=0
 while [ "$attempt" -lt 30 ]; do
   if curl --fail --silent http://localhost:8080/.well-known/openid-configuration 2>/dev/null | grep -q 'issuer'; then

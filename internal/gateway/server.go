@@ -3,6 +3,8 @@
 package gateway
 
 import (
+	"github.com/e6qu/shauth/internal/observe"
+
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -14,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime"
 	"net/http"
 	"net/http/httputil"
@@ -125,7 +126,7 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 		}
 	}
 	proxy.ErrorHandler = func(response http.ResponseWriter, request *http.Request, err error) {
-		log.Printf("OIDC gateway upstream %s failed: %v", request.URL.Path, err)
+		observe.Errorf("OIDC gateway upstream %s failed: %v", request.URL.Path, err)
 		http.Error(response, "Upstream service unavailable", http.StatusBadGateway)
 	}
 	tokenEndpoint := provider.Endpoint()
@@ -185,7 +186,7 @@ func (server *Server) healthz(response http.ResponseWriter, request *http.Reques
 	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Second)
 	defer cancel()
 	if err := server.store.Ping(ctx); err != nil {
-		log.Printf("gateway health check: %v", err)
+		observe.Errorf("gateway health check: %v", err)
 		response.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = response.Write([]byte("session store unavailable\n"))
 		return
@@ -322,7 +323,7 @@ func (server *Server) validation(response http.ResponseWriter, request *http.Req
 		Role     string
 		Release  string
 	}{session.Username, session.Email, session.Role, server.config.ReleaseRevision}); err != nil {
-		log.Printf("render OIDC gateway validation page: %v", err)
+		observe.Errorf("render OIDC gateway validation page: %v", err)
 	}
 }
 
@@ -554,7 +555,7 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 	response.Header().Set("Cache-Control", "no-store")
 	response.WriteHeader(status)
 	if err := json.NewEncoder(response).Encode(value); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-		log.Printf("encode OIDC gateway response: %v", err)
+		observe.Errorf("encode OIDC gateway response: %v", err)
 	}
 }
 

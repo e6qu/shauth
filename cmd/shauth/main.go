@@ -7,15 +7,21 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/e6qu/shauth/internal/app"
 	"github.com/e6qu/shauth/internal/config"
 	"github.com/e6qu/shauth/internal/identity"
+	"github.com/e6qu/shauth/internal/observe"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
+	// Installed before anything else can log, so the buffer an operator
+	// reads holds the startup lines too. Standard error still receives
+	// every line, so nothing depends on this to see the logs.
+	observe.Capture(app.ServiceLog(), os.Stderr)
 	cfg, err := config.FromEnvironment()
 	if err != nil {
 		log.Fatal(err)
@@ -46,7 +52,7 @@ func main() {
 			err := store.ExpireAbandonedAppValidation(ctx, observedAt)
 			cancel()
 			if err != nil {
-				log.Printf("expire abandoned application validation: %v", err)
+				observe.Errorf("expire abandoned application validation: %v", err)
 			}
 		}
 	}()
@@ -63,10 +69,10 @@ func main() {
 			_, cleanupErr := store.DeleteCompletedLogoutCorrelationGrants(ctx, observedAt.Add(-identity.LogoutCorrelationRetention), 1000)
 			cancel()
 			if recoveryErr != nil {
-				log.Printf("recover abandoned provider logout: %v", recoveryErr)
+				observe.Errorf("recover abandoned provider logout: %v", recoveryErr)
 			}
 			if cleanupErr != nil {
-				log.Printf("delete completed provider logout evidence: %v", cleanupErr)
+				observe.Errorf("delete completed provider logout evidence: %v", cleanupErr)
 			}
 		}
 	}()
@@ -80,7 +86,7 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    32 * 1024,
 	}
-	log.Printf("shauth listening on %s", cfg.Address)
+	observe.Infof("shauth listening on %s", cfg.Address)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

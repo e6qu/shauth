@@ -52,7 +52,7 @@ func TestApplicationValidationComponentReportsBothDirections(t *testing.T) {
 	if err := pages.ExecuteTemplate(&rendered, "app-validation", view); err != nil {
 		t.Fatalf("render validation component: %v", err)
 	}
-	for _, expected := range []string{"🟢 Passed", "🔴 Failed", "From Shauth", "From app", "Run both checks again", "logout returned to the identity service"} {
+	for _, expected := range []string{"validation-passed", "> Passed</span>", "validation-failed", "> Failed</span>", "From Shauth", "From app", "Run both checks again", "logout returned to the identity service"} {
 		if !strings.Contains(rendered.String(), expected) {
 			t.Fatalf("validation component omitted %q: %s", expected, rendered.String())
 		}
@@ -78,7 +78,7 @@ func TestApplicationValidationComponentPollsOnlyOngoingRuns(t *testing.T) {
 	if err := pages.ExecuteTemplate(&rendered, "app-validation", view); err != nil {
 		t.Fatalf("render validation component: %v", err)
 	}
-	for _, expected := range []string{"🟡 Ongoing", `hx-trigger="every 5s"`, `aria-label="Bleephub sign-in and sign-out validation"`, `aria-live="polite"`, `aria-busy="true"`} {
+	for _, expected := range []string{"validation-running", "> Ongoing</span>", `hx-trigger="every 5s"`, `aria-label="Bleephub sign-in and sign-out validation"`, `aria-live="polite"`, `aria-busy="true"`} {
 		if !strings.Contains(rendered.String(), expected) {
 			t.Fatalf("ongoing validation component omitted %q: %s", expected, rendered.String())
 		}

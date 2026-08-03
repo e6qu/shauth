@@ -3,6 +3,10 @@ FROM golang:1.26.5-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+# The leveled logging helpers, so the validator's container stream carries the
+# same severities as every other binary. The package is standard library only,
+# so this keeps the image as small as the narrow copy it joins.
+COPY internal/observe ./internal/observe
 COPY cmd/shauth-validator ./cmd/shauth-validator
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shauth-validator ./cmd/shauth-validator
 

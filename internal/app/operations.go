@@ -17,7 +17,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/monitoring"
+	"github.com/e6qu/shauth/internal/observe"
 )
 
 // actor identifies who requested an operation. Browser callers supply the
@@ -65,7 +65,7 @@ func (s *Server) record(ctx context.Context, requester actor, eventType, subject
 		SessionID: requester.SessionID, RemoteAddress: requester.Address, Details: details,
 	}
 	if err := s.store.RecordAuditEvent(ctx, entry, time.Now()); err != nil {
-		log.Printf("record audit event %s: %v", eventType, err)
+		observe.Errorf("record audit event %s: %v", eventType, err)
 	}
 }
 
@@ -105,7 +105,7 @@ func describeOperationFailure(action string, err error) (int, string) {
 	case errors.As(err, &invalid):
 		return http.StatusBadRequest, invalid.Error()
 	case errors.As(err, &dependency):
-		log.Printf("%s: %v", action, err)
+		observe.Errorf("%s: %v", action, err)
 		return http.StatusBadGateway, dependency.Error()
 	case errors.Is(err, identity.ErrAlreadyExists):
 		return http.StatusConflict, action + " already exists"
@@ -119,7 +119,7 @@ func describeOperationFailure(action string, err error) (int, string) {
 		errors.Is(err, identity.ErrGitHubRoleMappingNotFound), errors.Is(err, errHydraClientNotFound):
 		return http.StatusNotFound, err.Error()
 	default:
-		log.Printf("%s: %v", action, err)
+		observe.Errorf("%s: %v", action, err)
 		return http.StatusInternalServerError, "could not complete the request"
 	}
 }
@@ -207,7 +207,7 @@ func (s *Server) createInvitation(ctx context.Context, email, role string, reque
 	link := s.config.PublicURL.ResolveReference(&url.URL{Path: "/accept-invitation", RawQuery: "token=" + url.QueryEscape(raw)}).String()
 	if err := s.mailer.SendInvitation(ctx, invitation.Email, link); err != nil {
 		if revokeErr := s.store.RevokeInvitation(ctx, invitation.ID, time.Now()); revokeErr != nil {
-			log.Printf("revoke unsent invitation %s: %v", invitation.ID, revokeErr)
+			observe.Errorf("revoke unsent invitation %s: %v", invitation.ID, revokeErr)
 		}
 		return identity.Invitation{}, dependencyFailure("the invitation email could not be sent, so the invitation was withdrawn", err)
 	}
@@ -323,14 +323,14 @@ func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyR
 	}
 	if err := s.applyHydraSessionPolicy(ctx, policy); err != nil {
 		if rollbackErr := s.applyHydraSessionPolicy(ctx, previous); rollbackErr != nil {
-			log.Printf("restore Ory Hydra session policy after client update failed: %v", rollbackErr)
+			observe.Errorf("restore Ory Hydra session policy after client update failed: %v", rollbackErr)
 		}
 		return sessionPolicyRecord{}, dependencyFailure("the OAuth client lifetimes could not be updated, so the previous policy was restored", err)
 	}
-	changedAt := time.Now().UTC()
-	if err := s.store.UpdateSessionPolicy(ctx, policy, changedAt); err != nil {
+	changedAt, err := s.store.UpdateSessionPolicy(ctx, policy)
+	if err != nil {
 		if rollbackErr := s.applyHydraSessionPolicy(ctx, previous); rollbackErr != nil {
-			log.Printf("restore Ory Hydra session policy after PostgreSQL update failed: %v", rollbackErr)
+			observe.Errorf("restore Ory Hydra session policy after PostgreSQL update failed: %v", rollbackErr)
 		}
 		return sessionPolicyRecord{}, err
 	}
@@ -544,7 +544,7 @@ func (s *Server) monitoringSnapshot(ctx context.Context) monitoringSnapshot {
 	cancel()
 	if snapshot.PostgreSQLHealthy {
 		if counted, err := s.store.CountActiveSessions(ctx, time.Now()); err != nil {
-			log.Printf("count active sessions: %v", err)
+			observe.Errorf("count active sessions: %v", err)
 		} else {
 			snapshot.ActiveSessions = &counted
 		}

@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/monitoring"
+	"github.com/e6qu/shauth/internal/observe"
 	"github.com/e6qu/shauth/internal/version"
 )
 
@@ -226,13 +226,13 @@ func (s *Server) userSessionsAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("read user %s: %v", userID, err)
+		observe.Errorf("read user %s: %v", userID, err)
 		writeAdminAPIError(w, http.StatusInternalServerError, "could not read user")
 		return
 	}
 	sessions, err := s.store.ListSessions(r.Context(), userID)
 	if err != nil {
-		log.Printf("list sessions for user %s: %v", userID, err)
+		observe.Errorf("list sessions for user %s: %v", userID, err)
 		writeAdminAPIError(w, http.StatusInternalServerError, "could not list sessions")
 		return
 	}
@@ -317,7 +317,7 @@ func (s *Server) sessionPolicyAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	policy, err := s.store.SessionPolicy(r.Context())
 	if err != nil {
-		log.Printf("read session policy: %v", err)
+		observe.Errorf("read session policy: %v", err)
 		writeAdminAPIError(w, http.StatusInternalServerError, "could not load session policy")
 		return
 	}
@@ -361,7 +361,7 @@ func (s *Server) oidcClientsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	clients, err := s.hydraClients(r.Context())
 	if err != nil {
-		log.Printf("list OAuth clients: %v", err)
+		observe.Errorf("list OAuth clients: %v", err)
 		writeAdminAPIError(w, http.StatusBadGateway, "could not query OAuth clients")
 		return
 	}
@@ -459,7 +459,7 @@ func (s *Server) githubMappingsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	mappings, err := s.store.ListGitHubRoleMappings(r.Context())
 	if err != nil {
-		log.Printf("list GitHub role mappings: %v", err)
+		observe.Errorf("list GitHub role mappings: %v", err)
 		writeAdminAPIError(w, http.StatusInternalServerError, "could not query GitHub role mappings")
 		return
 	}
@@ -563,7 +563,7 @@ func (s *Server) monitoringAPI(w http.ResponseWriter, r *http.Request) {
 	var active *int
 	if postgresHealthy {
 		if counted, err := s.store.CountActiveSessions(r.Context(), time.Now()); err != nil {
-			log.Printf("count active sessions: %v", err)
+			observe.Errorf("count active sessions: %v", err)
 		} else {
 			active = &counted
 		}

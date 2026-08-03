@@ -7,13 +7,13 @@
 package app
 
 import (
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/e6qu/shauth/internal/identity"
+	"github.com/e6qu/shauth/internal/observe"
 	"github.com/e6qu/shauth/internal/version"
 )
 
@@ -426,7 +426,7 @@ func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	events, total, err := s.store.ListAuditEvents(r.Context(), filter, page)
 	if err != nil {
-		log.Printf("list audit events: %v", err)
+		observe.Errorf("list audit events: %v", err)
 		s.failPage(w, r, http.StatusInternalServerError, "The audit record could not be loaded.")
 		return
 	}
