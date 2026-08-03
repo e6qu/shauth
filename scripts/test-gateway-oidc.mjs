@@ -32,10 +32,17 @@ if (validatorCoordinationDirectory) {
 primary.resetIdentity();
 secondary.resetIdentity();
 tertiary.resetIdentity();
+// Logout tokens already accepted before this run started. Deliveries are
+// counted against these rather than against the size of the table.
 const logoutTokenBaselines = {
-  [primaryDatabase]: countLogoutTokens(primaryDatabase),
-  [secondaryDatabase]: countLogoutTokens(secondaryDatabase),
-  [tertiaryDatabase]: countLogoutTokens(tertiaryDatabase),
+  [primaryDatabase]: logoutTokenIDs(primaryDatabase),
+  [secondaryDatabase]: logoutTokenIDs(secondaryDatabase),
+  [tertiaryDatabase]: logoutTokenIDs(tertiaryDatabase),
+};
+const deliveredLogoutTokens = {
+  [primaryDatabase]: new Set(),
+  [secondaryDatabase]: new Set(),
+  [tertiaryDatabase]: new Set(),
 };
 
 const browser = await chromium.launch({ headless: true });
@@ -223,9 +230,9 @@ try {
   await page.getByRole("heading", { name: "You are signed out" }).waitFor();
   providerSignInControl = page.getByRole("link", { name: "Sign in to Shauth" });
   assert.equal(await providerSignInControl.getAttribute("href"), "/login");
-  await waitForLogoutTokenCount(primaryDatabase, logoutTokenBaselines[primaryDatabase] + 3);
-  await waitForLogoutTokenCount(secondaryDatabase, logoutTokenBaselines[secondaryDatabase]);
-  await waitForLogoutTokenCount(tertiaryDatabase, logoutTokenBaselines[tertiaryDatabase] + 1);
+  await waitForLogoutTokenDeliveries(primaryDatabase, 3);
+  await waitForLogoutTokenDeliveries(secondaryDatabase, 0);
+  await waitForLogoutTokenDeliveries(tertiaryDatabase, 1);
   await waitForSessionStatus(context, "http://gateway-integration.localhost:5556", 401);
   await waitForSessionStatus(context, "http://gateway-secondary.localhost:5558", 401);
   await waitForSessionStatus(context, "http://gateway-tertiary.localhost:5560", 401);
@@ -271,9 +278,9 @@ try {
   await replayPage.getByRole("link", { name: "Sign in to Shauth" }).waitFor();
   await replayPage.close();
   await assertSession(context, "http://gateway-integration.localhost:5556", 401);
-  await waitForLogoutTokenCount(primaryDatabase, logoutTokenBaselines[primaryDatabase] + 4);
-  await waitForLogoutTokenCount(secondaryDatabase, logoutTokenBaselines[secondaryDatabase]);
-  await waitForLogoutTokenCount(tertiaryDatabase, logoutTokenBaselines[tertiaryDatabase] + 2);
+  await waitForLogoutTokenDeliveries(primaryDatabase, 4);
+  await waitForLogoutTokenDeliveries(secondaryDatabase, 0);
+  await waitForLogoutTokenDeliveries(tertiaryDatabase, 2);
   await waitForSessionStatus(context, "http://gateway-secondary.localhost:5558", 401);
   await waitForSessionStatus(context, "http://gateway-tertiary.localhost:5560", 401);
   assert.equal(queryGateway(primaryDatabase, "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL"), "0");
@@ -654,18 +661,32 @@ function queryShauth(query) {
   return queryGateway("shauth", query);
 }
 
-async function waitForLogoutTokenCount(database, expected) {
-  let count = 0;
+async function waitForLogoutTokenDeliveries(database, expected) {
+  let delivered = 0;
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    count = countLogoutTokens(database);
-    if (count === expected) return;
+    delivered = countLogoutTokenDeliveries(database);
+    if (delivered === expected) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  assert.equal(count, expected, `${database} must validate every provider logout token`);
+  assert.equal(delivered, expected, `${database} must validate every provider logout token`);
 }
 
-function countLogoutTokens(database) {
-  return Number(queryGateway(database, "SELECT count(*) FROM oidc_gateway_logout_tokens"));
+// The replay cache drops an entry once that logout token has expired, so the
+// size of the table falls as well as rises and is not a count of deliveries:
+// a sweep during one of these waits silently cancels out a real delivery.
+// Remembering the identifiers that were not there at the baseline is a count
+// of deliveries. An eviction cannot erase one already observed, and a
+// replayed identifier still cannot be counted twice.
+function countLogoutTokenDeliveries(database) {
+  for (const tokenID of logoutTokenIDs(database)) {
+    if (!logoutTokenBaselines[database].has(tokenID)) deliveredLogoutTokens[database].add(tokenID);
+  }
+  return deliveredLogoutTokens[database].size;
+}
+
+function logoutTokenIDs(database) {
+  const rows = queryGateway(database, "SELECT token_id FROM oidc_gateway_logout_tokens");
+  return new Set(rows.split("\n").map((line) => line.trim()).filter(Boolean));
 }
 
 function closeServer(server) {
