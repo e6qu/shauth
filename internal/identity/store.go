@@ -1381,15 +1381,40 @@ func (s *Store) insertUser(ctx context.Context, id, username, email string, emai
 	return user, nil
 }
 
-func (s *Store) AuthenticatePassword(ctx context.Context, username, password string) (User, error) {
+// Reasons a sign-in was refused. The person is always told the same thing, so
+// an attacker learns nothing from the response; the reason exists so an
+// operator reading the audit log can tell a disabled account from a typo.
+const (
+	SignInReasonUnknownUser = "unknown username"
+	SignInReasonDisabled    = "account is disabled"
+	SignInReasonNoPassword  = "account has no password credential"
+	SignInReasonWrongSecret = "password did not match"
+	SignInReasonUnavailable = "the account store could not be read"
+)
+
+// AuthenticatePassword verifies a local credential. On refusal it returns one
+// opaque error for the caller to show and a reason for the audit record; the
+// two must not be conflated.
+func (s *Store) AuthenticatePassword(ctx context.Context, username, password string) (User, string, error) {
 	var user User
 	var hash []byte
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at,password_hash FROM users WHERE username=$1 AND is_validation=FALSE`, strings.TrimSpace(username)).
-		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &hash)
-	if err != nil || user.DisabledAt != nil || len(hash) == 0 || bcrypt.CompareHashAndPassword(hash, []byte(password)) != nil {
-		return User{}, fmt.Errorf("invalid username or password")
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at,password_hash FROM users WHERE username=$1 AND is_validation=FALSE`, strings.TrimSpace(username)).
+		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt, &hash)
+	refused := fmt.Errorf("invalid username or password")
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return User{}, SignInReasonUnknownUser, refused
+	case err != nil:
+		return User{}, SignInReasonUnavailable, refused
+	case user.DisabledAt != nil:
+		return User{}, SignInReasonDisabled, refused
+	case len(hash) == 0:
+		return User{}, SignInReasonNoPassword, refused
+	case bcrypt.CompareHashAndPassword(hash, []byte(password)) != nil:
+		return User{}, SignInReasonWrongSecret, refused
 	}
-	return user, nil
+	user.FederatedIdentity = federatedIdentityLabel(user.IdentitySource, user.GitHubLogin)
+	return user, "", nil
 }
 
 func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, login, email string, role Role) (User, error) {

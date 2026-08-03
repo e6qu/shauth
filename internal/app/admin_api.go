@@ -338,7 +338,7 @@ func (s *Server) updateSessionPolicyAPI(w http.ResponseWriter, r *http.Request) 
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid session policy request")
 		return
 	}
-	policy, err := s.updateSessionPolicy(r.Context(), request)
+	policy, err := s.updateSessionPolicy(r.Context(), request, tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "update session policy", err)
 		return
@@ -406,7 +406,7 @@ func (s *Server) createOIDCClientAPI(w http.ResponseWriter, r *http.Request) {
 			input.PostLogoutRedirectURIs = append(input.PostLogoutRedirectURIs, uri)
 		}
 	}
-	client, err := s.createOIDCClient(r.Context(), input)
+	client, err := s.createOIDCClient(r.Context(), input, tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "create OAuth client", err)
 		return
@@ -423,7 +423,7 @@ func (s *Server) deleteOIDCClientAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := r.PathValue("id")
-	if err := s.deleteOIDCClient(r.Context(), clientID); err != nil {
+	if err := s.deleteOIDCClient(r.Context(), clientID, tokenActor(r)); err != nil {
 		writeOperationFailure(w, "delete OAuth client", err)
 		return
 	}
@@ -486,7 +486,7 @@ func (s *Server) createGitHubMappingAPI(w http.ResponseWriter, r *http.Request) 
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid GitHub role mapping request")
 		return
 	}
-	mapping, err := s.createGitHubMapping(r.Context(), request.Kind, request.Target, request.Role)
+	mapping, err := s.createGitHubMapping(r.Context(), request.Kind, request.Target, request.Role, tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "create GitHub role mapping", err)
 		return
@@ -503,7 +503,7 @@ func (s *Server) deleteGitHubMappingAPI(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	mappingID := r.PathValue("id")
-	if err := s.deleteGitHubMapping(r.Context(), mappingID); err != nil {
+	if err := s.deleteGitHubMapping(r.Context(), mappingID, tokenActor(r)); err != nil {
 		writeOperationFailure(w, "delete GitHub role mapping", err)
 		return
 	}
@@ -602,7 +602,7 @@ func (s *Server) createUserAPI(w http.ResponseWriter, r *http.Request) {
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid user request")
 		return
 	}
-	user, err := s.createUser(r.Context(), request)
+	user, err := s.createUser(r.Context(), request, tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "create user", err)
 		return
@@ -622,7 +622,7 @@ func (s *Server) disableUserAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAPIWriteToken(w, r) {
 		return
 	}
-	user, err := s.disableUser(r.Context(), r.PathValue("id"), actor{})
+	user, err := s.disableUser(r.Context(), r.PathValue("id"), tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "disable account", err)
 		return
@@ -640,7 +640,7 @@ func (s *Server) enableUserAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAPIWriteToken(w, r) {
 		return
 	}
-	user, err := s.enableUser(r.Context(), r.PathValue("id"))
+	user, err := s.enableUser(r.Context(), r.PathValue("id"), tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "enable account", err)
 		return
@@ -708,7 +708,7 @@ func (s *Server) revokeInvitationAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	invitationID := r.PathValue("id")
-	if err := s.revokeInvitation(r.Context(), invitationID); err != nil {
+	if err := s.revokeInvitation(r.Context(), invitationID, tokenActor(r)); err != nil {
 		writeOperationFailure(w, "revoke invitation", err)
 		return
 	}
@@ -737,7 +737,7 @@ func (s *Server) createInvitationAPI(w http.ResponseWriter, r *http.Request) {
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid invitation request")
 		return
 	}
-	invitation, err := s.createInvitation(r.Context(), request.Email, request.Role, actor{})
+	invitation, err := s.createInvitation(r.Context(), request.Email, request.Role, tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "create invitation", err)
 		return
@@ -756,7 +756,7 @@ func (s *Server) revokeSessionAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAPIWriteToken(w, r) {
 		return
 	}
-	revoked, err := s.revokeSession(r.Context(), r.PathValue("id"))
+	revoked, err := s.revokeSession(r.Context(), r.PathValue("id"), tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "revoke session", err)
 		return
@@ -831,7 +831,7 @@ func (s *Server) createAppAPI(w http.ResponseWriter, r *http.Request) {
 		SignedOutURL:    strings.TrimSpace(request.SignedOutURL),
 		ReleaseRevision: strings.TrimSpace(request.ReleaseRevision),
 	}
-	created, err := s.createApp(r.Context(), app)
+	created, err := s.createApp(r.Context(), app, tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "create managed app", err)
 		return
@@ -848,7 +848,7 @@ func (s *Server) deleteAppAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slug := r.PathValue("slug")
-	if err := s.deleteApp(r.Context(), identity.ManagedAppRef{Slug: slug}); err != nil {
+	if err := s.deleteApp(r.Context(), identity.ManagedAppRef{Slug: slug}, tokenActor(r)); err != nil {
 		writeOperationFailure(w, "delete managed app", err)
 		return
 	}

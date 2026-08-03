@@ -280,3 +280,33 @@ func TestVersionReportsAShortRevisionAndStartTime(t *testing.T) {
 		t.Fatalf("start time = %v, want a UTC instant", version.StartedAt())
 	}
 }
+
+// Shauth is reached through a gateway, so the peer address is the gateway.
+// The address recorded against a session must be the person's, and must not
+// be choosable by a caller that reaches the service directly.
+func TestClientIPResolvesThroughATrustedProxyOnly(t *testing.T) {
+	request := func(remote, forwarded string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = remote
+		if forwarded != "" {
+			r.Header.Set("X-Forwarded-For", forwarded)
+		}
+		return r
+	}
+	for name, expectation := range map[string]struct {
+		remote, forwarded, want string
+	}{
+		"private peer uses the nearest forwarded entry": {"10.0.1.5:44321", "203.0.113.9", "203.0.113.9"},
+		"spoofed leftmost entry is ignored":             {"10.0.1.5:44321", "198.51.100.7, 203.0.113.9", "203.0.113.9"},
+		"private peer without a header stays the peer":  {"10.0.1.5:44321", "", "10.0.1.5"},
+		"public peer ignores a forwarded header":        {"203.0.113.4:44321", "198.51.100.7", "203.0.113.4"},
+		"garbage forwarded entry falls back":            {"10.0.1.5:44321", "not-an-address", "10.0.1.5"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := clientIP(request(expectation.remote, expectation.forwarded))
+			if got == nil || got.String() != expectation.want {
+				t.Fatalf("clientIP = %v, want %s", got, expectation.want)
+			}
+		})
+	}
+}

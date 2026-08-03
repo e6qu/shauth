@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -32,9 +33,37 @@ import (
 // It is durable state -- it becomes an invitation's inviter and a validation
 // run's requester -- so it is an explicit input and is never recovered from
 // a request inside an operation.
-type actor struct{ UserID string }
+type actor struct {
+	UserID    string
+	SessionID string
+	Address   net.IP
+}
 
 func (a actor) isSelf(userID string) bool { return a.UserID != "" && a.UserID == userID }
+
+// tokenActor describes a token-authorized caller. Bearer credentials are
+// shared and opaque, so no person can be named; the address the call came
+// from is recorded instead, which is what an operator has to work with.
+func tokenActor(r *http.Request) actor { return actor{Address: clientIP(r)} }
+
+// browserActor describes the signed-in administrator performing an action,
+// including the session and address they acted from.
+func browserActor(r *http.Request, user identity.User, session identity.Session) actor {
+	return actor{UserID: user.ID, SessionID: session.ID, Address: clientIP(r)}
+}
+
+// record appends one audit event. A failure to record is logged and never
+// fails the operation: losing the record is bad, but refusing a legitimate
+// administrative action because a log write failed is worse.
+func (s *Server) record(ctx context.Context, requester actor, eventType, subjectUserID string, details map[string]any) {
+	entry := identity.AuditEntry{
+		EventType: eventType, ActorUserID: requester.UserID, SubjectUserID: subjectUserID,
+		SessionID: requester.SessionID, RemoteAddress: requester.Address, Details: details,
+	}
+	if err := s.store.RecordAuditEvent(ctx, entry, time.Now()); err != nil {
+		log.Printf("record audit event %s: %v", eventType, err)
+	}
+}
 
 var (
 	// errOIDCClientInUse reports that a managed app still depends on the
@@ -102,8 +131,15 @@ func requireUUID(id string, missing error) error {
 }
 
 // createUser registers a local password account.
-func (s *Server) createUser(ctx context.Context, input userCreateRequest) (identity.User, error) {
-	return s.store.CreatePasswordUser(ctx, input.Username, input.Email, input.Password, identity.Role(input.Role))
+func (s *Server) createUser(ctx context.Context, input userCreateRequest, requester actor) (identity.User, error) {
+	user, err := s.store.CreatePasswordUser(ctx, input.Username, input.Email, input.Password, identity.Role(input.Role))
+	if err != nil {
+		return identity.User{}, err
+	}
+	s.record(ctx, requester, identity.AuditAccountCreated, user.ID, map[string]any{
+		"username": user.Username, "email": user.Email, "role": string(user.Role),
+	})
+	return user, nil
 }
 
 // disableUser contains an account: it ends every browser session, revokes the
@@ -128,19 +164,31 @@ func (s *Server) disableUser(ctx context.Context, userID string, requester actor
 	if err := s.revokeHydraSubjectSessions(ctx, userID); err != nil {
 		return identity.User{}, dependencyFailure("the account was disabled and its sessions ended, but OAuth session revocation did not complete", err)
 	}
-	return s.store.UserByID(ctx, userID)
+	user, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		return identity.User{}, err
+	}
+	s.record(ctx, requester, identity.AuditAccountDisabled, userID, map[string]any{
+		"username": user.Username, "revoked_provider_sessions": len(hydraSessionIDs),
+	})
+	return user, nil
 }
 
 // enableUser restores a disabled account. It grants no session; the account
 // holder must authenticate again.
-func (s *Server) enableUser(ctx context.Context, userID string) (identity.User, error) {
+func (s *Server) enableUser(ctx context.Context, userID string, requester actor) (identity.User, error) {
 	if err := requireUUID(userID, identity.ErrUserNotFound); err != nil {
 		return identity.User{}, err
 	}
 	if err := s.store.EnableUser(ctx, userID, time.Now()); err != nil {
 		return identity.User{}, err
 	}
-	return s.store.UserByID(ctx, userID)
+	user, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		return identity.User{}, err
+	}
+	s.record(ctx, requester, identity.AuditAccountEnabled, userID, map[string]any{"username": user.Username})
+	return user, nil
 }
 
 // createInvitation records an invitation and delivers its single-use link by
@@ -159,16 +207,23 @@ func (s *Server) createInvitation(ctx context.Context, email, role string, reque
 		}
 		return identity.Invitation{}, dependencyFailure("the invitation email could not be sent, so the invitation was withdrawn", err)
 	}
+	s.record(ctx, requester, identity.AuditInvitationCreated, "", map[string]any{
+		"invitation_id": invitation.ID, "email": invitation.Email, "role": string(invitation.Role),
+	})
 	return invitation, nil
 }
 
 // revokeInvitation withdraws an unaccepted invitation so a link sent to the
 // wrong address can no longer create an account.
-func (s *Server) revokeInvitation(ctx context.Context, invitationID string) error {
+func (s *Server) revokeInvitation(ctx context.Context, invitationID string, requester actor) error {
 	if err := requireUUID(invitationID, identity.ErrInvitationNotRevocable); err != nil {
 		return err
 	}
-	return s.store.RevokeInvitation(ctx, invitationID, time.Now())
+	if err := s.store.RevokeInvitation(ctx, invitationID, time.Now()); err != nil {
+		return err
+	}
+	s.record(ctx, requester, identity.AuditInvitationRevoked, "", map[string]any{"invitation_id": invitationID})
+	return nil
 }
 
 // revokeSessionResult reports which account a revoked session belonged to, so
@@ -181,7 +236,7 @@ type revokeSessionResult struct {
 
 // revokeSession ends one browser session and the provider sessions
 // correlated with it.
-func (s *Server) revokeSession(ctx context.Context, sessionID string) (revokeSessionResult, error) {
+func (s *Server) revokeSession(ctx context.Context, sessionID string, requester actor) (revokeSessionResult, error) {
 	if err := requireUUID(sessionID, identity.ErrSessionNotFound); err != nil {
 		return revokeSessionResult{}, err
 	}
@@ -201,13 +256,16 @@ func (s *Server) revokeSession(ctx context.Context, sessionID string) (revokeSes
 			return revokeSessionResult{}, dependencyFailure("the session ended, but OAuth session revocation did not complete", err)
 		}
 	}
+	s.record(ctx, requester, identity.AuditSessionRevoked, userID, map[string]any{
+		"session_id": sessionID, "revoked_provider_sessions": len(hydraSessionIDs),
+	})
 	return revokeSessionResult{SessionID: sessionID, UserID: userID}, nil
 }
 
 // revokeUserSessions ends every browser session for one account and the
 // provider sessions correlated with them. The account stays enabled and can
 // sign in again; disableUser is the containing operation.
-func (s *Server) revokeUserSessions(ctx context.Context, userID, email string) (string, error) {
+func (s *Server) revokeUserSessions(ctx context.Context, userID, email string, requester actor) (string, error) {
 	if userID == "" {
 		if email == "" {
 			return "", identity.Invalid("provide a user identifier or an email address")
@@ -227,13 +285,14 @@ func (s *Server) revokeUserSessions(ctx context.Context, userID, email string) (
 	if err := s.revokeHydraSessions(ctx, userID); err != nil {
 		return "", dependencyFailure("the sessions ended, but OAuth session revocation did not complete", err)
 	}
+	s.record(ctx, requester, identity.AuditAccountSessionsEnded, userID, map[string]any{"addressed_by_email": email != ""})
 	return userID, nil
 }
 
 // updateSessionPolicy applies the requested lifetimes to every registered
 // OAuth client and then persists them, restoring the previous policy if
 // either step fails so the provider and PostgreSQL cannot disagree.
-func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyRecord) (sessionPolicyRecord, error) {
+func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyRecord, requester actor) (sessionPolicyRecord, error) {
 	policy, err := request.sessionPolicy()
 	if err != nil {
 		return sessionPolicyRecord{}, err
@@ -254,12 +313,15 @@ func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyR
 		}
 		return sessionPolicyRecord{}, err
 	}
+	s.record(ctx, requester, identity.AuditSessionPolicyUpdated, "", map[string]any{
+		"previous": newSessionPolicyRecord(previous), "applied": newSessionPolicyRecord(policy),
+	})
 	return newSessionPolicyRecord(policy), nil
 }
 
 // createOIDCClient registers a confidential client with the authorization
 // provider and reports the registration as the provider now holds it.
-func (s *Server) createOIDCClient(ctx context.Context, input oidcClientInput) (oidcClient, error) {
+func (s *Server) createOIDCClient(ctx context.Context, input oidcClientInput, requester actor) (oidcClient, error) {
 	if err := input.validate(); err != nil {
 		return oidcClient{}, err
 	}
@@ -271,12 +333,15 @@ func (s *Server) createOIDCClient(ctx context.Context, input oidcClientInput) (o
 	}
 	client := registeredOIDCClient(input)
 	client.Name = input.Name
+	s.record(ctx, requester, identity.AuditOIDCClientCreated, "", map[string]any{
+		"client_id": client.ID, "client_name": client.Name, "redirect_uris": client.RedirectURIs,
+	})
 	return client, nil
 }
 
 // deleteOIDCClient removes a client registration, refusing while a managed
 // app still depends on it.
-func (s *Server) deleteOIDCClient(ctx context.Context, clientID string) error {
+func (s *Server) deleteOIDCClient(ctx context.Context, clientID string, requester actor) error {
 	if !deletableOIDCClientID(clientID) {
 		return identity.Invalid("OAuth client identifier is invalid")
 	}
@@ -293,26 +358,38 @@ func (s *Server) deleteOIDCClient(ctx context.Context, clientID string) error {
 		}
 		return dependencyFailure("the OAuth client could not be deleted", err)
 	}
+	s.record(ctx, requester, identity.AuditOIDCClientDeleted, "", map[string]any{"client_id": clientID})
 	return nil
 }
 
 // createGitHubMapping records a rule granting a role to a GitHub user,
 // organization, or team.
-func (s *Server) createGitHubMapping(ctx context.Context, kind, target, role string) (identity.GitHubRoleMapping, error) {
-	return s.store.CreateGitHubRoleMapping(ctx, kind, target, identity.Role(role))
+func (s *Server) createGitHubMapping(ctx context.Context, kind, target, role string, requester actor) (identity.GitHubRoleMapping, error) {
+	mapping, err := s.store.CreateGitHubRoleMapping(ctx, kind, target, identity.Role(role))
+	if err != nil {
+		return identity.GitHubRoleMapping{}, err
+	}
+	s.record(ctx, requester, identity.AuditGitHubMappingCreated, "", map[string]any{
+		"mapping_id": mapping.ID, "kind": mapping.Kind, "target": mapping.Target, "role": string(mapping.Role),
+	})
+	return mapping, nil
 }
 
-func (s *Server) deleteGitHubMapping(ctx context.Context, mappingID string) error {
+func (s *Server) deleteGitHubMapping(ctx context.Context, mappingID string, requester actor) error {
 	if err := requireUUID(mappingID, identity.ErrGitHubRoleMappingNotFound); err != nil {
 		return err
 	}
-	return s.store.DeleteGitHubRoleMapping(ctx, mappingID)
+	if err := s.store.DeleteGitHubRoleMapping(ctx, mappingID); err != nil {
+		return err
+	}
+	s.record(ctx, requester, identity.AuditGitHubMappingDeleted, "", map[string]any{"mapping_id": mappingID})
+	return nil
 }
 
 // createApp registers a managed app against an already-registered OpenID
 // Connect client, enforcing the one-origin and logout-bridge invariants that
 // make single sign-out reachable for every relying party.
-func (s *Server) createApp(ctx context.Context, app identity.ManagedApp) (identity.ManagedApp, error) {
+func (s *Server) createApp(ctx context.Context, app identity.ManagedApp, requester actor) (identity.ManagedApp, error) {
 	clients, err := s.hydraClients(ctx)
 	if err != nil {
 		return identity.ManagedApp{}, dependencyFailure("the OAuth client could not be verified", err)
@@ -335,16 +412,27 @@ func (s *Server) createApp(ctx context.Context, app identity.ManagedApp) (identi
 	if err := validateManagedAppClient(app, *registered); err != nil {
 		return identity.ManagedApp{}, err
 	}
-	return s.store.CreateManagedApp(ctx, app)
+	created, err := s.store.CreateManagedApp(ctx, app)
+	if err != nil {
+		return identity.ManagedApp{}, err
+	}
+	s.record(ctx, requester, identity.AuditAppCreated, "", map[string]any{
+		"slug": created.Slug, "oidc_client_id": created.OIDCClientID, "release_revision": created.ReleaseRevision,
+	})
+	return created, nil
 }
 
-func (s *Server) deleteApp(ctx context.Context, ref identity.ManagedAppRef) error {
+func (s *Server) deleteApp(ctx context.Context, ref identity.ManagedAppRef, requester actor) error {
 	if ref.ID != "" {
 		if err := requireUUID(ref.ID, identity.ErrManagedAppNotFound); err != nil {
 			return err
 		}
 	}
-	return s.store.DeleteManagedApp(ctx, ref)
+	if err := s.store.DeleteManagedApp(ctx, ref); err != nil {
+		return err
+	}
+	s.record(ctx, requester, identity.AuditAppDeleted, "", map[string]any{"id": ref.ID, "slug": ref.Slug})
+	return nil
 }
 
 // enqueueAppValidations queues both browser checks for the referenced app, or
@@ -360,6 +448,7 @@ func (s *Server) enqueueAppValidations(ctx context.Context, ref identity.Managed
 	if err != nil {
 		return nil, err
 	}
+	s.record(ctx, requester, identity.AuditValidationEnqueued, "", map[string]any{"applications": slugs})
 	enqueued := make([]validationEnqueueRecord, 0, len(slugs)*2)
 	for _, slug := range slugs {
 		for _, direction := range []string{identity.ValidationFromShauth, identity.ValidationFromApp} {

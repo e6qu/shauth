@@ -72,6 +72,8 @@ func newAdminAPIAcceptanceServer(t *testing.T) (*pgxpool.Pool, http.Handler, *id
 		CREATE TABLE %[1]s.managed_apps (LIKE public.managed_apps INCLUDING ALL);
 		CREATE TABLE %[1]s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
 		CREATE TABLE %[1]s.app_validation_control (LIKE public.app_validation_control INCLUDING ALL);
+		CREATE TABLE %[1]s.audit_events (LIKE public.audit_events INCLUDING ALL);
+		CREATE TABLE %[1]s.logout_correlation_grants (LIKE public.logout_correlation_grants INCLUDING ALL);
 		INSERT INTO %[1]s.app_validation_control(singleton) VALUES (TRUE);
 		INSERT INTO %[1]s.session_policy (singleton,browser_absolute_lifetime_seconds,browser_idle_timeout_seconds,oidc_session_lifetime_seconds,access_token_lifetime_seconds,id_token_lifetime_seconds,refresh_token_lifetime_seconds,updated_at)
 		VALUES (TRUE, 2592000, 43200, 2592000, 900, 900, 2592000, now())`, schema)); err != nil {
@@ -540,7 +542,7 @@ func TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt(t *testing.T) {
 	if _, _, err := store.CreateSession(ctx, user.ID, "curl/8 acceptance", net.ParseIP("192.0.2.20"), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AuthenticatePassword(ctx, "containment", password); err != nil {
+	if _, _, err := store.AuthenticatePassword(ctx, "containment", password); err != nil {
 		t.Fatalf("the account could not authenticate before being disabled: %v", err)
 	}
 
@@ -561,7 +563,7 @@ func TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt(t *testing.T) {
 
 	// The credential is still correct, so this proves containment rather
 	// than a rejected password.
-	if _, err := store.AuthenticatePassword(ctx, "containment", password); err == nil {
+	if _, _, err := store.AuthenticatePassword(ctx, "containment", password); err == nil {
 		t.Fatal("a disabled account authenticated with a valid password")
 	}
 	sessions, err := store.ListSessions(ctx, user.ID)
@@ -595,7 +597,7 @@ func TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt(t *testing.T) {
 	if enabledReceipt.User.DisabledAt != nil {
 		t.Fatalf("enable receipt still reported a disabled account: %#v", enabledReceipt.User)
 	}
-	if _, err := store.AuthenticatePassword(ctx, "containment", password); err != nil {
+	if _, _, err := store.AuthenticatePassword(ctx, "containment", password); err != nil {
 		t.Fatalf("an enabled account could not authenticate: %v", err)
 	}
 	// Enabling restores sign-in but must not resurrect the revoked sessions.
@@ -808,5 +810,127 @@ func TestAdminAPIUserListIsBoundedAndPageable(t *testing.T) {
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("%s status = %d, want %d", invalid, response.Code, http.StatusBadRequest)
 		}
+	}
+}
+
+// An identity service must be able to answer, after the fact, who did what to
+// whom and from where. This proves the record is written by the operations
+// themselves rather than by the test.
+func TestAdminAPIRecordsAndReportsAuditEvents(t *testing.T) {
+	_, handler, store := newAdminAPIAcceptanceServer(t)
+	ctx := context.Background()
+
+	created := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users", adminAPIAcceptanceWriteToken,
+		`{"username":"audited","email":"audited@example.test","password":"a-long-acceptance-password","role":"developer"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", created.Code, created.Body.String())
+	}
+	var receipt struct {
+		User userRecord `json:"user"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if disabled := adminAPIAcceptanceRequest(t, handler, http.MethodPost,
+		"https://auth.example.test/internal/users/"+receipt.User.ID+"/disable", adminAPIAcceptanceWriteToken, ""); disabled.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disabled.Code, disabled.Body.String())
+	}
+	// A refused sign-in must be recorded with the reason, and the reason must
+	// not be the message the person was shown.
+	if _, reason, err := store.AuthenticatePassword(ctx, "audited", "a-long-acceptance-password"); err == nil || reason != identity.SignInReasonDisabled {
+		t.Fatalf("authenticate after disable = %q, %v", reason, err)
+	}
+
+	type auditEnvelope struct {
+		SchemaVersion string              `json:"schema_version"`
+		Events        []auditEventRecord  `json:"events"`
+		Page          struct{ Total int } `json:"page"`
+	}
+	response := adminAPIAcceptanceRequest(t, handler, http.MethodGet, "https://auth.example.test/api/v1/audit-events", adminAPIAcceptanceReadToken, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("audit status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var envelope auditEnvelope
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode audit envelope: %v: %s", err, response.Body.String())
+	}
+	if envelope.SchemaVersion != "shauth.audit-events/v1" || envelope.Page.Total < 2 {
+		t.Fatalf("audit envelope = %#v", envelope)
+	}
+	recorded := map[string]auditEventRecord{}
+	for _, event := range envelope.Events {
+		recorded[event.EventType] = event
+	}
+	for _, expected := range []string{identity.AuditAccountCreated, identity.AuditAccountDisabled} {
+		event, ok := recorded[expected]
+		if !ok {
+			t.Fatalf("no %s event was recorded: %s", expected, response.Body.String())
+		}
+		if event.SubjectUserID != receipt.User.ID {
+			t.Fatalf("%s recorded subject %q, want %q", expected, event.SubjectUserID, receipt.User.ID)
+		}
+		if len(event.Details) == 0 {
+			t.Fatalf("%s recorded no detail", expected)
+		}
+	}
+	if username := recorded[identity.AuditAccountCreated].Details["username"]; username != "audited" {
+		t.Fatalf("creation detail = %v, want the username", username)
+	}
+
+	// Filtering by account and by event type is what an investigation uses.
+	filtered := adminAPIAcceptanceRequest(t, handler, http.MethodGet,
+		"https://auth.example.test/api/v1/audit-events?event_type="+identity.AuditAccountDisabled, adminAPIAcceptanceReadToken, "")
+	if err := json.Unmarshal(filtered.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Page.Total != 1 || envelope.Events[0].EventType != identity.AuditAccountDisabled {
+		t.Fatalf("filtered audit = %#v", envelope)
+	}
+	perUser := adminAPIAcceptanceRequest(t, handler, http.MethodGet,
+		"https://auth.example.test/api/v1/users/"+receipt.User.ID+"/audit-events", adminAPIAcceptanceReadToken, "")
+	if err := json.Unmarshal(perUser.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Page.Total != 2 {
+		t.Fatalf("per-account audit total = %d, want the two events about that account", envelope.Page.Total)
+	}
+}
+
+// Metrics must describe what the store holds, not what one process saw.
+func TestAdminAPIMetricsCountDurableState(t *testing.T) {
+	_, handler, store := newAdminAPIAcceptanceServer(t)
+	ctx := context.Background()
+	for index := 0; index < 3; index++ {
+		name := fmt.Sprintf("counted-%d", index)
+		if _, err := store.CreatePasswordUser(ctx, name, name+"@example.test", "a-long-acceptance-password", identity.RoleDeveloper); err != nil {
+			t.Fatal(err)
+		}
+	}
+	response := adminAPIAcceptanceRequest(t, handler, http.MethodGet, "https://auth.example.test/api/v1/metrics", adminAPIAcceptanceReadToken, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		SchemaVersion string `json:"schema_version"`
+		Users         struct {
+			Total            int            `json:"total"`
+			ByRole           map[string]int `json:"by_role"`
+			ByIdentitySource map[string]int `json:"by_identity_source"`
+		} `json:"users"`
+		Build struct {
+			Revision string `json:"revision"`
+		} `json:"build"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode metrics: %v: %s", err, response.Body.String())
+	}
+	if envelope.SchemaVersion != "shauth.metrics/v1" || envelope.Users.Total != 3 {
+		t.Fatalf("metrics = %#v", envelope)
+	}
+	if envelope.Users.ByRole["developer"] != 3 || envelope.Users.ByIdentitySource["local"] != 3 {
+		t.Fatalf("user breakdown = %#v", envelope.Users)
+	}
+	if envelope.Build.Revision == "" {
+		t.Fatal("metrics did not report which build produced them")
 	}
 }

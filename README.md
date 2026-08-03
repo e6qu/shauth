@@ -324,6 +324,70 @@ timestamps are published in UTC, and `disabled_at` is always present (null
 when the account is enabled) so a consumer never has to infer state from a
 missing key.
 
+## Observability
+
+An incident review needs three things the service did not previously
+publish: what happened, how much of it, and which dependency is at fault.
+
+- `GET /api/v1/audit-events?subject=&actor=&event_type=&since=&until=` and
+  `GET /api/v1/users/{id}/audit-events` — `shauth.audit-events/v1`: the
+  durable record of every security-relevant action. Sign-in outcomes,
+  including why a sign-in was refused; session and account changes; every
+  invitation, client, application, access rule and policy change. Each event
+  carries who acted, on whom, from which address and session, and a detail
+  object. The person signing in is always told only that the pair did not
+  work, while the record keeps the reason, so a disabled account is
+  distinguishable from a mistyped name without telling an attacker which.
+  A token-authorized write records no person, because bearer credentials are
+  shared and opaque; it records the address it came from.
+- `GET /api/v1/metrics` — `shauth.metrics/v1`: accounts by role, identity
+  source and disabled state; sessions by state; invitations by state;
+  applications; validation runs by status with the queue depth and the age of
+  the oldest queued run; and the outstanding global-logout backlog. Every
+  number is read from PostgreSQL, so it describes what the service holds
+  rather than what one process has counted since it started.
+- `GET /api/v1/health/deep` — `shauth.deep-health/v1`: each dependency and
+  startup invariant checked on demand with its latency, answering `503` only
+  when the service cannot do its job. It reports PostgreSQL, both provider
+  endpoints, the durable session policy, the client catalog, the invitation
+  mailer, whether the validation queue is still draining, and whether any
+  application registration has drifted from what was recorded — drift means
+  single sign-on is already broken for that relying party. `/healthz` remains
+  the shallow, unauthenticated probe the container scheduler uses.
+
+Debugging a specific failure:
+
+- `GET /api/v1/sessions/{id}` — `shauth.session/v1`: one session with its
+  account and the provider sessions correlated to it. A sign-in that cannot
+  be correlated is the usual cause of a stuck login, and that correlation had
+  no read path before.
+- `GET /api/v1/logout-grants?state=outstanding|all` —
+  `shauth.logout-grants/v1`: global-logout attempts, their retry count and
+  their last error. A logout that never completes leaves relying-party
+  sessions alive, which was previously visible only in process logs.
+- `GET /api/v1/apps/{slug}` — `shauth.app/v1`: one application's coordinates,
+  live health and latest check per direction, so polling one relying party
+  does not mean probing every other application's health endpoint.
+
+Self-service:
+
+- `GET /api/v1/me/sessions` and `POST /internal/me/sessions/{id}/revoke`,
+  authorized by the caller's own browser session, with the matching `/account`
+  page. Previously only an administrator could see or end sessions, so nobody
+  could review their own devices. Ending a session that is not the caller's
+  answers `404`.
+
+The application catalog reads accept either the application status credential
+or the administration read credential, so an operator holding the
+administration read token is not unable to list applications.
+
+Recorded addresses come from the nearest proxy hop rather than the peer
+address. Shauth is reached only through a gateway, so the peer is that
+gateway; the rightmost `X-Forwarded-For` entry is the one the gateway
+observed and appended and cannot be forged by the caller. A request arriving
+directly from a public address is recorded as that address and any forwarded
+header is ignored.
+
 ## One implementation per operation
 
 The browser interface and the machine API are two transports over one

@@ -368,6 +368,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/connectors", s.connectorsAPI)
 	mux.HandleFunc("GET /api/v1/monitoring", s.monitoringAPI)
 	mux.HandleFunc("GET /api/v1/invitations", s.invitationsAPI)
+	mux.HandleFunc("GET /api/v1/audit-events", s.auditEventsAPI)
+	mux.HandleFunc("GET /api/v1/users/{id}/audit-events", s.auditEventsAPI)
+	mux.HandleFunc("GET /api/v1/metrics", s.metricsAPI)
+	mux.HandleFunc("GET /api/v1/health/deep", s.deepHealthAPI)
+	mux.HandleFunc("GET /api/v1/sessions/{id}", s.sessionAPI)
+	mux.HandleFunc("GET /api/v1/logout-grants", s.logoutGrantsAPI)
+	mux.HandleFunc("GET /api/v1/apps/{slug}", s.appAPI)
+	mux.HandleFunc("GET /api/v1/me/sessions", s.mySessionsAPI)
+	mux.HandleFunc("POST /internal/me/sessions/{id}/revoke", s.revokeMySessionAPI)
+	mux.HandleFunc("GET /account", s.account)
+	mux.HandleFunc("POST /account/sessions/{id}/revoke", s.revokeOwnSession)
+	mux.HandleFunc("GET /admin/audit", s.adminAudit)
 	mux.HandleFunc("POST /internal/users", s.createUserAPI)
 	mux.HandleFunc("POST /internal/users/{id}/disable", s.disableUserAPI)
 	mux.HandleFunc("POST /internal/users/{id}/enable", s.enableUserAPI)
@@ -589,14 +601,27 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
-	user, err := s.store.AuthenticatePassword(r.Context(), r.Form.Get("username"), r.Form.Get("password"))
+	username := r.Form.Get("username")
+	user, reason, err := s.store.AuthenticatePassword(r.Context(), username, r.Form.Get("password"))
 	if err != nil {
-		s.render(w, "login", map[string]any{"Error": "Invalid username or password.", "Next": relativeNext(r.Form.Get("next")), "EntraEnabled": s.entraOAuth != nil})
+		// The person is told only that the pair did not work; the audit
+		// record keeps the reason so an operator can tell a disabled
+		// account from a mistyped name.
+		event := identity.AuditSignInFailed
+		if reason == identity.SignInReasonDisabled {
+			event = identity.AuditSignInBlocked
+		}
+		s.recordSignIn(r, event, "password", username, "", reason)
+		s.render(w, "login", s.view(r, "Sign in", map[string]any{
+			"Error": "Invalid username or password.", "Next": relativeNext(r.Form.Get("next")),
+			"EntraEnabled": s.entraOAuth != nil, "SignedIn": false,
+		}))
 		return
 	}
 	if !s.startSession(w, r, user) {
 		return
 	}
+	s.recordSignIn(r, identity.AuditSignInSucceeded, "password", user.Username, user.ID, "")
 	http.Redirect(w, r, relativeNext(r.Form.Get("next")), http.StatusSeeOther)
 }
 func (s *Server) logoutConfirm(w http.ResponseWriter, r *http.Request) {
@@ -699,10 +724,14 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		s.failPage(w, r, http.StatusForbidden, "GitHub account is not authorized for e6qu")
+		s.recordSignIn(r, identity.AuditSignInFailed, "github", profile.Login, "", "no GitHub access rule grants this account a role")
+		s.failPage(w, r, http.StatusForbidden, "This GitHub account is not authorized to use this service. Ask an administrator to grant it access.")
 		return
 	}
 	user, err := s.store.FindOrCreateGitHubUser(r.Context(), profile.ID, profile.Login, profile.Email, role)
+	if err != nil {
+		s.recordSignIn(r, identity.AuditSignInBlocked, "github", profile.Login, "", err.Error())
+	}
 	if err != nil {
 		s.failPage(w, r, http.StatusInternalServerError, "could not establish local account")
 		return
@@ -710,6 +739,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	if !s.startSession(w, r, user) {
 		return
 	}
+	s.recordSignIn(r, identity.AuditSignInSucceeded, "github", user.Username, user.ID, "")
 	http.Redirect(w, r, relativeNext(cookie.Value), http.StatusSeeOther)
 }
 
@@ -793,12 +823,16 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 	email, emailVerified := entraEmail(claims)
 	user, err := s.store.FindOrCreateEntraUser(r.Context(), claims.TenantID, claims.ObjectID, entraUsername(claims.PreferredUsername, email, claims.ObjectID), email, emailVerified)
 	if err != nil {
+		s.recordSignIn(r, identity.AuditSignInBlocked, "entra", email, "", err.Error())
+	}
+	if err != nil {
 		s.failPage(w, r, http.StatusInternalServerError, "could not establish local account")
 		return
 	}
 	if !s.startSession(w, r, user) {
 		return
 	}
+	s.recordSignIn(r, identity.AuditSignInSucceeded, "entra", user.Username, user.ID, "")
 	http.Redirect(w, r, relativeNext(transaction["next"]), http.StatusSeeOther)
 }
 
@@ -1388,7 +1422,7 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 		SignedOutURL:    strings.TrimSpace(r.Form.Get("signed_out_url")),
 		ReleaseRevision: strings.TrimSpace(r.Form.Get("release_revision")),
 	}
-	created, err := s.createApp(r.Context(), app)
+	created, err := s.createApp(r.Context(), app, s.currentActor(r))
 	if err != nil {
 		status, message := describeOperationFailure("create managed app", err)
 		s.renderAdminApps(w, r, status, message, app)
@@ -1403,7 +1437,7 @@ func (s *Server) validateApp(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusUnauthorized, "sign-in required")
 		return
 	}
-	if _, err := s.enqueueAppValidations(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}, actor{UserID: user.ID}); err != nil {
+	if _, err := s.enqueueAppValidations(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}, s.currentActor(r)); err != nil {
 		s.failOperation(w, r, "queue application validation", "/apps", err)
 		return
 	}
@@ -1460,6 +1494,17 @@ func unauthorized(w http.ResponseWriter, message string) {
 // state change and requires the administration write credential, so a
 // dashboard or post-deployment poller given read access cannot start real
 // browser logins against every registered relying party.
+// requireApplicationReadToken accepts either the application status
+// credential or the administration read credential. Both are read-only, and
+// an operator holding the administration read token should not be unable to
+// list the applications.
+func (s *Server) requireApplicationReadToken(w http.ResponseWriter, r *http.Request) bool {
+	if s.config.AdminAPIReadToken != "" && bearerTokenMatches(r, s.config.AdminAPIReadToken) {
+		return true
+	}
+	return s.requireValidationStatusToken(w, r)
+}
+
 func (s *Server) requireValidationStatusToken(w http.ResponseWriter, r *http.Request) bool {
 	if s.config.ValidationStatusToken == "" {
 		writeAdminAPIError(w, http.StatusServiceUnavailable, "application validation status is not configured")
@@ -1503,7 +1548,7 @@ func newValidationStatusRecord(run identity.AppValidationRun) validationStatusRe
 
 func (s *Server) applicationValidationStatusAPI(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if !s.requireValidationStatusToken(w, r) {
+	if !s.requireApplicationReadToken(w, r) {
 		return
 	}
 	runs, err := s.store.LatestAppValidationRuns(r.Context())
@@ -1581,7 +1626,7 @@ func newAppRecord(view managedAppView) appRecord {
 
 func (s *Server) applicationsAPI(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if !s.requireValidationStatusToken(w, r) {
+	if !s.requireApplicationReadToken(w, r) {
 		return
 	}
 	views, err := s.appViews(r.Context())
@@ -1615,7 +1660,7 @@ func parseValidationHistoryLimit(raw string) (int, error) {
 
 func (s *Server) applicationValidationHistoryAPI(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	if !s.requireValidationStatusToken(w, r) {
+	if !s.requireApplicationReadToken(w, r) {
 		return
 	}
 	limit, err := parseValidationHistoryLimit(r.URL.Query().Get("limit"))
@@ -1701,7 +1746,7 @@ func (s *Server) applicationValidationEnqueueAPI(w http.ResponseWriter, r *http.
 		writeOperationFailure(w, "queue application validations", err)
 		return
 	}
-	enqueued, err := s.enqueueAppValidations(r.Context(), ref, actor{})
+	enqueued, err := s.enqueueAppValidations(r.Context(), ref, tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "queue application validations", err)
 		return
@@ -1853,7 +1898,7 @@ func (s *Server) adminDeleteApp(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.deleteApp(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}); err != nil {
+	if err := s.deleteApp(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}, s.currentActor(r)); err != nil {
 		s.failOperation(w, r, "delete managed app", "/admin/apps", err)
 		return
 	}
@@ -1908,7 +1953,7 @@ func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
 			input.PostLogoutRedirectURIs = append(input.PostLogoutRedirectURIs, uri)
 		}
 	}
-	if _, err := s.createOIDCClient(r.Context(), input); err != nil {
+	if _, err := s.createOIDCClient(r.Context(), input, s.currentActor(r)); err != nil {
 		status, message := describeOperationFailure("create OAuth client", err)
 		s.renderOIDCClients(w, r, status, message, input)
 		return
@@ -1921,7 +1966,7 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := r.PathValue("id")
-	if err := s.deleteOIDCClient(r.Context(), clientID); err != nil {
+	if err := s.deleteOIDCClient(r.Context(), clientID, s.currentActor(r)); err != nil {
 		s.failOperation(w, r, "delete OAuth client", "/admin/clients", err)
 		return
 	}
@@ -1991,7 +2036,7 @@ func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request
 		s.renderSessionPolicy(w, r, http.StatusBadRequest, err.Error(), request)
 		return
 	}
-	if _, err := s.updateSessionPolicy(r.Context(), request); err != nil {
+	if _, err := s.updateSessionPolicy(r.Context(), request, s.currentActor(r)); err != nil {
 		status, message := describeOperationFailure("update session policy", err)
 		s.renderSessionPolicy(w, r, status, message, request)
 		return
@@ -2441,7 +2486,7 @@ func (s *Server) adminCreateGitHubMapping(w http.ResponseWriter, r *http.Request
 		return
 	}
 	request := githubRoleMappingCreateRequest{Kind: r.Form.Get("kind"), Target: r.Form.Get("target"), Role: r.Form.Get("role")}
-	mapping, err := s.createGitHubMapping(r.Context(), request.Kind, request.Target, request.Role)
+	mapping, err := s.createGitHubMapping(r.Context(), request.Kind, request.Target, request.Role, s.currentActor(r))
 	if err != nil {
 		status, message := describeOperationFailure("create GitHub role mapping", err)
 		s.renderGitHubMappings(w, r, status, message, request)
@@ -2453,7 +2498,7 @@ func (s *Server) adminDeleteGitHubMapping(w http.ResponseWriter, r *http.Request
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.deleteGitHubMapping(r.Context(), r.PathValue("id")); err != nil {
+	if err := s.deleteGitHubMapping(r.Context(), r.PathValue("id"), s.currentActor(r)); err != nil {
 		s.failOperation(w, r, "delete GitHub role mapping", "/admin/github", err)
 		return
 	}
@@ -2505,7 +2550,7 @@ func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 		Username: r.Form.Get("username"), Email: r.Form.Get("email"),
 		Password: r.Form.Get("password"), Role: r.Form.Get("role"),
 	}
-	user, err := s.createUser(r.Context(), request)
+	user, err := s.createUser(r.Context(), request, s.currentActor(r))
 	if err != nil {
 		// The form posts through HTMX, which does not swap a failed
 		// response, so a rejection must re-render the page with the
@@ -2569,7 +2614,7 @@ func (s *Server) adminRevokeInvitation(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.revokeInvitation(r.Context(), r.PathValue("id")); err != nil {
+	if err := s.revokeInvitation(r.Context(), r.PathValue("id"), s.currentActor(r)); err != nil {
 		s.failOperation(w, r, "revoke invitation", "/admin/invitations", err)
 		return
 	}
@@ -2584,13 +2629,13 @@ func (s *Server) adminDisableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("id")
-	signedIn, _, err := s.current(r)
-	if err != nil {
+	requester := s.currentActor(r)
+	if requester.UserID == "" {
 		s.failPage(w, r, http.StatusUnauthorized, "Your session has ended. Sign in again to manage accounts.")
 		return
 	}
 	account := "/admin/users/" + url.PathEscape(userID)
-	if _, err := s.disableUser(r.Context(), userID, actor{UserID: signedIn.ID}); err != nil {
+	if _, err := s.disableUser(r.Context(), userID, requester); err != nil {
 		s.failOperation(w, r, "disable account", account, err)
 		return
 	}
@@ -2603,7 +2648,7 @@ func (s *Server) adminEnableUser(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := r.PathValue("id")
 	account := "/admin/users/" + url.PathEscape(userID)
-	if _, err := s.enableUser(r.Context(), userID); err != nil {
+	if _, err := s.enableUser(r.Context(), userID, s.currentActor(r)); err != nil {
 		s.failOperation(w, r, "enable account", account, err)
 		return
 	}
@@ -2742,7 +2787,7 @@ func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := r.PathValue("id")
 	account := "/admin/users/" + url.PathEscape(userID)
-	if _, err := s.revokeUserSessions(r.Context(), userID, ""); err != nil {
+	if _, err := s.revokeUserSessions(r.Context(), userID, "", s.currentActor(r)); err != nil {
 		s.failOperation(w, r, "revoke account sessions", account, err)
 		return
 	}
@@ -2766,7 +2811,7 @@ func (s *Server) sessionResetAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID, err := s.revokeUserSessions(r.Context(),
-		strings.TrimSpace(r.URL.Query().Get("user_id")), strings.TrimSpace(r.URL.Query().Get("email")))
+		strings.TrimSpace(r.URL.Query().Get("user_id")), strings.TrimSpace(r.URL.Query().Get("email")), tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "reset account sessions", err)
 		return
@@ -2781,7 +2826,7 @@ func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	revoked, err := s.revokeSession(r.Context(), r.PathValue("id"))
+	revoked, err := s.revokeSession(r.Context(), r.PathValue("id"), s.currentActor(r))
 	if err != nil {
 		s.failOperation(w, r, "revoke session", "/admin/users", err)
 		return
@@ -2965,6 +3010,17 @@ func (s *Server) current(r *http.Request) (identity.User, identity.Session, erro
 	}
 	return s.store.CurrentUser(r.Context(), cookie.Value, time.Now())
 }
+
+// currentActor identifies the signed-in person performing a browser action,
+// so an audit record names them rather than only the address.
+func (s *Server) currentActor(r *http.Request) actor {
+	user, session, err := s.current(r)
+	if err != nil {
+		return tokenActor(r)
+	}
+	return browserActor(r, user, session)
+}
+
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	user, _, err := s.current(r)
 	if err != nil {
@@ -2977,6 +3033,18 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	}
 	return true
 }
+
+// recordSignIn notes an authentication outcome. The attempted identifier is
+// recorded because an operator investigating a lockout needs to know which
+// name was used; no credential material is ever recorded.
+func (s *Server) recordSignIn(r *http.Request, eventType, method, username, subjectUserID, reason string) {
+	details := map[string]any{"method": method, "username": username}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	s.record(r.Context(), actor{Address: clientIP(r)}, eventType, subjectUserID, details)
+}
+
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, user identity.User) bool {
 	raw, session, err := s.store.CreateSession(r.Context(), user.ID, r.UserAgent(), clientIP(r), time.Now())
 	if err != nil {
@@ -3310,12 +3378,42 @@ func newState() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// clientIP reports the address the request came from. Shauth is reached only
+// through a gateway inside the private network, so the peer address is that
+// gateway rather than the person signing in. When the peer is a private or
+// loopback address the rightmost X-Forwarded-For entry is used instead: that
+// entry is the one the nearest proxy observed and appended, so it cannot be
+// forged by the caller, unlike the leftmost entry. A public peer is trusted
+// as-is and any forwarded header is ignored, so a direct caller cannot
+// choose the address recorded against their session.
 func clientIP(r *http.Request) net.IP {
+	peer := peerIP(r)
+	if peer == nil || !isPrivatePeer(peer) {
+		return peer
+	}
+	forwarded := r.Header.Get("X-Forwarded-For")
+	if forwarded == "" {
+		return peer
+	}
+	entries := strings.Split(forwarded, ",")
+	nearest := net.ParseIP(strings.TrimSpace(entries[len(entries)-1]))
+	if nearest == nil {
+		return peer
+	}
+	return nearest
+}
+
+func peerIP(r *http.Request) net.IP {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return net.ParseIP(host)
 	}
 	return net.ParseIP(r.RemoteAddr)
+}
+
+func isPrivatePeer(address net.IP) bool {
+	return address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast()
 }
 func relativeNext(value string) string {
 	if value == "" {
