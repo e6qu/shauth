@@ -241,19 +241,25 @@ func (s *Store) SessionPolicy(ctx context.Context) (SessionPolicy, error) {
 	return policy, nil
 }
 
-func (s *Store) UpdateSessionPolicy(ctx context.Context, policy SessionPolicy, now time.Time) error {
+// UpdateSessionPolicy stores the policy and reports when it was stored. The
+// time comes from PostgreSQL, like every other timestamp in this schema: a
+// value written from the service's clock and compared against one written by
+// the database's cannot be ordered, and this column exists to be ordered.
+func (s *Store) UpdateSessionPolicy(ctx context.Context, policy SessionPolicy) (time.Time, error) {
 	if err := policy.Validate(); err != nil {
-		return err
+		return time.Time{}, err
 	}
-	command, err := s.pool.Exec(ctx, `UPDATE session_policy SET browser_absolute_lifetime_seconds=$1,browser_idle_timeout_seconds=$2,oidc_session_lifetime_seconds=$3,access_token_lifetime_seconds=$4,id_token_lifetime_seconds=$5,refresh_token_lifetime_seconds=$6,updated_at=$7 WHERE singleton=TRUE`,
-		int64(policy.BrowserAbsoluteLifetime/time.Second), int64(policy.BrowserIdleTimeout/time.Second), int64(policy.OIDCSessionLifetime/time.Second), int64(policy.AccessTokenLifetime/time.Second), int64(policy.IDTokenLifetime/time.Second), int64(policy.RefreshTokenLifetime/time.Second), now.UTC())
+	var updatedAt time.Time
+	err := s.pool.QueryRow(ctx, `UPDATE session_policy SET browser_absolute_lifetime_seconds=$1,browser_idle_timeout_seconds=$2,oidc_session_lifetime_seconds=$3,access_token_lifetime_seconds=$4,id_token_lifetime_seconds=$5,refresh_token_lifetime_seconds=$6,updated_at=now() WHERE singleton=TRUE RETURNING updated_at`,
+		int64(policy.BrowserAbsoluteLifetime/time.Second), int64(policy.BrowserIdleTimeout/time.Second), int64(policy.OIDCSessionLifetime/time.Second), int64(policy.AccessTokenLifetime/time.Second), int64(policy.IDTokenLifetime/time.Second), int64(policy.RefreshTokenLifetime/time.Second)).
+		Scan(&updatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("session policy record is missing")
+	}
 	if err != nil {
-		return fmt.Errorf("update session policy: %w", err)
+		return time.Time{}, fmt.Errorf("update session policy: %w", err)
 	}
-	if command.RowsAffected() != 1 {
-		return fmt.Errorf("session policy record is missing")
-	}
-	return nil
+	return updatedAt.UTC(), nil
 }
 
 func (s *Store) EnsureGitHubRoleMapping(ctx context.Context, kind, target string, role Role) error {

@@ -327,8 +327,8 @@ func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyR
 		}
 		return sessionPolicyRecord{}, dependencyFailure("the OAuth client lifetimes could not be updated, so the previous policy was restored", err)
 	}
-	changedAt := time.Now().UTC()
-	if err := s.store.UpdateSessionPolicy(ctx, policy, changedAt); err != nil {
+	changedAt, err := s.store.UpdateSessionPolicy(ctx, policy)
+	if err != nil {
 		if rollbackErr := s.applyHydraSessionPolicy(ctx, previous); rollbackErr != nil {
 			observe.Errorf("restore Ory Hydra session policy after PostgreSQL update failed: %v", rollbackErr)
 		}
