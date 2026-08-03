@@ -586,6 +586,41 @@ curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/
 
 # A narrow screen stacks table rows instead of scrolling the page sideways.
 curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'data-label="Role"'
+
+# Security-relevant actions are recorded durably, with the reason a sign-in
+# was refused kept for the operator and withheld from the person.
+curl --silent --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${csrf_token}" --data-urlencode 'username=no-such-account' \
+  --data-urlencode 'password=not-a-real-password' --data-urlencode 'next=/' http://localhost:8080/login
+audit_events=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/audit-events?limit=100')
+printf '%s' "$audit_events" | grep -q '"schema_version":"shauth.audit-events/v1"'
+printf '%s' "$audit_events" | grep -q '"event_type":"sign_in.failed"'
+printf '%s' "$audit_events" | grep -q '"reason":"unknown username"'
+printf '%s' "$audit_events" | grep -q '"event_type":"sign_in.succeeded"'
+# Checked against the real secret rather than a pattern: a pattern matches
+# the "password" sign-in method and proves nothing.
+if printf '%s' "$audit_events" | grep -qF "$SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"; then
+	echo 'the audit record contains credential material' >&2
+	exit 1
+fi
+
+# Counts describe durable state, and the deep check reports every dependency.
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/metrics | grep -q '"schema_version":"shauth.metrics/v1"'
+deep_health=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/health/deep)
+printf '%s' "$deep_health" | grep -q '"schema_version":"shauth.deep-health/v1"'
+for dependency in postgresql hydra_public hydra_admin managed_app_registration validation_queue; do
+	printf '%s' "$deep_health" | grep -q "\"name\":\"${dependency}\""
+done
+
+# A person can review and end their own sessions; an administrator's view of
+# someone else stays behind the administration credential.
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/api/v1/me/sessions | grep -q '"schema_version":"shauth.my-sessions/v1"'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/me/sessions)" = 401 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/account | grep -q 'Your sessions'
+curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/audit | grep -q 'Recorded events'
+
+# The application catalog is readable with either read credential.
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/apps)" = 200 ]
 admin_users_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?q=admin')
 printf '%s' "$admin_users_response" | grep -q '"schema_version":"shauth.users/v1"'
 printf '%s' "$admin_users_response" | grep -q '"username":"admin"'
