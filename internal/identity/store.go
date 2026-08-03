@@ -30,6 +30,11 @@ const (
 	RoleAdmin     Role = "admin"
 )
 
+// identifierPattern rejects a malformed identifier before it reaches a UUID
+// cast, where PostgreSQL would answer with an internal fault rather than the
+// "not found" the caller deserves.
+var identifierPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
 var immutableReleaseRevisionPattern = regexp.MustCompile(`^([0-9a-f]{12,64}|sha256:[0-9a-f]{64})$`)
 var browserBootstrapTokenPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var oidcContractHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -1835,6 +1840,78 @@ func (s *Store) ListSessions(ctx context.Context, userID string) ([]Session, err
 		sessions = append(sessions, v)
 	}
 	return sessions, rows.Err()
+}
+
+// SessionFilter narrows a listing of sessions across every account.
+type SessionFilter struct {
+	// UserID limits the answer to one account.
+	UserID string
+	// ActiveOnly drops sessions that are revoked, expired, or idle past
+	// the policy. Answering the question "who is signed in right now"
+	// should not mean reading every session ever created.
+	ActiveOnly bool
+	// Since limits the answer to sessions created at or after this time.
+	Since time.Time
+}
+
+// AccountSession is one session with the account it belongs to, so a listing
+// across accounts does not need a lookup per row to be readable.
+type AccountSession struct {
+	Session  Session
+	Username string
+	Email    string
+	Role     Role
+}
+
+// ListAllSessions reports sessions across every account, newest first. There
+// was no way to ask who is signed in service-wide: the only listing was per
+// account, which means knowing the account first.
+func (s *Store) ListAllSessions(ctx context.Context, filter SessionFilter, page Page) ([]AccountSession, int, error) {
+	policy, err := s.SessionPolicy(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	page = page.normalized()
+	if filter.UserID != "" && !identifierPattern.MatchString(filter.UserID) {
+		return nil, 0, ErrUserNotFound
+	}
+	now := time.Now().UTC()
+	idleFrom := now.Add(-policy.BrowserIdleTimeout)
+	// One predicate serves the count and the page, so the total can never
+	// describe a different set of rows than the page it accompanies.
+	const where = `WHERE ($1::uuid IS NULL OR s.user_id=$1::uuid)
+		AND ($2::timestamptz IS NULL OR s.created_at>=$2)
+		AND (NOT $3::boolean OR (s.revoked_at IS NULL AND s.expires_at>$4 AND s.last_seen_at>$5))`
+	var user, since any
+	if filter.UserID != "" {
+		user = filter.UserID
+	}
+	if !filter.Since.IsZero() {
+		since = filter.Since.UTC()
+	}
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions s `+where, user, since, filter.ActiveOnly, now, idleFrom).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count sessions: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address,u.username,u.email,u.role
+		FROM sessions s JOIN users u ON u.id=s.user_id `+where+`
+		ORDER BY s.created_at DESC, s.id LIMIT $6 OFFSET $7`, user, since, filter.ActiveOnly, now, idleFrom, page.Limit, page.Offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list sessions: %w", err)
+	}
+	defer rows.Close()
+	sessions := make([]AccountSession, 0, page.Limit)
+	for rows.Next() {
+		var listed AccountSession
+		if err := rows.Scan(&listed.Session.ID, &listed.Session.UserID, &listed.Session.CreatedAt, &listed.Session.LastSeen,
+			&listed.Session.ExpiresAt, &listed.Session.RevokedAt, &listed.Session.UserAgent, &listed.Session.RemoteIP,
+			&listed.Username, &listed.Email, &listed.Role); err != nil {
+			return nil, 0, fmt.Errorf("scan session: %w", err)
+		}
+		listed.Session.Active = listed.Session.RevokedAt == nil && listed.Session.ExpiresAt.After(now) && listed.Session.LastSeen.After(idleFrom)
+		sessions = append(sessions, listed)
+	}
+	return sessions, total, rows.Err()
 }
 
 func (s *Store) RecordHydraLoginSession(ctx context.Context, browserSessionID, hydraSessionID string, now time.Time) error {

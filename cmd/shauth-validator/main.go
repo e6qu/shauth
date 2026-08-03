@@ -4,6 +4,8 @@
 package main
 
 import (
+	"github.com/e6qu/shauth/internal/observe"
+
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -76,7 +78,7 @@ func main() {
 		claimed, err := claim(context.Background(), client, baseURL, token)
 		if err != nil {
 			consecutiveClaimFailures++
-			log.Printf("claim validation: %v", err)
+			observe.Errorf("claim validation: %v", err)
 			if consecutiveClaimFailures >= 12 {
 				log.Fatalf("Shauth validation queue remained unavailable after %d attempts", consecutiveClaimFailures)
 			}
@@ -90,7 +92,7 @@ func main() {
 		}
 		if err := validateJob(baseURL, *claimed); err != nil {
 			if completeErr := complete(context.Background(), client, baseURL, token, claimed.ID, result{Status: "failed", Failure: err.Error()}); completeErr != nil {
-				log.Printf("reject invalid validation %s: %v; record failure: %v", claimed.ID, err, completeErr)
+				observe.Errorf("reject invalid validation %s: %v; record failure: %v", claimed.ID, err, completeErr)
 			}
 			continue
 		}
@@ -102,21 +104,21 @@ func main() {
 		if err != nil {
 			outcome := result{Status: "failed", Failure: sanitizeFailure("create validation browser sessions: " + err.Error())}
 			if completeErr := complete(context.Background(), client, baseURL, token, claimed.ID, outcome); completeErr != nil {
-				log.Printf("record browser bootstrap failure for validation %s: %v", claimed.ID, completeErr)
+				observe.Errorf("record browser bootstrap failure for validation %s: %v", claimed.ID, completeErr)
 			}
 			continue
 		}
 		if err := validateBootstrapURLs(baseURL, bootstrapURLs); err != nil {
 			outcome := result{Status: "failed", Failure: err.Error()}
 			if completeErr := complete(context.Background(), client, baseURL, token, claimed.ID, outcome); completeErr != nil {
-				log.Printf("record invalid browser bootstrap response for validation %s: %v", claimed.ID, completeErr)
+				observe.Errorf("record invalid browser bootstrap response for validation %s: %v", claimed.ID, completeErr)
 			}
 			continue
 		}
 		claimed.BootstrapURLs = bootstrapURLs
 		outcome := run(context.Background(), script, *claimed)
 		if err := complete(context.Background(), client, baseURL, token, claimed.ID, outcome); err != nil {
-			log.Printf("complete validation %s: %v", claimed.ID, err)
+			observe.Errorf("complete validation %s: %v", claimed.ID, err)
 		}
 	}
 }
