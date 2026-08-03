@@ -164,8 +164,13 @@ type trafficRecord struct {
 	MeanMS        int64            `json:"mean_ms"`
 	MaxMS         int64            `json:"max_ms"`
 	P95MS         int64            `json:"p95_ms"`
-	LastStatus    int              `json:"last_status"`
-	LastAt        time.Time        `json:"last_at"`
+	// LatencyBuckets counts responses at or under each of the report's
+	// latency bounds, with one trailing bucket for everything slower. It is
+	// published so a reader can take any percentile rather than only the
+	// one this service chose to compute.
+	LatencyBuckets []int64   `json:"latency_buckets"`
+	LastStatus     int       `json:"last_status"`
+	LastAt         time.Time `json:"last_at"`
 }
 
 // trafficReport is everything this instance has served since it started.
@@ -196,8 +201,9 @@ func (t *traffic) report() trafficReport {
 		record := trafficRecord{
 			Method: key.Method, Pattern: key.Pattern, Requests: stat.Requests,
 			ByStatusClass: byClass, MaxMS: stat.MaxMS,
-			P95MS:      percentileMS(stat.Buckets, stat.Requests, 95, stat.MaxMS),
-			LastStatus: stat.LastStatus, LastAt: stat.LastAt,
+			P95MS:          percentileMS(stat.Buckets, stat.Requests, 95, stat.MaxMS),
+			LatencyBuckets: append([]int64(nil), stat.Buckets...),
+			LastStatus:     stat.LastStatus, LastAt: stat.LastAt,
 		}
 		if stat.Requests > 0 {
 			record.MeanMS = stat.TotalMS / stat.Requests

@@ -361,9 +361,12 @@ publish: what happened, how much of it, and which dependency is at fault.
 - `GET /api/v1/metrics/requests` — `shauth.request-metrics/v1`: what this
   instance has served since it started, by route: request counts, outcomes by
   status class, mean, ninety-fifth-percentile and slowest response times, the
-  status and time of the most recent request, and the number in flight. The
-  route is always the pattern the route table matched, never the requested
-  path, so an identifier in a URL can never create a series. These counters
+  bucketed distribution those percentiles were taken from, the status and time
+  of the most recent request, and the number in flight. The route is always
+  the pattern the route table matched, never the requested path, so an
+  identifier in a URL can never create a series. A request refused before
+  routing, by the CSRF check for instance, is attributed to the route it
+  targeted rather than to a nameless series. These counters
   are process-local and reset on restart, which is what makes them the right
   answer to "what is this instance doing now" and the wrong answer to "how
   many accounts exist" — that is `/api/v1/metrics`. The `Requests served`

@@ -171,3 +171,32 @@ func TestTrafficAttributesARefusalMadeBeforeRouting(t *testing.T) {
 		t.Fatalf("outcomes = %v, want the refusal counted as 4xx", report.Routes[0].ByStatusClass)
 	}
 }
+
+// TestTrafficPublishesTheDistributionItsPercentileCameFrom keeps the reported
+// bounds meaningful: a reader has to be able to take a different percentile
+// than the one this service chose.
+func TestTrafficPublishesTheDistributionItsPercentileCameFrom(t *testing.T) {
+	t.Parallel()
+	counters := newTraffic()
+	counters.finish(http.MethodGet, "GET /slow", http.StatusOK, 3*time.Second)
+	counters.finish(http.MethodGet, "GET /slow", http.StatusOK, time.Millisecond)
+
+	report := counters.report()
+	if len(report.LatencyBounds) == 0 {
+		t.Fatal("the report published no latency bounds")
+	}
+	record := report.Routes[0]
+	if len(record.LatencyBuckets) != len(report.LatencyBounds)+1 {
+		t.Fatalf("buckets = %d, want one per bound plus the slower-than-all bucket", len(record.LatencyBuckets))
+	}
+	var counted int64
+	for _, count := range record.LatencyBuckets {
+		counted += count
+	}
+	if counted != record.Requests {
+		t.Fatalf("buckets total %d responses, want the %d recorded", counted, record.Requests)
+	}
+	if record.LatencyBuckets[bucketIndex(3000)] != 1 {
+		t.Fatalf("the three-second response is not in its bucket: %v", record.LatencyBuckets)
+	}
+}
