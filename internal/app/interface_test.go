@@ -249,19 +249,15 @@ func TestEveryPageCarriesTheBuildNotice(t *testing.T) {
 // A stacked table row on a narrow screen keeps the column heading that gives
 // each value its meaning.
 func TestTableCellsCarryTheirColumnLabel(t *testing.T) {
-	tables := regexp.MustCompile(`(?s)<table>.*?</table>`)
-	for _, table := range tables.FindAllString(pageTemplates, -1) {
-		headers := regexp.MustCompile(`<th scope="col">`).FindAllString(table, -1)
-		if len(headers) == 0 {
+	// Scanned across the whole template source rather than only inside
+	// <table> blocks: a row template such as "user-row" is defined apart
+	// from the table that renders it, and its cells were missed that way.
+	for _, cell := range regexp.MustCompile(`<td(?: [^>]*)?>`).FindAllString(pageTemplates, -1) {
+		if strings.Contains(cell, "colspan") {
 			continue
 		}
-		for _, cell := range regexp.MustCompile(`<td(?: [^>]*)?>`).FindAllString(table, -1) {
-			if strings.Contains(cell, "colspan") {
-				continue
-			}
-			if !strings.Contains(cell, "data-label=") {
-				t.Errorf("a table cell has no column label for narrow screens: %s", cell)
-			}
+		if !strings.Contains(cell, "data-label=") {
+			t.Errorf("a table cell has no column label for narrow screens: %s", cell)
 		}
 	}
 	// Narrow screens must stack rather than force a minimum table width.
