@@ -571,19 +571,33 @@ printf '%s' "$admin_users_page" | grep -q '"has_more":true'
 # Every page reports the build serving it, and the machine contract reports
 # the same facts.
 curl --fail --silent --show-error http://localhost:8080/login | grep -q 'class="build-notice"'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'class="build-notice"'
 curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/monitoring | grep -q '"revision"'
+
+# The global-logout coverage above ends every correlated Shauth session,
+# including this script's, so the interface checks sign in again rather than
+# reusing a session that is deliberately gone by this point.
+interface_jar=$(mktemp)
+curl --fail --silent --show-error --cookie-jar "$interface_jar" http://localhost:8080/login >/dev/null
+interface_csrf=$(awk '$6 == "shauth_csrf" { print $7 }' "$interface_jar")
+[ -n "$interface_csrf" ]
+curl --fail --silent --show-error --location --cookie "$interface_jar" --cookie-jar "$interface_jar" --header 'Origin: http://localhost:8080' \
+  --data-urlencode "_csrf=${interface_csrf}" --data-urlencode 'username=admin' \
+  --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" --data-urlencode 'next=/' \
+  http://localhost:8080/login | grep -q 'Welcome back, admin.'
+curl --fail --silent --show-error --cookie "$interface_jar" http://localhost:8080/admin/users | grep -q 'class="build-notice"'
 
 # Each application and account has a screen of its own that can be linked to.
 app_slug=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT slug FROM managed_apps ORDER BY slug LIMIT 1")
 [ -n "$app_slug" ]
-curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/apps/${app_slug}" | grep -q 'Validation history'
+curl --fail --silent --show-error --cookie "$interface_jar" "http://localhost:8080/admin/apps/${app_slug}" | grep -q 'Validation history'
 admin_user_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username='admin'")
-curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_user_id}" | grep -q 'Account state'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_user_id}/sessions")" = 301 ]
+[ -n "$admin_user_id" ]
+curl --fail --silent --show-error --cookie "$interface_jar" "http://localhost:8080/admin/users/${admin_user_id}" | grep -q 'Account state'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$interface_jar" "http://localhost:8080/admin/users/${admin_user_id}/sessions")" = 301 ]
 
 # A narrow screen stacks table rows instead of scrolling the page sideways.
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'data-label="Role"'
+curl --fail --silent --show-error --cookie "$interface_jar" http://localhost:8080/admin/users | grep -q 'data-label="Role"'
+rm -f "$interface_jar"
 admin_users_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?q=admin')
 printf '%s' "$admin_users_response" | grep -q '"schema_version":"shauth.users/v1"'
 printf '%s' "$admin_users_response" | grep -q '"username":"admin"'
