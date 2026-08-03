@@ -1151,7 +1151,13 @@ func (s *Server) finalizeProviderLogout(ctx context.Context, grant identity.Logo
 	if err := s.revokeOtherHydraSessions(ctx, grant.ActiveHydraSessionIDs); err != nil {
 		return err
 	}
-	return s.store.CompleteLogoutCorrelationGrant(ctx, grant.ID, time.Now())
+	if err := s.store.CompleteLogoutCorrelationGrant(ctx, grant.ID, time.Now()); err != nil {
+		return err
+	}
+	s.record(ctx, logoutActor(grant), identity.AuditLogoutCompleted, grant.SubjectID, map[string]any{
+		"grant_id": grant.ID, "provider_sessions": len(grant.ActiveHydraSessionIDs), "attempts": grant.CleanupAttempts,
+	})
+	return nil
 }
 
 func (s *Server) scheduleLogoutRecovery(ctx context.Context, grant identity.LogoutCorrelationGrant, cause error) {
@@ -1159,6 +1165,19 @@ func (s *Server) scheduleLogoutRecovery(ctx context.Context, grant identity.Logo
 	if err := s.store.FailLogoutCorrelationGrant(ctx, grant.ID, cause.Error(), retryAt); err != nil {
 		log.Printf("schedule abandoned Ory Hydra logout recovery: %v", err)
 	}
+	// A logout that does not complete leaves relying-party sessions alive,
+	// which is the failure this product exists to prevent. It belongs in the
+	// durable record, not only in a log line.
+	s.record(ctx, logoutActor(grant), identity.AuditLogoutFailed, grant.SubjectID, map[string]any{
+		"grant_id": grant.ID, "attempt": grant.CleanupAttempts + 1, "retry_at": retryAt.UTC(), "error": cause.Error(),
+	})
+}
+
+// logoutActor names the person whose sessions a logout is ending. A logout
+// finished by the background recovery loop has no request behind it, so it
+// records no address rather than a misleading one.
+func logoutActor(grant identity.LogoutCorrelationGrant) actor {
+	return actor{UserID: grant.SubjectID, SessionID: grant.BrowserSessionID}
 }
 
 func logoutRecoveryDelay(attempt int) time.Duration {

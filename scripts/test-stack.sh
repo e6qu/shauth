@@ -615,6 +615,9 @@ done
 # Request metrics describe what this instance actually served. The route is
 # reported by its registered pattern, so a path carrying an identifier must
 # not appear verbatim and create a series per identifier.
+# Counted after the handler answers, so the second call is the first that can
+# report the first.
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/metrics/requests >/dev/null
 request_metrics=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/metrics/requests)
 printf '%s' "$request_metrics" | grep -q '"schema_version":"shauth.request-metrics/v1"'
 printf '%s' "$request_metrics" | grep -q '"pattern":"/api/v1/metrics/requests"'

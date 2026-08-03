@@ -291,8 +291,12 @@ func TestAdminAPISessionPolicyReadAndUpdate(t *testing.T) {
 	}
 
 	defaults := sessionPolicyRecord{BrowserAbsoluteHours: 720, BrowserIdleMinutes: 720, OIDCSSOHours: 720, AccessTokenMinutes: 15, IDTokenMinutes: 15, RefreshTokenHours: 720}
-	if envelope := read(); envelope.SchemaVersion != "shauth.session-policy/v1" || envelope.Policy != defaults {
-		t.Fatalf("default policy envelope = %#v", envelope)
+	initial := read()
+	if initial.SchemaVersion != "shauth.session-policy/v1" || withoutChangeTime(initial.Policy) != defaults {
+		t.Fatalf("default policy envelope = %#v", initial)
+	}
+	if initial.Policy.UpdatedAt.IsZero() {
+		t.Fatal("the policy contract did not report when the policy last changed")
 	}
 
 	updatedRecord := sessionPolicyRecord{BrowserAbsoluteHours: 480, BrowserIdleMinutes: 360, OIDCSSOHours: 480, AccessTokenMinutes: 30, IDTokenMinutes: 30, RefreshTokenHours: 480}
@@ -316,8 +320,12 @@ func TestAdminAPISessionPolicyReadAndUpdate(t *testing.T) {
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update status = %d, body = %s", updated.Code, updated.Body.String())
 	}
-	if envelope := read(); envelope.Policy != updatedRecord {
-		t.Fatalf("updated policy envelope = %#v", envelope)
+	after := read()
+	if withoutChangeTime(after.Policy) != updatedRecord {
+		t.Fatalf("updated policy envelope = %#v", after)
+	}
+	if !after.Policy.UpdatedAt.After(initial.Policy.UpdatedAt) {
+		t.Fatalf("policy change time = %s, want it later than the previous %s", after.Policy.UpdatedAt, initial.Policy.UpdatedAt)
 	}
 	var storedAccessSeconds int64
 	if err := pool.QueryRow(context.Background(), `SELECT access_token_lifetime_seconds FROM session_policy WHERE singleton=TRUE`).Scan(&storedAccessSeconds); err != nil {
@@ -1012,4 +1020,11 @@ func TestAcceptingAnInvitationIsRecordedAndSurvivesARejectedUsername(t *testing.
 	if _, err := server.claimInvitation(ctx, raw, "recipient-again", "recipient-account-password", visitorActor(request)); !errors.Is(err, identity.ErrInvitationNotAcceptable) {
 		t.Fatalf("reusing a spent invitation = %v, want %v", err, identity.ErrInvitationNotAcceptable)
 	}
+}
+
+// withoutChangeTime compares only the lifetimes, so an assertion never has to
+// predict the moment the policy was written.
+func withoutChangeTime(record sessionPolicyRecord) sessionPolicyRecord {
+	record.UpdatedAt = time.Time{}
+	return record
 }
