@@ -350,6 +350,24 @@ every administrative action work without JavaScript. Destructive controls ask
 for confirmation, failures render a navigable page instead of unstyled text,
 and each page carries its own title.
 
+Every page ends with the build serving it: the short Git revision the image
+was built from and when this deployment started, in UTC. The revision is
+stamped into the binaries at build time through the `SHAUTH_REVISION` build
+argument, so a page and the `shauth.monitoring/v1` contract, which reports the
+same `build` object, can never disagree about which code is running. A local
+build reports `unknown` rather than a misleading value.
+
+Every screen has an address. Each account is at `/admin/users/{id}` and each
+application at `/admin/apps/{slug}`, which shows its coordinates, its current
+checks, and the durable validation history that was previously reachable only
+through the machine API. The older `/admin/users/{id}/sessions` address
+redirects to the account screen, so existing links keep working.
+
+Listings render as tables on a wide screen and as labelled blocks on a narrow
+one, so a phone never scrolls sideways to read a row and every value keeps the
+column heading that gives it meaning. Rendering is verified at seven viewport
+widths from 320 to 1440 pixels.
+
 ## Native relying-party gateway
 
 The container also includes `/shauth-gateway`, a native OpenID Connect (OIDC)

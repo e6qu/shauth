@@ -35,6 +35,7 @@ import (
 	"github.com/e6qu/shauth/internal/mailer"
 	"github.com/e6qu/shauth/internal/managedapps"
 	"github.com/e6qu/shauth/internal/monitoring"
+	"github.com/e6qu/shauth/internal/version"
 	"golang.org/x/oauth2"
 	oauthgithub "golang.org/x/oauth2/github"
 )
@@ -423,7 +424,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/users/{id}/enable", s.adminEnableUser)
 	mux.HandleFunc("GET /accept-invitation", s.acceptInvitation)
 	mux.HandleFunc("POST /accept-invitation", s.acceptInvitationPost)
-	mux.HandleFunc("GET /admin/users/{id}/sessions", s.adminUserSessions)
+	mux.HandleFunc("GET /admin/users/{id}", s.adminUserSessions)
+	mux.HandleFunc("GET /admin/users/{id}/sessions", s.adminUserSessionsLegacy)
+	mux.HandleFunc("GET /admin/apps/{slug}", s.adminApp)
 	mux.HandleFunc("POST /admin/users/{id}/sessions/revoke", s.adminRevokeSessions)
 	mux.HandleFunc("POST /admin/sessions/{id}/revoke", s.adminRevokeSession)
 	mux.HandleFunc("POST /internal/sessions/reset", s.sessionResetAPI)
@@ -2586,7 +2589,7 @@ func (s *Server) adminDisableUser(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusUnauthorized, "Your session has ended. Sign in again to manage accounts.")
 		return
 	}
-	account := "/admin/users/" + url.PathEscape(userID) + "/sessions"
+	account := "/admin/users/" + url.PathEscape(userID)
 	if _, err := s.disableUser(r.Context(), userID, actor{UserID: signedIn.ID}); err != nil {
 		s.failOperation(w, r, "disable account", account, err)
 		return
@@ -2599,7 +2602,7 @@ func (s *Server) adminEnableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("id")
-	account := "/admin/users/" + url.PathEscape(userID) + "/sessions"
+	account := "/admin/users/" + url.PathEscape(userID)
 	if _, err := s.enableUser(r.Context(), userID); err != nil {
 		s.failOperation(w, r, "enable account", account, err)
 		return
@@ -2657,6 +2660,53 @@ func (s *Server) acceptInvitationPost(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/", 303)
 }
+
+// adminUserSessionsLegacy keeps the older sessions URL working by sending it
+// to the account screen that replaced it, so existing links and bookmarks do
+// not break.
+func (s *Server) adminUserSessionsLegacy(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/admin/users/"+url.PathEscape(r.PathValue("id")), http.StatusMovedPermanently)
+}
+
+// adminApp is one application's own screen: its coordinates, live health,
+// current validation state, and the durable run history that until now was
+// only reachable through the machine API.
+func (s *Server) adminApp(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	slug := r.PathValue("slug")
+	views, err := s.appViews(r.Context())
+	if err != nil {
+		log.Printf("list applications: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The application could not be loaded.")
+		return
+	}
+	token := csrfToken(r)
+	for index := range views {
+		if views[index].Slug != slug {
+			continue
+		}
+		views[index].CSRF = token
+		history, err := s.store.AppValidationRunHistory(r.Context(), slug, 20)
+		if err != nil {
+			log.Printf("read validation history for %s: %v", slug, err)
+			s.failPage(w, r, http.StatusInternalServerError, "The validation history could not be loaded.")
+			return
+		}
+		records := make([]validationStatusRecord, 0, len(history))
+		for _, run := range history {
+			records = append(records, newValidationStatusRecord(run))
+		}
+		s.render(w, "admin-app", s.view(r, views[index].Name, map[string]any{
+			"SignedIn": true, "IsAdmin": true, "App": views[index], "History": records,
+			"Done": r.URL.Query().Get("done"), "Error": r.URL.Query().Get("error"),
+		}))
+		return
+	}
+	s.failPage(w, r, http.StatusNotFound, "That application is not registered.")
+}
+
 func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -2691,7 +2741,7 @@ func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("id")
-	account := "/admin/users/" + url.PathEscape(userID) + "/sessions"
+	account := "/admin/users/" + url.PathEscape(userID)
 	if _, err := s.revokeUserSessions(r.Context(), userID, ""); err != nil {
 		s.failOperation(w, r, "revoke account sessions", account, err)
 		return
@@ -2736,7 +2786,7 @@ func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "revoke session", "/admin/users", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/users/"+url.PathEscape(revoked.UserID)+"/sessions?done="+url.QueryEscape("The session was ended."), http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/users/"+url.PathEscape(revoked.UserID)+"?done="+url.QueryEscape("The session was ended."), http.StatusSeeOther)
 }
 
 func (s *Server) revokeHydraLoginSession(ctx context.Context, sessionID string) error {
@@ -2962,6 +3012,8 @@ func (s *Server) view(r *http.Request, title string, data map[string]any) map[st
 	data["Title"] = title
 	data["CSRF"] = csrfToken(r)
 	data["Path"] = r.URL.Path
+	data["Revision"] = version.Short()
+	data["StartedAt"] = version.StartedAt()
 	if _, ok := data["SignedIn"]; !ok {
 		user, _, err := s.current(r)
 		data["SignedIn"] = err == nil
@@ -3013,18 +3065,23 @@ func browserPage(r *http.Request, page identity.Page, returned, total int) pageV
 
 func templateHelpers() template.FuncMap {
 	return template.FuncMap{
-		"moment": func(value time.Time) string {
-			if value.IsZero() {
-				return "never"
+		// Both accept any value so a page whose data omits a timestamp
+		// renders a blank rather than failing to render at all.
+		"moment": func(value any) string {
+			moment, ok := value.(time.Time)
+			if !ok || moment.IsZero() {
+				return "unknown"
 			}
-			return value.UTC().Format("2 Jan 2006 15:04 MST")
+			return moment.UTC().Format("2 Jan 2006 15:04 MST")
 		},
-		"iso": func(value time.Time) string {
-			if value.IsZero() {
+		"iso": func(value any) string {
+			moment, ok := value.(time.Time)
+			if !ok || moment.IsZero() {
 				return ""
 			}
-			return value.UTC().Format(time.RFC3339)
+			return moment.UTC().Format(time.RFC3339)
 		},
+		"shortRevision": shortReleaseRevision,
 		"identityLabel": func(source, githubLogin string) string {
 			switch source {
 			case identity.IdentitySourceGitHub:
