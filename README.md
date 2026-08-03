@@ -372,6 +372,24 @@ publish: what happened, how much of it, and which dependency is at fault.
   many accounts exist" — that is `/api/v1/metrics`. The `Requests served`
   section of `/monitoring` renders the same report.
 
+- `GET /api/v1/logs?level=&contains=&since=&limit=` — `shauth.logs/v1`: what
+  this instance has reported, newest first, filtered by severity, text, or
+  time. The buffer tees the same lines the container stream receives, so it
+  publishes nothing that was not already written to standard error; the rule
+  that secrets are never logged is what keeps it safe to read, and the stack
+  gate checks the bootstrap credential does not appear in it. Lines are held
+  in memory and lost on restart. `/admin/logs` renders the same buffer.
+  Severity comes from the writer, never from guessing at the wording of a
+  message: a line written straight to the standard logger by a dependency is
+  reported as unlabelled rather than relabelled.
+- `GET /api/v1/sessions?state=active|all&user_id=&since=` —
+  `shauth.sessions/v1`: browser sessions across every account with the
+  account they belong to. Sessions could previously be listed only one
+  account at a time, which meant knowing whose session to look for before
+  looking. `POST /internal/users/{id}/sessions/revoke` ends every session for
+  an account under the write credential, the operation the browser interface
+  already had. `/admin/sessions` is the same listing with the same control.
+
 Debugging a specific failure:
 
 - `GET /api/v1/sessions/{id}` — `shauth.session/v1`: one session with its
