@@ -10,7 +10,7 @@ COPY internal/observe ./internal/observe
 COPY cmd/shauth-validator ./cmd/shauth-validator
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shauth-validator ./cmd/shauth-validator
 
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 WORKDIR /opt/shauth-validator
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY package.json package-lock.json ./
