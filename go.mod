@@ -6,10 +6,10 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.0
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.35.0
-	github.com/coreos/go-oidc/v3 v3.16.0
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/jackc/pgx/v5 v5.10.0
 	golang.org/x/crypto v0.52.0
-	golang.org/x/oauth2 v0.29.0
+	golang.org/x/oauth2 v0.36.0
 )
 
 require (
