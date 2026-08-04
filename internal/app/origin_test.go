@@ -154,6 +154,12 @@ func TestDefaultFormPolicyRemainsSameOrigin(t *testing.T) {
 	if got := response.Header().Get("Content-Security-Policy"); got != baseContentSecurityPolicy {
 		t.Fatalf("content security policy = %q, want %q", got, baseContentSecurityPolicy)
 	}
+	if got := response.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want DENY", got)
+	}
+	if got := response.Header().Get("Permissions-Policy"); got != "camera=(), geolocation=(), microphone=(), payment=(), usb=()" {
+		t.Fatalf("Permissions-Policy = %q", got)
+	}
 }
 
 func TestProviderLogoutPolicyAllowsRegisteredClientFrames(t *testing.T) {
@@ -167,6 +173,9 @@ func TestProviderLogoutPolicyAllowsRegisteredClientFrames(t *testing.T) {
 
 	if got := response.Header().Get("Content-Security-Policy"); got != oidcLogoutContentSecurityPolicy {
 		t.Fatalf("content security policy = %q, want %q", got, oidcLogoutContentSecurityPolicy)
+	}
+	if got := response.Header().Get("X-Frame-Options"); got != "" {
+		t.Fatalf("X-Frame-Options = %q, want empty for provider logout frame flow", got)
 	}
 }
 
