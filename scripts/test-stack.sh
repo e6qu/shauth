@@ -32,6 +32,8 @@ random_secret() {
 
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 export POSTGRES_PASSWORD
+SHAUTH_POSTGRES_HOST_PORT=${SHAUTH_POSTGRES_HOST_PORT:-55432}
+export SHAUTH_POSTGRES_HOST_PORT
 HYDRA_SYSTEM_SECRET=$(random_secret)
 export HYDRA_SYSTEM_SECRET
 export HYDRA_DSN="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/hydra?sslmode=disable"
@@ -159,7 +161,7 @@ if [ "$attempt" -eq 300 ]; then
   exit 1
 fi
 
-SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/shauth?sslmode=disable" \
+SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/shauth?sslmode=disable" \
 	SHAUTH_ACCEPTANCE_HYDRA_ADMIN_URL=http://localhost:4445 \
 	SHAUTH_ACCEPTANCE_HYDRA_PUBLIC_URL=http://localhost:4444 \
 	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app \
@@ -351,7 +353,7 @@ OIDC_GATEWAY_POST_LOGOUT_URL=http://gateway-integration.localhost:5556/auth/shau
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5556 \
-DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/${SHAUTH_GATEWAY_PRIMARY_DATABASE}?sslmode=disable" \
+DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/${SHAUTH_GATEWAY_PRIMARY_DATABASE}?sslmode=disable" \
 "$gateway_binary" &
 gateway_pid=$!
 OIDC_GATEWAY_ISSUER=http://localhost:8080 \
@@ -364,7 +366,7 @@ OIDC_GATEWAY_POST_LOGOUT_URL='http://gateway-secondary.localhost:5558/auth/shaut
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_SECONDARY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5558 \
-DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/${SHAUTH_GATEWAY_SECONDARY_DATABASE}?sslmode=disable" \
+DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/${SHAUTH_GATEWAY_SECONDARY_DATABASE}?sslmode=disable" \
 "$gateway_binary" &
 gateway_secondary_pid=$!
 OIDC_GATEWAY_ISSUER=http://localhost:8080 \
@@ -377,7 +379,7 @@ OIDC_GATEWAY_POST_LOGOUT_URL='http://gateway-tertiary.localhost:5560/auth/shauth
 OIDC_GATEWAY_COOKIE_SECRET="$SHAUTH_GATEWAY_TERTIARY_COOKIE_SECRET" \
 OIDC_GATEWAY_ALLOW_INSECURE_COOKIE=true \
 OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5560 \
-DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:55432/${SHAUTH_GATEWAY_TERTIARY_DATABASE}?sslmode=disable" \
+DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/${SHAUTH_GATEWAY_TERTIARY_DATABASE}?sslmode=disable" \
 "$gateway_binary" &
 gateway_tertiary_pid=$!
 attempt=0

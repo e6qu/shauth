@@ -6,6 +6,11 @@ that exact source archive and verifies SHA-256
 `7ceaae3299780959e8390925732629931f63f20300464d2822d49628eeb3332e`
 before applying `logout-token-exp.patch`.
 
+The Docker build then pins security-fixed versions of vulnerable transitive Go
+modules before compiling Hydra. These pins are part of the reproducible image
+build and must be retained until a newer upstream Hydra release supersedes
+v26.2.0.
+
 The patch adds the required `exp` claim to every OpenID Connect Back-Channel
 Logout Token, with a two-minute lifetime from `iat`. It is the minimal portion
 of the upstream fix proposed in

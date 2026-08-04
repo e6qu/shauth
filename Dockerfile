@@ -24,6 +24,21 @@ RUN wget -O hydra.tar.gz "https://github.com/ory/hydra/archive/${HYDRA_COMMIT}.t
 WORKDIR /src/hydra
 COPY third_party/hydra-v26.2.0/logout-token-exp.patch /tmp/logout-token-exp.patch
 RUN patch --forward --fuzz=0 -p1 < /tmp/logout-token-exp.patch
+# Hydra v26.2.0 is the newest upstream release, but its module graph predates
+# several security fixes. Pin the repaired transitive modules explicitly so the
+# final OAuth server does not retain known vulnerable implementations.
+RUN go get \
+    github.com/go-jose/go-jose/v3@v3.0.5 \
+    github.com/jackc/pgx/v5@v5.9.2 \
+    go.opentelemetry.io/otel@v1.43.0 \
+    go.opentelemetry.io/otel/sdk@v1.43.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.43.0 \
+    golang.org/x/crypto@v0.53.0 \
+    golang.org/x/net@v0.56.0 \
+    golang.org/x/sys@v0.46.0 \
+    golang.org/x/text@v0.39.0 \
+    google.golang.org/grpc@v1.82.1 \
+    && go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/hydra .
 
 FROM gcr.io/distroless/static-debian12:nonroot
@@ -36,4 +51,5 @@ COPY --from=hydra-build /src/hydra/LICENSE /licenses/hydra/LICENSE
 COPY migrations /migrations
 USER nonroot:nonroot
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["/shauth-healthcheck"]
 ENTRYPOINT ["/shauth"]
