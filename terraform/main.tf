@@ -101,6 +101,7 @@ resource "aws_security_group" "task" {
     protocol        = "tcp"
     security_groups = [local.api_gateway_vpc_link_security_group_id]
   }
+  # trivy:ignore:AVD-AWS-0104 -- Shauth reaches registered HTTPS/OIDC coordinates; security groups cannot restrict by DNS name.
   egress {
     description = "HTTPS to configured identity providers and email service"
     from_port   = 443
@@ -108,6 +109,7 @@ resource "aws_security_group" "task" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # trivy:ignore:AVD-AWS-0104 -- DNS resolvers are deployment-supplied and can be addressed only by CIDR.
   egress {
     description = "DNS over UDP"
     from_port   = 53
@@ -115,6 +117,7 @@ resource "aws_security_group" "task" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # trivy:ignore:AVD-AWS-0104 -- DNS resolvers are deployment-supplied and can be addressed only by CIDR.
   egress {
     description = "DNS over TCP"
     from_port   = 53
@@ -129,6 +132,7 @@ resource "aws_security_group" "validator" {
   name_prefix = "${var.name}-validator-"
   description = "Outbound-only browser validation worker"
   vpc_id      = var.vpc_id
+  # trivy:ignore:AVD-AWS-0104 -- The validator reaches the registered HTTPS application origins; security groups cannot restrict by DNS name.
   egress {
     description = "HTTPS to Shauth and registered applications"
     from_port   = 443
@@ -136,6 +140,7 @@ resource "aws_security_group" "validator" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # trivy:ignore:AVD-AWS-0104 -- DNS resolvers are deployment-supplied and can be addressed only by CIDR.
   egress {
     description = "DNS over UDP"
     from_port   = 53
@@ -143,6 +148,7 @@ resource "aws_security_group" "validator" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # trivy:ignore:AVD-AWS-0104 -- DNS resolvers are deployment-supplied and can be addressed only by CIDR.
   egress {
     description = "DNS over TCP"
     from_port   = 53
@@ -157,13 +163,19 @@ resource "aws_security_group" "api_link" {
   count       = local.owns_api_gateway_vpc_link ? 1 : 0
   name_prefix = "${var.name}-api-link-"
   vpc_id      = var.vpc_id
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  tags = local.tags
+  tags        = local.tags
+}
+
+// This rule is separate from either security group so the task can admit the
+// VPC Link while the VPC Link is restricted to the task, without a cycle.
+resource "aws_vpc_security_group_egress_rule" "api_link_to_task" {
+  count                        = local.owns_api_gateway_vpc_link ? 1 : 0
+  description                  = "Private VPC Link traffic to Shauth"
+  security_group_id            = aws_security_group.api_link[0].id
+  ip_protocol                  = "tcp"
+  from_port                    = 8080
+  to_port                      = 8080
+  referenced_security_group_id = aws_security_group.task.id
 }
 
 resource "random_password" "hydra" {

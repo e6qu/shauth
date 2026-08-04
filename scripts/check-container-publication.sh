@@ -3,7 +3,7 @@
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
-workflow="$root/.github/workflows/ci.yml"
+workflow="$root/.github/workflows/publish.yml"
 gha='$'
 
 "$root/scripts/test-workflow-timeouts.sh"

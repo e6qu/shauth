@@ -53,6 +53,15 @@ link. The explicit creation flag remains known while resource-derived IDs are
 unknown during planning. Terraform rejects either ownership mode when its
 corresponding coordinate contract is not satisfied.
 
+The module restricts its API Gateway VPC Link security group to TCP 8080 only
+to the Shauth task security group. Shauth and its validator still need DNS and
+HTTPS egress to configured identity providers, email delivery, monitoring
+sources, and registered application origins; AWS security groups cannot express
+those hostname-based allowlists. The Trivy IaC scan records those six precise
+rules as reviewed exceptions. A deployment that requires destination filtering
+must provide an approved egress firewall or proxy and replace the exceptions
+with that boundary's security-group coordinates.
+
 Shauth's task role has only the permissions required for identity delivery.
 Administrators register each managed app with its OIDC client, launch URL,
 published health URL, and optional monitoring URL. Shauth checks health through
