@@ -80,11 +80,20 @@ moved {
 resource "aws_cloudwatch_log_group" "this" {
   name              = "/e6qu/${var.name}"
   retention_in_days = 30
+  kms_key_id        = aws_kms_key.data.arn
   tags              = local.tags
+}
+
+resource "aws_kms_key" "data" {
+  description             = "Encrypts Shauth operational logs and credentials"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  tags                    = local.tags
 }
 
 resource "aws_security_group" "task" {
   name_prefix = "${var.name}-task-"
+  description = "Limits Shauth task ingress to the VPC Link and egress to HTTPS and DNS"
   vpc_id      = var.vpc_id
   ingress {
     from_port       = 8080
@@ -93,9 +102,24 @@ resource "aws_security_group" "task" {
     security_groups = [local.api_gateway_vpc_link_security_group_id]
   }
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS to configured identity providers and email service"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "DNS over UDP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "DNS over TCP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   tags = local.tags
@@ -106,9 +130,24 @@ resource "aws_security_group" "validator" {
   description = "Outbound-only browser validation worker"
   vpc_id      = var.vpc_id
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS to Shauth and registered applications"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "DNS over UDP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "DNS over TCP"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   tags = local.tags
@@ -159,6 +198,7 @@ resource "random_password" "admin_api_write_token" {
 resource "aws_secretsmanager_secret" "runtime" {
   name                    = "${var.name}/runtime"
   recovery_window_in_days = 7
+  kms_key_id              = aws_kms_key.data.arn
   tags                    = local.tags
 }
 
@@ -175,6 +215,7 @@ resource "aws_secretsmanager_secret_version" "runtime" {
 resource "aws_secretsmanager_secret" "validator" {
   name                    = "${var.name}/validator"
   recovery_window_in_days = 7
+  kms_key_id              = aws_kms_key.data.arn
   tags                    = local.tags
 }
 
@@ -188,6 +229,7 @@ resource "aws_secretsmanager_secret_version" "validator" {
 resource "aws_secretsmanager_secret" "validation_status" {
   name                    = "${var.name}/validation-status-reader"
   recovery_window_in_days = 7
+  kms_key_id              = aws_kms_key.data.arn
   tags                    = local.tags
 }
 
@@ -204,6 +246,7 @@ resource "aws_secretsmanager_secret_version" "validation_status" {
 resource "aws_secretsmanager_secret" "session_reset" {
   name                    = "${var.name}/session-reset"
   recovery_window_in_days = 7
+  kms_key_id              = aws_kms_key.data.arn
   tags                    = local.tags
 }
 
@@ -217,6 +260,7 @@ resource "aws_secretsmanager_secret_version" "session_reset" {
 resource "aws_secretsmanager_secret" "admin_api_reader" {
   name                    = "${var.name}/admin-api-reader"
   recovery_window_in_days = 7
+  kms_key_id              = aws_kms_key.data.arn
   tags                    = local.tags
 }
 
@@ -230,6 +274,7 @@ resource "aws_secretsmanager_secret_version" "admin_api_reader" {
 resource "aws_secretsmanager_secret" "admin_api_writer" {
   name                    = "${var.name}/admin-api-writer"
   recovery_window_in_days = 7
+  kms_key_id              = aws_kms_key.data.arn
   tags                    = local.tags
 }
 
@@ -488,6 +533,10 @@ resource "aws_apigatewayv2_stage" "this" {
   default_route_settings {
     throttling_burst_limit = 50
     throttling_rate_limit  = 25
+  }
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.this.arn
+    format          = jsonencode({ requestId = "$context.requestId", sourceIp = "$context.identity.sourceIp", requestTime = "$context.requestTime", httpMethod = "$context.httpMethod", routeKey = "$context.routeKey", status = "$context.status", protocol = "$context.protocol", responseLength = "$context.responseLength" })
   }
   tags = local.tags
 }
