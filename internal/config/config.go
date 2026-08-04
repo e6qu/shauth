@@ -5,9 +5,11 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/e6qu/shauth/internal/monitoring"
 )
@@ -135,8 +137,8 @@ func Load(getenv func(string) string) (Config, error) {
 	if config.EntraTenantID != "" && !tenantIDPattern.MatchString(config.EntraTenantID) {
 		return Config{}, fmt.Errorf("ENTRA_TENANT_ID must be a specific Microsoft Entra ID tenant UUID")
 	}
-	if publicURL.Scheme != "https" && !config.AllowInsecureCookies {
-		return Config{}, fmt.Errorf("SHAUTH_PUBLIC_URL must use HTTPS unless SHAUTH_ALLOW_INSECURE_COOKIES=true")
+	if publicURL.Scheme != "https" && (!config.AllowInsecureCookies || !loopbackHost(publicURL.Hostname())) {
+		return Config{}, fmt.Errorf("SHAUTH_PUBLIC_URL must use HTTPS; SHAUTH_ALLOW_INSECURE_COOKIES=true is permitted only for a loopback development URL")
 	}
 	if config.Address == "" {
 		config.Address = ":8080"
@@ -191,6 +193,11 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	return config, nil
+}
+
+func loopbackHost(host string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	return host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "::1" || net.ParseIP(host).IsLoopback()
 }
 
 func requiredURL(getenv func(string) string, name string) (*url.URL, error) {

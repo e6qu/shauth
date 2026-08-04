@@ -471,10 +471,15 @@ func securityHeaders(next http.Handler) http.Handler {
 		policy := baseContentSecurityPolicy
 		if r.URL.Path == "/oauth2/sessions/logout" {
 			policy = oidcLogoutContentSecurityPolicy
+		} else {
+			// CSP frame-ancestors is authoritative in modern browsers; this
+			// retains the equivalent protection for older clients.
+			w.Header().Set("X-Frame-Options", "DENY")
 		}
 		w.Header().Set("Content-Security-Policy", policy)
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()")
 		next.ServeHTTP(w, r)
 	})
 }

@@ -609,6 +609,8 @@ async function waitForFile(file, timeout) {
 
 async function createUpstream(port, title, releaseRevision) {
   let latestIdentity;
+  const escapedTitle = escapeHTML(title);
+  const escapedReleaseRevision = escapeHTML(releaseRevision);
   const server = http.createServer((request, response) => {
     const username = request.headers["x-forwarded-preferred-username"] ?? "";
     const email = request.headers["x-forwarded-email"] ?? "";
@@ -625,7 +627,7 @@ async function createUpstream(port, title, releaseRevision) {
       "content-security-policy": "default-src 'self'; frame-ancestors 'self'",
       "x-frame-options": "SAMEORIGIN",
     });
-    response.end(`<!doctype html><html lang=en><title>${title}</title><h1>${title}</h1><details><summary data-shauth-user="${escapeHTML(username)}">${escapeHTML(username)}</summary><form method=post action=/auth/logout><button data-shauth-sign-out>Sign out</button></form></details><dl><dt>Username</dt><dd data-testid=validation-username>${escapeHTML(username)}</dd><dt>Email</dt><dd data-testid=validation-email>${escapeHTML(email)}</dd><dt>Role</dt><dd data-testid=validation-role>${escapeHTML(role)}</dd><dt>Release</dt><dd data-testid=validation-release>${releaseRevision}</dd></dl></html>`);
+    response.end(`<!doctype html><html lang=en><title>${escapedTitle}</title><h1>${escapedTitle}</h1><details><summary data-shauth-user="${escapeHTML(username)}">${escapeHTML(username)}</summary><form method=post action=/auth/logout><button data-shauth-sign-out>Sign out</button></form></details><dl><dt>Username</dt><dd data-testid=validation-username>${escapeHTML(username)}</dd><dt>Email</dt><dd data-testid=validation-email>${escapeHTML(email)}</dd><dt>Role</dt><dd data-testid=validation-role>${escapeHTML(role)}</dd><dt>Release</dt><dd data-testid=validation-release>${escapedReleaseRevision}</dd></dl></html>`);
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
