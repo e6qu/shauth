@@ -62,6 +62,10 @@ and arm64 image index. The direct single-platform images remain addressable as
 The workflow verifies the registry manifests and retains exactly the package
 versions belonging to the newest 20 immutable releases, removing older,
 untagged, and non-release versions.
+Pull requests run the full integration suite, Terraform formatting, validation,
+tests, and a high/critical Trivy configuration scan before merge. After a merge
+to `main`, only the container publishing flow runs; it builds, verifies,
+publishes, and retains the immutable image releases.
 Shauth exposes Ory Hydra's complete public OpenID Connect surface at its public
 issuer, including discovery, authorization, token, UserInfo, revocation,
 introspection, and front-channel logout endpoints. Relying applications never

@@ -42,6 +42,11 @@ run "standalone_module_owns_vpc_link" {
     condition     = length(aws_security_group.api_link) == 1
     error_message = "The standalone module must create exactly one VPC Link security group."
   }
+
+  assert {
+    condition     = aws_vpc_security_group_egress_rule.api_link_to_task[0].ip_protocol == "tcp" && aws_vpc_security_group_egress_rule.api_link_to_task[0].from_port == 8080 && aws_vpc_security_group_egress_rule.api_link_to_task[0].to_port == 8080
+    error_message = "The VPC Link security group must reach only Shauth's private listener."
+  }
 }
 
 run "deployment_owned_vpc_link" {
