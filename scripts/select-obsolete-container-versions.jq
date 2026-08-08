@@ -16,4 +16,9 @@
 | . as $version
 | ($version.metadata.container.tags // []) as $tags
 | select([ $tags[] | select(. as $tag | $keep_tags | index($tag) != null) ] | length == 0)
+# Never delete something a publish may still be assembling. Architecture images
+# are pushed before the manifest that makes them reachable, so a very recent
+# version can be a live run's work rather than an obsolete release. The
+# concurrency group makes overlap unlikely; this makes it harmless.
+| select(($version.created_at | fromdateiso8601) < (now - $inflight_seconds))
 | $version.id

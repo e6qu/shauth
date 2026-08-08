@@ -1,6 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 name: Publish containers
 
+# One publish at a time. The prune at the end of a run keeps only the versions
+# reachable from a bare 12-hex manifest tag, and a run that has pushed its
+# architecture images but not yet created that manifest has no such tag — so a
+# second run's prune deletes the first run's in-flight images and its manifest
+# step then fails with "<sha>-amd64: not found" while both build jobs report
+# success. Three runs overlapped on 2026-08-08 and did exactly that.
+#
+# cancel-in-progress stays false: cancelling a publish would abandon a commit
+# with no image, which is the failure this workflow exists to prevent.
+concurrency:
+  group: publish-containers
+  cancel-in-progress: false
+
 on:
   push:
     branches: [main]
