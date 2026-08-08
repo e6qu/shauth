@@ -72,10 +72,30 @@ trap 'rm -f "$fixture"' EXIT
 	}
 ] + [{id: 999, created_at: "2026-08-01T00:00:00Z", metadata: {container: {tags: []}}}]' >"$fixture"
 
-selected="$(jq -r --argjson keep 20 -f "$root/scripts/select-obsolete-container-versions.jq" "$fixture" | sort -n | paste -sd, -)"
+selected="$(jq -r --argjson keep 20 --argjson inflight_seconds 1200 -f "$root/scripts/select-obsolete-container-versions.jq" "$fixture" | sort -n | paste -sd, -)"
 if [[ "$selected" != '0,1,2,10,11,12,999' ]]; then
 	echo "retention selector chose unexpected package versions: $selected" >&2
 	exit 1
 fi
+
+# A publish pushes its architecture images before the manifest that makes them
+# reachable, so an in-flight run's images look exactly like refuse to this
+# selector. One run's prune deleted another's and the second run's manifest step
+# then failed with "<sha>-amd64: not found" while both its builds reported
+# success. Anything younger than the window must survive.
+inflight_fixture="$(mktemp)"
+trap 'rm -f "$fixture" "$inflight_fixture"' EXIT
+jq -n --arg recent "$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1M +%Y-%m-%dT%H:%M:%SZ)" '[
+	{id: 1, created_at: "2026-07-01T00:00:00Z", metadata: {container: {tags: ["aaaaaaaaaaaa-amd64"]}}},
+	{id: 2, created_at: $recent, metadata: {container: {tags: ["bbbbbbbbbbbb-amd64"]}}},
+	{id: 3, created_at: $recent, metadata: {container: {tags: ["bbbbbbbbbbbb-arm64"]}}}
+]' >"$inflight_fixture"
+
+inflight_selected="$(jq -r --argjson keep 20 --argjson inflight_seconds 1200 -f "$root/scripts/select-obsolete-container-versions.jq" "$inflight_fixture" | sort -n | paste -sd, -)"
+if [[ "$inflight_selected" != '1' ]]; then
+	echo "retention selector must reap only the old orphan, chose: $inflight_selected" >&2
+	exit 1
+fi
+echo "in-flight architecture images are retained"
 
 echo 'container publication workflow contract passed'
