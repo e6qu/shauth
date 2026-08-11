@@ -125,6 +125,26 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 			request.Header.Set("X-Forwarded-Subject", session.Subject)
 		}
 	}
+	// Everything the proxy serves sits behind requireSession, so none of it may
+	// outlive the session in a browser cache. The gateway sets no-store on the
+	// pages it renders itself, but passed upstream responses through untouched,
+	// and the Simulator Console answers "/" with Last-Modified and no
+	// Cache-Control at all. That combination invites heuristic caching: a cache
+	// may reuse the response for a fraction of the document's age without
+	// revalidating, and that shell is weeks old, so the authenticated page
+	// stayed fresh for days.
+	//
+	// The effect showed up after logout. The gateway does redirect a revoked
+	// cookie to /auth/signed-out, but the browser never asked: it re-served "/"
+	// from cache as 200, and only the terminal iframe -- uncached -- made the
+	// request that redirects to sign in. So the console shell remained on
+	// screen for whoever reached the machine next, and the SSO acceptance suite
+	// timed out waiting for a top-level navigation that could not happen.
+	//
+	// The validators go too: leaving ETag or Last-Modified behind lets a cache
+	// keep the entry and merely revalidate it, which is the behaviour being
+	// removed.
+	proxy.ModifyResponse = denyProxiedCaching
 	proxy.ErrorHandler = func(response http.ResponseWriter, request *http.Request, err error) {
 		observe.Errorf("OIDC gateway upstream %s failed: %v", request.URL.Path, err)
 		http.Error(response, "Upstream service unavailable", http.StatusBadGateway)
@@ -397,6 +417,16 @@ func (server *Server) backchannelLogout(response http.ResponseWriter, request *h
 		return
 	}
 	response.WriteHeader(http.StatusOK)
+}
+
+// denyProxiedCaching stops authenticated upstream responses being retained by a
+// browser cache, where they would outlive the session that authorised them.
+func denyProxiedCaching(response *http.Response) error {
+	response.Header.Set("Cache-Control", "no-store")
+	response.Header.Del("Expires")
+	response.Header.Del("ETag")
+	response.Header.Del("Last-Modified")
+	return nil
 }
 
 func validLogoutEvent(events map[string]json.RawMessage) bool {

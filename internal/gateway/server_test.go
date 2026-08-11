@@ -353,3 +353,39 @@ func TestProxyHeadersUseConfiguredPublicCoordinates(t *testing.T) {
 		t.Fatalf("public forwarding coordinates were not set: %#v", request.Header)
 	}
 }
+
+// The Simulator Console answers "/" with Last-Modified and no Cache-Control,
+// which lets a browser cache it heuristically. The gateway proxied that through
+// untouched, so after logout the shell was re-served from cache as 200: the
+// revoked-cookie redirect below never ran because no request reached the
+// gateway at all. Authenticated bytes must not outlive the session.
+func TestProxiedResponsesAreNotCacheable(t *testing.T) {
+	t.Parallel()
+	for name, header := range map[string]http.Header{
+		"console shell": {
+			"Content-Type":  []string{"text/html; charset=utf-8"},
+			"Last-Modified": []string{"Tue, 21 Jul 2026 18:44:44 GMT"},
+		},
+		"validated asset": {
+			"ETag":          []string{`"abc123"`},
+			"Cache-Control": []string{"public, max-age=3600"},
+			"Expires":       []string{"Wed, 12 Aug 2026 00:00:00 GMT"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			response := &http.Response{StatusCode: http.StatusOK, Header: header.Clone()}
+			if err := denyProxiedCaching(response); err != nil {
+				t.Fatalf("denyProxiedCaching() = %v, want nil", err)
+			}
+			if actual := response.Header.Get("Cache-Control"); actual != "no-store" {
+				t.Fatalf("Cache-Control = %q, want no-store", actual)
+			}
+			for _, validator := range []string{"ETag", "Last-Modified", "Expires"} {
+				if actual := response.Header.Get(validator); actual != "" {
+					t.Fatalf("%s = %q, want it removed so a cache cannot revalidate the entry", validator, actual)
+				}
+			}
+		})
+	}
+}
