@@ -97,6 +97,47 @@ func TestSnapshotValidationRequiresConsistentPricingTotals(t *testing.T) {
 	}
 }
 
+// An application publishes the same document without a price, because it has
+// none. The infrastructure contract must keep requiring one, so that a source
+// describing billable cloud resources can never quietly stop reporting cost.
+func TestApplicationSchemaMakesCostOptionalAndInfrastructureSchemaDoesNot(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		schema   string
+		cost     *CostEstimate
+		accepted bool
+	}{
+		"application without cost":    {SchemaVersionApplication, nil, true},
+		"application with cost":       {SchemaVersionApplication, validSnapshot().CostEstimate, true},
+		"infrastructure without cost": {SchemaVersion, nil, false},
+		"infrastructure with cost":    {SchemaVersion, validSnapshot().CostEstimate, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := validSnapshot()
+			snapshot.SchemaVersion = testCase.schema
+			snapshot.CostEstimate = testCase.cost
+			err := snapshot.validate(testNow)
+			if testCase.accepted && err != nil {
+				t.Fatalf("validate() rejected %s: %v", name, err)
+			}
+			if !testCase.accepted && err == nil {
+				t.Fatalf("validate() accepted %s", name)
+			}
+		})
+	}
+}
+
+// A price that is present is still held to the full standard, whichever schema
+// carries it -- otherwise an application source would be a way to publish a
+// cost estimate that discloses nothing.
+func TestApplicationSchemaStillValidatesAPresentCostEstimate(t *testing.T) {
+	snapshot := validSnapshot()
+	snapshot.SchemaVersion = SchemaVersionApplication
+	snapshot.CostEstimate.Excludes = []string{"taxes"}
+	if err := snapshot.validate(testNow); err == nil {
+		t.Fatal("validate() accepted an incomplete price basis under the application schema")
+	}
+}
+
 func TestSnapshotValidationFutureClockSkewBoundary(t *testing.T) {
 	for name, offset := range map[string]time.Duration{"accepted boundary": time.Minute, "rejected beyond boundary": time.Minute + time.Nanosecond} {
 		t.Run(name, func(t *testing.T) {
@@ -127,7 +168,7 @@ func validSnapshot() Snapshot {
 				{Name: "storage.allocation", Label: "Storage allocation", Unit: "GiB", Status: "not_applicable"},
 			},
 		}},
-		CostEstimate: CostEstimate{
+		CostEstimate: &CostEstimate{
 			Currency: "USD", Basis: PricingBasis, HoursPerMonth: 730,
 			Hourly: 0.02, Daily: 0.48, Monthly: 14.60,
 			Excludes:    []string{"taxes", "reservations", "savings_plans", "credits", "free_tier"},

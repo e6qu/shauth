@@ -64,9 +64,14 @@ type BootstrapApp struct {
 	BackChannelLogoutURI   string   `json:"backchannel_logout_uri"`
 	HealthURL              string   `json:"health_url"`
 	MonitoringURL          string   `json:"monitoring_url"`
-	ValidationURL          string   `json:"validation_url"`
-	SignedOutURL           string   `json:"signed_out_url"`
-	ReleaseRevision        string   `json:"release_revision"`
+	// MonitoringToken is the bearer presented when reading MonitoringURL. It
+	// travels on this Secrets Manager backed variable because it is a
+	// credential, alongside the client secret already carried here, rather than
+	// on a new channel of its own.
+	MonitoringToken string `json:"monitoring_token"`
+	ValidationURL   string `json:"validation_url"`
+	SignedOutURL    string `json:"signed_out_url"`
+	ReleaseRevision string `json:"release_revision"`
 }
 
 // Load reads and validates the complete production configuration.

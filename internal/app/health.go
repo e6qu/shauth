@@ -64,6 +64,7 @@ func (s *Server) deepHealth(ctx context.Context) (string, []healthCheck) {
 			return healthHealthy, ""
 		}),
 		s.timedCheck(ctx, "managed_app_registration", s.checkManagedAppRegistration),
+		s.timedCheck(ctx, "application_monitoring", s.checkApplicationMonitoring),
 		s.timedCheck(ctx, "validation_queue", s.checkValidationQueue),
 		s.timedCheck(ctx, "invitation_mailer", func(context.Context) (string, string) {
 			if s.config.SESRegion == "" || s.config.InvitationEmailFrom == "" {
