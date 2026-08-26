@@ -568,7 +568,7 @@ func (s *Server) monitoringAPI(w http.ResponseWriter, r *http.Request) {
 			active = &counted
 		}
 	}
-	results := s.monitoringClient.FetchAll(r.Context(), s.config.MonitoringSources)
+	results := s.monitoringClient.FetchAll(r.Context(), s.monitoringSources(r.Context()))
 	records := make([]monitoringSourceRecord, 0, len(results))
 	for _, result := range results {
 		record := monitoringSourceRecord{Source: result.SourceName, Stale: result.Stale, Error: result.Error}

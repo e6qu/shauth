@@ -19,7 +19,26 @@ import (
 	"time"
 )
 
+// SchemaVersion is the original infrastructure observation contract, in which a
+// cost estimate is mandatory: it describes cloud resources that are always
+// billable, so an observation without a price is an observation that hides one.
 const SchemaVersion = "e6qu.monitoring/v1"
+
+// SchemaVersionApplication is the same document with the cost estimate made
+// optional, so a deployed application can publish its own observation.
+//
+// v1 could not be that contract. An application is not a priced resource -- an
+// IRC bouncer has no on-demand rate -- and v1 requires USD public on-demand
+// pricing with line items and disclosed limitations. Every app would have had
+// to invent a price to say anything at all.
+//
+// Optional is not the same as absent. Where the resources being reported ARE
+// priced -- the workspaces ECS Dev Desktop runs, and the simulator's ECS
+// services -- the estimate is still required, and those publishers assert it in
+// their own tests. This contract makes cost meaningful where it applies rather
+// than mandatory everywhere and therefore fabricated somewhere.
+const SchemaVersionApplication = "e6qu.monitoring/v2"
+
 const PricingBasis = "public-on-demand"
 const maximumResponseBytes = 1 << 20
 
@@ -32,10 +51,14 @@ type Source struct {
 }
 
 type Snapshot struct {
-	SchemaVersion string       `json:"schema_version"`
-	ObservedAt    time.Time    `json:"observed_at"`
-	Resources     []Resource   `json:"resources"`
-	CostEstimate  CostEstimate `json:"cost_estimate"`
+	SchemaVersion string     `json:"schema_version"`
+	ObservedAt    time.Time  `json:"observed_at"`
+	Resources     []Resource `json:"resources"`
+	// Nil only under SchemaVersionApplication, and only when the publisher
+	// reports nothing billable. A nil estimate means "this source has no priced
+	// resources", never "the price could not be determined" -- an unknown price
+	// belongs in a metric with status "unavailable", where it is visible.
+	CostEstimate *CostEstimate `json:"cost_estimate,omitempty"`
 }
 
 type Resource struct {
@@ -191,7 +214,7 @@ func (snapshot Snapshot) Validate() error {
 }
 
 func (snapshot Snapshot) validate(now time.Time) error {
-	if snapshot.SchemaVersion != SchemaVersion {
+	if snapshot.SchemaVersion != SchemaVersion && snapshot.SchemaVersion != SchemaVersionApplication {
 		return fmt.Errorf("unsupported monitoring schema %q", snapshot.SchemaVersion)
 	}
 	if snapshot.ObservedAt.IsZero() {
@@ -231,6 +254,14 @@ func (snapshot Snapshot) validate(now time.Time) error {
 			}
 			metricNames[metric.Name] = struct{}{}
 		}
+	}
+	if snapshot.CostEstimate == nil {
+		// v1 describes billable cloud resources, so a missing estimate there is
+		// a hidden bill rather than an absent one.
+		if snapshot.SchemaVersion == SchemaVersion {
+			return fmt.Errorf("monitoring schema %s requires a cost estimate", SchemaVersion)
+		}
+		return nil
 	}
 	return snapshot.CostEstimate.validate()
 }

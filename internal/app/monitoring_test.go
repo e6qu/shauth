@@ -32,7 +32,7 @@ func TestMonitoringPageRendersGenericResourceMetricsAndPriceBasis(t *testing.T) 
 						ID: "shared-database", Name: "Shared PostgreSQL", Kind: "database", Health: "healthy",
 						Metrics: []monitoring.Metric{{Name: "cpu.usage", Label: "CPU usage", Value: floatPointer(0.125), Unit: "vCPU", Status: "available"}},
 					}},
-					CostEstimate: monitoring.CostEstimate{
+					CostEstimate: &monitoring.CostEstimate{
 						Currency: "USD", Basis: monitoring.PricingBasis, HoursPerMonth: 730,
 						Hourly: 0.02, Daily: 0.48, Monthly: 14.60,
 						Excludes:    []string{"taxes", "reservations", "savings_plans", "credits", "free_tier"},

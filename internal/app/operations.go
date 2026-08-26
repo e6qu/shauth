@@ -549,7 +549,7 @@ func (s *Server) monitoringSnapshot(ctx context.Context) monitoringSnapshot {
 			snapshot.ActiveSessions = &counted
 		}
 	}
-	snapshot.Infrastructure = s.monitoringClient.FetchAll(ctx, s.config.MonitoringSources)
+	snapshot.Infrastructure = s.monitoringClient.FetchAll(ctx, s.monitoringSources(ctx))
 	snapshot.HydraHealthy = s.hydraReady(ctx)
 	return snapshot
 }
