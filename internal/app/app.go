@@ -1302,6 +1302,10 @@ type managedAppView struct {
 	FromShauth             *appValidationRunView
 	FromApp                *appValidationRunView
 	NeedsPoll              bool
+	// MonitoringPageURL is browser navigation granted to the current viewer.
+	// MonitoringURL remains the credential-protected machine endpoint that
+	// Shauth reads server-side and must never become a catalog link.
+	MonitoringPageURL string
 }
 
 type appValidationRunView struct {
@@ -1367,6 +1371,17 @@ func validationNeedsPoll(run *appValidationRunView) bool {
 	return run == nil || run.Status == identity.ValidationQueued || run.Status == identity.ValidationRunning
 }
 
+func setMonitoringPageURLs(apps []managedAppView, role identity.Role) {
+	if role != identity.RoleAdmin {
+		return
+	}
+	for index := range apps {
+		if strings.TrimSpace(apps[index].MonitoringURL) != "" {
+			apps[index].MonitoringPageURL = "/monitoring"
+		}
+	}
+}
+
 func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
 	if err != nil {
@@ -1383,6 +1398,7 @@ func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
 	for index := range apps {
 		apps[index].CSRF = token
 	}
+	setMonitoringPageURLs(apps, user.Role)
 	s.render(w, "apps", s.view(r, "Apps", map[string]any{"SignedIn": true, "User": newUserRecord(user), "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin}))
 }
 

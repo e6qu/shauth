@@ -15,6 +15,23 @@ case ${SHAUTH_STACK_FOCUS:-} in
 		;;
 esac
 
+SHAUTH_HOST_PORT=${SHAUTH_HOST_PORT:-8080}
+case $SHAUTH_HOST_PORT in
+	''|*[!0-9]*)
+		echo "SHAUTH_HOST_PORT must be a whole number between 1 and 65535" >&2
+		exit 2
+		;;
+esac
+if [ "$SHAUTH_HOST_PORT" -lt 1 ] || [ "$SHAUTH_HOST_PORT" -gt 65535 ]; then
+	echo "SHAUTH_HOST_PORT must be a whole number between 1 and 65535" >&2
+	exit 2
+fi
+export SHAUTH_HOST_PORT
+SHAUTH_PUBLIC_URL="http://localhost:${SHAUTH_HOST_PORT}"
+export SHAUTH_PUBLIC_URL
+SHAUTH_URL=$SHAUTH_PUBLIC_URL
+export SHAUTH_URL
+
 ./scripts/test-workflow-timeouts.sh
 ./scripts/check-workflow-timeouts.sh
 ./scripts/test-process-wait.sh
@@ -37,7 +54,7 @@ export SHAUTH_POSTGRES_HOST_PORT
 HYDRA_SYSTEM_SECRET=$(random_secret)
 export HYDRA_SYSTEM_SECRET
 export HYDRA_DSN="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/hydra?sslmode=disable"
-export HYDRA_PUBLIC_URL=http://localhost:8080
+export HYDRA_PUBLIC_URL="$SHAUTH_PUBLIC_URL"
 export SHAUTH_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/shauth?sslmode=disable"
 export GITHUB_CLIENT_ID=local-integration-client
 export GITHUB_CLIENT_SECRET=local-integration-secret
@@ -148,7 +165,7 @@ compose up --no-build --detach
 
 attempt=0
 while [ "$attempt" -lt 300 ]; do
-  if curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1 && \
+  if curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1 && \
      curl --fail --silent http://localhost:4444/health/ready >/dev/null 2>&1; then
     break
   fi
@@ -167,13 +184,13 @@ SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1
 	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app \
 	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout|TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester|TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates|TestAppValidationRunHistoryOrdersFiltersAndLimits|TestApplicationsAPIListsCatalogHealthAndValidations|TestApplicationValidationHistoryAPIFiltersAndValidatesLimit|TestApplicationValidationEnqueueAPIQueuesWithoutABrowserCSRFToken|TestAdminAPIUserLifecycleAndSearch|TestAdminAPIUserSessionsReadAndSingleRevoke|TestAdminAPISessionPolicyReadAndUpdate|TestAdminAPIGitHubRoleMappingLifecycle|TestAdminAPIOIDCClientAndManagedAppLifecycle|TestAdminAPIMonitoringSnapshot|TestAdminAPIInvitationValidation|TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt|TestAdminAPIRefusesToDisableTheValidationIdentity|TestAdminAPIInvitationsAreListableAndRevocable|TestAdminAPIRejectsDuplicateUserWithoutLeakingDatabaseDetail)$' -count=1
 
-curl --fail --silent --show-error http://localhost:8080/login | grep -q 'id="main-content"'
-curl --fail --silent --show-error http://localhost:8080/login | grep -q 'aria-label="Primary navigation"'
-curl --fail --silent --show-error http://localhost:8080/assets/theme.js | grep -q 'theme-toggle'
-curl --fail --silent --show-error http://localhost:8080/login | grep -q 'src="/assets/htmx-2.0.8.min.js"'
-curl --fail --silent --show-error http://localhost:8080/assets/htmx-2.0.8.min.js | grep -q 'htmx'
-curl --fail --silent --show-error --dump-header - --output /dev/null http://localhost:8080/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self';"
-if curl --fail --silent --show-error http://localhost:8080/login | grep -q 'unpkg.com'; then
+curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'id="main-content"'
+curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'aria-label="Primary navigation"'
+curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/assets/theme.js | grep -q 'theme-toggle'
+curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'src="/assets/htmx-2.0.8.min.js"'
+curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/assets/htmx-2.0.8.min.js | grep -q 'htmx'
+curl --fail --silent --show-error --dump-header - --output /dev/null "${SHAUTH_PUBLIC_URL}"/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self';"
+if curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'unpkg.com'; then
 	echo 'Shauth rendered an external browser asset' >&2
 	exit 1
 fi
@@ -186,32 +203,32 @@ validation_identity=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SE
 # The validation identity has no reusable login credential. Only the
 # validator-token-authenticated Shauth endpoint can mint short-lived browser
 # sessions, and each grant is hashed, expires, and can be consumed once.
-curl --fail --silent --show-error --cookie-jar "$validation_cookie_jar" http://localhost:8080/login >/dev/null
+curl --fail --silent --show-error --cookie-jar "$validation_cookie_jar" "${SHAUTH_PUBLIC_URL}"/login >/dev/null
 validation_csrf=$(awk '$6 == "shauth_csrf" { print $7 }' "$validation_cookie_jar")
 [ -n "$validation_csrf" ]
-curl --fail --silent --show-error --cookie "$validation_cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --cookie "$validation_cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${validation_csrf}" \
   --data-urlencode 'username=shauth-validator' \
   --data-urlencode 'password=not-a-validation-credential' \
   --data-urlencode 'next=/apps' \
-  http://localhost:8080/login | grep -q 'Invalid username or password.'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["https://attacker.example.test/"]}' http://localhost:8080/internal/validator/browser-bootstraps)" = 400 ]
-bootstrap_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["/apps"]}' http://localhost:8080/internal/validator/browser-bootstraps)
+  "${SHAUTH_PUBLIC_URL}"/login | grep -q 'Invalid username or password.'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["https://attacker.example.test/"]}' "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)" = 400 ]
+bootstrap_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["/apps"]}' "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)
 bootstrap_token=$(printf '%s' "$bootstrap_response" | sed -n 's|.*validator/bootstrap#\([0-9a-f][0-9a-f]*\)".*|\1|p')
 [ "${#bootstrap_token}" -eq 64 ]
-bootstrap_headers=$(printf '_csrf=%s&token=%s' "$validation_csrf" "$bootstrap_token" | curl --silent --show-error --dump-header - --output /dev/null --cookie-jar "$validation_cookie_jar" --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- http://localhost:8080/validator/bootstrap)
+bootstrap_headers=$(printf '_csrf=%s&token=%s' "$validation_csrf" "$bootstrap_token" | curl --silent --show-error --dump-header - --output /dev/null --cookie-jar "$validation_cookie_jar" --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- "${SHAUTH_PUBLIC_URL}"/validator/bootstrap)
 printf '%s' "$bootstrap_headers" | grep -Eq '^HTTP/[0-9.]+ 303'
 printf '%s' "$bootstrap_headers" | grep -Eqi '^location: /apps'
-[ "$(printf '_csrf=%s&token=%s' "$validation_csrf" "$bootstrap_token" | curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- http://localhost:8080/validator/bootstrap)" = 410 ]
-expired_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["/"]}' http://localhost:8080/internal/validator/browser-bootstraps)
+[ "$(printf '_csrf=%s&token=%s' "$validation_csrf" "$bootstrap_token" | curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- "${SHAUTH_PUBLIC_URL}"/validator/bootstrap)" = 410 ]
+expired_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["/"]}' "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)
 expired_token=$(printf '%s' "$expired_response" | sed -n 's|.*validator/bootstrap#\([0-9a-f][0-9a-f]*\)".*|\1|p')
 [ "${#expired_token}" -eq 64 ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 -c "UPDATE validation_browser_bootstraps SET created_at=now()-interval '11 minutes',expires_at=now()-interval '1 minute' WHERE consumed_at IS NULL" >/dev/null
-[ "$(printf '_csrf=%s&token=%s' "$validation_csrf" "$expired_token" | curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- http://localhost:8080/validator/bootstrap)" = 410 ]
+[ "$(printf '_csrf=%s&token=%s' "$validation_csrf" "$expired_token" | curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- "${SHAUTH_PUBLIC_URL}"/validator/bootstrap)" = 410 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc 'SELECT count(*) FROM validation_browser_bootstraps WHERE octet_length(token_hash)<>32')" = 0 ]
 compose exec -T postgres psql -U shauth -d shauth -c "UPDATE sessions SET revoked_at=now() WHERE user_id=(SELECT id FROM users WHERE is_validation=TRUE) AND revoked_at IS NULL" >/dev/null
 
-curl --fail --silent --show-error --cookie-jar "$cookie_jar" http://localhost:8080/login >/dev/null
+curl --fail --silent --show-error --cookie-jar "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/login >/dev/null
 csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
 [ -n "$csrf_token" ]
 
@@ -223,7 +240,7 @@ SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '%s' "$SHAUTH_BOOTSTRAP_APPS_JSON" | prepare
 export SHAUTH_BOOTSTRAP_APPS_JSON
 compose up --force-recreate --no-deps --detach shauth
 attempt=0
-while [ "$attempt" -lt 30 ] && ! curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1; do
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   sleep 1
 done
@@ -247,13 +264,13 @@ done
 bootstrap_app=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',name,description,launch_url,oidc_client_id,health_url,monitoring_url) FROM managed_apps WHERE slug='bootstrap-app'")
 [ "$bootstrap_app" = 'Bootstrap app updated|Updated bootstrap reconciliation coverage.|https://bootstrap.dev.e6qu.dev/apps|bootstrap-app|https://bootstrap.dev.e6qu.dev/ready|https://bootstrap.dev.e6qu.dev/monitoring' ]
 
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'username=admin' \
   --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
   --data-urlencode 'next=/' \
-  http://localhost:8080/login | grep -q 'Welcome back, admin.'
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  "${SHAUTH_PUBLIC_URL}"/login | grep -q 'Welcome back, admin.'
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'client_id=shauth-integration-client' \
   --data-urlencode 'client_name=Shauth integration client' \
@@ -261,9 +278,9 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'redirect_uris=http://localhost:5555/callback' \
   --data-urlencode 'post_logout_redirect_uris=http://localhost:5555/auth/shauth/logout/complete' \
   --data-urlencode 'frontchannel_logout_uri=http://localhost:5555/frontchannel-logout' \
-  http://localhost:8080/admin/clients | grep -q 'shauth-integration-client'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/session-policy | grep -q 'Session time limits'
-curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  "${SHAUTH_PUBLIC_URL}"/admin/clients | grep -q 'shauth-integration-client'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/session-policy | grep -q 'Session time limits'
+curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'browser_absolute_hours=720' \
   --data-urlencode 'browser_idle_minutes=720' \
@@ -271,11 +288,11 @@ curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Or
   --data-urlencode 'access_token_minutes=15' \
   --data-urlencode 'id_token_minutes=15' \
   --data-urlencode 'refresh_token_hours=720' \
-  http://localhost:8080/admin/session-policy | grep -q 'were saved and applied'
+  "${SHAUTH_PUBLIC_URL}"/admin/session-policy | grep -q 'were saved and applied'
 # A rejected registration answers 400 and re-renders the form with the reason
 # and the operator's values, rather than redirecting and discarding the input.
 rejected_app_page=$(mktemp)
-rejected_app_status=$(curl --silent --show-error --output "$rejected_app_page" --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+rejected_app_status=$(curl --silent --show-error --output "$rejected_app_page" --write-out '%{http_code}' --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'slug=integration-app' \
   --data-urlencode 'name=Integration app' \
@@ -287,7 +304,7 @@ rejected_app_status=$(curl --silent --show-error --output "$rejected_app_page" -
   --data-urlencode 'validation_url=http://localhost:5555/' \
   --data-urlencode 'signed_out_url=https://attacker.example/other-signed-out' \
   --data-urlencode 'release_revision=666666666666' \
-  http://localhost:8080/admin/apps)
+  "${SHAUTH_PUBLIC_URL}"/admin/apps)
 if [ "$rejected_app_status" != 400 ]; then
 	echo "cross-origin signed-out URL was not rejected: HTTP ${rejected_app_status}" >&2
 	exit 1
@@ -302,7 +319,7 @@ if ! grep -q 'https://attacker.example/other-signed-out' "$rejected_app_page"; t
 fi
 rm -f "$rejected_app_page"
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='integration-app'")" = 0 ]
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'slug=integration-app' \
   --data-urlencode 'name=Integration app' \
@@ -314,16 +331,16 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'validation_url=http://localhost:5555/' \
   --data-urlencode 'signed_out_url=http://localhost:5555/signed-out' \
   --data-urlencode 'release_revision=666666666666' \
-  http://localhost:8080/admin/apps | grep -q 'Integration app'
+  "${SHAUTH_PUBLIC_URL}"/admin/apps | grep -q 'Integration app'
 SHAUTH_UNVERIFIED_USER_PASSWORD=$(random_secret)
 export SHAUTH_UNVERIFIED_USER_PASSWORD
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'username=unverified-oidc' \
   --data-urlencode 'email=unverified-oidc@localhost.test' \
   --data-urlencode "password=${SHAUTH_UNVERIFIED_USER_PASSWORD}" \
   --data-urlencode 'role=developer' \
-  http://localhost:8080/admin/users | grep -q 'unverified-oidc'
+  "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q 'unverified-oidc'
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 \
   -c "UPDATE users SET email_verified=FALSE WHERE username='unverified-oidc'" >/dev/null
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT email_verified FROM users WHERE username='unverified-oidc'")" = f ]
@@ -343,7 +360,7 @@ for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECO
 done
 
 go build -o "$gateway_binary" ./cmd/shauth-gateway
-OIDC_GATEWAY_ISSUER=http://localhost:8080 \
+OIDC_GATEWAY_ISSUER=${SHAUTH_PUBLIC_URL} \
 OIDC_GATEWAY_CLIENT_ID=gateway-integration \
 APPLICATION_RELEASE_REVISION=222222222222 \
 OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_CLIENT_SECRET" \
@@ -356,7 +373,7 @@ OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5556 \
 DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/${SHAUTH_GATEWAY_PRIMARY_DATABASE}?sslmode=disable" \
 "$gateway_binary" &
 gateway_pid=$!
-OIDC_GATEWAY_ISSUER=http://localhost:8080 \
+OIDC_GATEWAY_ISSUER=${SHAUTH_PUBLIC_URL} \
 OIDC_GATEWAY_CLIENT_ID=gateway-secondary \
 APPLICATION_RELEASE_REVISION=333333333333 \
 OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_SECONDARY_CLIENT_SECRET" \
@@ -369,7 +386,7 @@ OIDC_GATEWAY_LISTEN_ADDRESS=0.0.0.0:5558 \
 DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/${SHAUTH_GATEWAY_SECONDARY_DATABASE}?sslmode=disable" \
 "$gateway_binary" &
 gateway_secondary_pid=$!
-OIDC_GATEWAY_ISSUER=http://localhost:8080 \
+OIDC_GATEWAY_ISSUER=${SHAUTH_PUBLIC_URL} \
 OIDC_GATEWAY_CLIENT_ID=gateway-tertiary \
 APPLICATION_RELEASE_REVISION=444444444444 \
 OIDC_GATEWAY_CLIENT_SECRET="$SHAUTH_GATEWAY_TERTIARY_CLIENT_SECRET" \
@@ -422,7 +439,7 @@ done
 if [ "${SHAUTH_STACK_FOCUS:-}" = browser-global-logout ]; then
 	compose restart shauth >/dev/null
 	attempt=0
-	while [ "$attempt" -lt 30 ] && ! curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1; do
+	while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
 		attempt=$((attempt + 1))
 		sleep 1
 	done
@@ -436,12 +453,12 @@ bootstrap_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELEC
 [ -n "$bootstrap_app_id" ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE oidc_contract_hash=repeat('0',64) OR oidc_contract_hash !~ '^[0-9a-f]{64}$'")" = 0 ]
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
-	--header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/apps' \
-	--data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/apps/${bootstrap_app_id}/delete"
+	--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/apps" \
+	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/apps/${bootstrap_app_id}/delete"
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='bootstrap-app'")" = 0 ]
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
-	--header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/clients' \
-	--data-urlencode "_csrf=${csrf_token}" 'http://localhost:8080/admin/clients/bootstrap-app/delete'
+	--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/clients" \
+	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/clients/bootstrap-app/delete"
 bootstrap_client_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' 'http://localhost:4445/admin/clients/bootstrap-app')
 if [ "$bootstrap_client_status" != 404 ]; then
 	echo "bootstrap OAuth client deletion returned HTTP ${bootstrap_client_status}; expected 404" >&2
@@ -450,8 +467,8 @@ fi
 integration_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='integration-app'")
 [ -n "$integration_app_id" ]
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
-	--header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/apps' \
-	--data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/apps/${integration_app_id}/delete"
+	--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/apps" \
+	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/apps/${integration_app_id}/delete"
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='integration-app'")" = 0 ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
 DELETE FROM app_validation_runs;
@@ -461,8 +478,8 @@ for validator_app_slug in gateway-integration gateway-secondary gateway-tertiary
 	validator_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='${validator_app_slug}'")
 	[ -n "$validator_app_id" ]
 	curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
-		--header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/apps' \
-		--data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/apps/${validator_app_id}/validate"
+		--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/apps" \
+		--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/apps/${validator_app_id}/validate"
 done
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='queued'")" = 6 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='queued' AND witness_managed_app_id IS NOT NULL AND witness_managed_app_id<>managed_app_id AND witness_oidc_client_id<>oidc_client_id")" = 6 ]
@@ -498,14 +515,14 @@ if [ "${SHAUTH_STACK_FOCUS:-}" = logout-correlation ]; then
 	exit 0
 fi
 
-SHAUTH_URL=http://localhost:8080 \
+SHAUTH_URL=${SHAUTH_PUBLIC_URL} \
 SHAUTH_VALIDATOR_TOKEN=$SHAUTH_VALIDATOR_TOKEN \
 SHAUTH_VALIDATION_USERNAME=shauth-validator \
 SHAUTH_VALIDATION_EMAIL=shauth-validator@localhost.test \
 SHAUTH_VALIDATOR_SCRIPT=$root/validator/validate.mjs \
 	"$validator_binary" &
 validator_pid=$!
-SHAUTH_URL=http://localhost:8080 \
+SHAUTH_URL=${SHAUTH_PUBLIC_URL} \
 SHAUTH_VALIDATOR_TOKEN=$SHAUTH_VALIDATOR_TOKEN \
 SHAUTH_VALIDATION_USERNAME=shauth-validator \
 SHAUTH_VALIDATION_EMAIL=shauth-validator@localhost.test \
@@ -535,9 +552,9 @@ queue_timing_violations=$(compose exec -T postgres psql -U shauth -d shauth -Atc
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='passed' AND direction='from_app'")" = 3 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='passed' AND direction='from_shauth'")" = 3 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT string_agg(app_slug||':'||direction||'>'||witness_app_slug,',' ORDER BY app_slug,direction) FROM app_validation_runs WHERE status='passed'")" = "$validation_witness_ring" ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/apps/validations)" = 401 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header 'Authorization: Bearer wrong' http://localhost:8080/api/v1/apps/validations)" = 401 ]
-validation_status_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATION_STATUS_TOKEN}" http://localhost:8080/api/v1/apps/validations)
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/api/v1/apps/validations)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header 'Authorization: Bearer wrong' "${SHAUTH_PUBLIC_URL}"/api/v1/apps/validations)" = 401 ]
+validation_status_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATION_STATUS_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/apps/validations)
 printf '%s' "$validation_status_response" | node -e '
 let body = "";
 process.stdin.on("data", chunk => { body += chunk; });
@@ -555,46 +572,46 @@ process.stdin.on("end", () => {
 
 # The administration API accepts only its own credential for each direction:
 # reads reject the write token and writes reject the read token.
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/users)" = 401 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" http://localhost:8080/api/v1/users)" = 401 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" --header 'Content-Type: application/json' --data '{}' http://localhost:8080/internal/users)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/api/v1/users)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/users)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" --header 'Content-Type: application/json' --data '{}' "${SHAUTH_PUBLIC_URL}"/internal/users)" = 401 ]
 
 # The application status credential is read-only: queuing validations starts
 # real browser sessions and global logouts, so it must be refused there.
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_VALIDATION_STATUS_TOKEN}" --header 'Content-Type: application/json' --data '{}' http://localhost:8080/internal/apps/validations/enqueue)" = 401 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" --header 'Content-Type: application/json' --data '{}' http://localhost:8080/internal/apps/validations/enqueue)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_VALIDATION_STATUS_TOKEN}" --header 'Content-Type: application/json' --data '{}' "${SHAUTH_PUBLIC_URL}"/internal/apps/validations/enqueue)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" --header 'Content-Type: application/json' --data '{}' "${SHAUTH_PUBLIC_URL}"/internal/apps/validations/enqueue)" = 401 ]
 
 # A list endpoint answers a bounded window and reports what remains.
-admin_users_page=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?limit=1')
+admin_users_page=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/users?limit=1")
 printf '%s' "$admin_users_page" | grep -q '"limit":1'
 printf '%s' "$admin_users_page" | grep -q '"has_more":true'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?limit=501')" = 400 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/users?limit=501")" = 400 ]
 
 # Every page reports the build serving it, and the machine contract reports
 # the same facts.
-curl --fail --silent --show-error http://localhost:8080/login | grep -q 'class="build-notice"'
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/monitoring | grep -q '"revision"'
+curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'class="build-notice"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/monitoring | grep -q '"revision"'
 
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'class="build-notice"'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q 'class="build-notice"'
 
 # Each application and account has a screen of its own that can be linked to.
 app_slug=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT slug FROM managed_apps ORDER BY slug LIMIT 1")
 [ -n "$app_slug" ]
-curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/apps/${app_slug}" | grep -q 'Validation history'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/apps/${app_slug}" | grep -q 'Validation history'
 admin_user_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username='admin'")
 [ -n "$admin_user_id" ]
-curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_user_id}" | grep -q 'Account state'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_user_id}/sessions")" = 301 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}" | grep -q 'Account state'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}/sessions")" = 301 ]
 
 # A narrow screen stacks table rows instead of scrolling the page sideways.
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'data-label="Role"'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q 'data-label="Role"'
 
 # Security-relevant actions are recorded durably, with the reason a sign-in
 # was refused kept for the operator and withheld from the person.
-curl --silent --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --silent --output /dev/null --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" --data-urlencode 'username=no-such-account' \
-  --data-urlencode 'password=not-a-real-password' --data-urlencode 'next=/' http://localhost:8080/login
-audit_events=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/audit-events?limit=100')
+  --data-urlencode 'password=not-a-real-password' --data-urlencode 'next=/' "${SHAUTH_PUBLIC_URL}"/login
+audit_events=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/audit-events?limit=100")
 printf '%s' "$audit_events" | grep -q '"schema_version":"shauth.audit-events/v1"'
 printf '%s' "$audit_events" | grep -q '"event_type":"sign_in.failed"'
 printf '%s' "$audit_events" | grep -q '"reason":"unknown username"'
@@ -607,8 +624,8 @@ if printf '%s' "$audit_events" | grep -qF "$SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"; th
 fi
 
 # Counts describe durable state, and the deep check reports every dependency.
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/metrics | grep -q '"schema_version":"shauth.metrics/v1"'
-deep_health=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/health/deep)
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/metrics | grep -q '"schema_version":"shauth.metrics/v1"'
+deep_health=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/health/deep)
 printf '%s' "$deep_health" | grep -q '"schema_version":"shauth.deep-health/v1"'
 for dependency in postgresql hydra_public hydra_admin managed_app_registration validation_queue; do
 	printf '%s' "$deep_health" | grep -q "\"name\":\"${dependency}\""
@@ -619,8 +636,8 @@ done
 # not appear verbatim and create a series per identifier.
 # Counted after the handler answers, so the second call is the first that can
 # report the first.
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/metrics/requests >/dev/null
-request_metrics=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/metrics/requests)
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/metrics/requests >/dev/null
+request_metrics=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/metrics/requests)
 printf '%s' "$request_metrics" | grep -q '"schema_version":"shauth.request-metrics/v1"'
 printf '%s' "$request_metrics" | grep -q '"pattern":"/api/v1/metrics/requests"'
 printf '%s' "$request_metrics" | grep -q '"by_status_class"'
@@ -628,53 +645,53 @@ if printf '%s' "$request_metrics" | grep -q '"pattern":"/admin/users/[0-9a-f]'; 
 	echo 'request metrics recorded a request path instead of its route pattern' >&2
 	exit 1
 fi
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/metrics/requests)" = 401 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" http://localhost:8080/api/v1/metrics/requests)" = 401 ]
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring | grep -q 'Busiest routes'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/api/v1/metrics/requests)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/metrics/requests)" = 401 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/monitoring | grep -q 'Busiest routes'
 
 # What this instance reported is readable without opening a container. The
 # buffer mirrors the container stream, so a line that never reached standard
 # error is a line the endpoint invented.
-service_logs=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/logs?limit=500')
+service_logs=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/logs?limit=500")
 printf '%s' "$service_logs" | grep -q '"schema_version":"shauth.logs/v1"'
 printf '%s' "$service_logs" | grep -q '"level":"info"'
 printf '%s' "$service_logs" | grep -q 'shauth listening on'
 compose logs --no-color shauth | grep -q 'shauth listening on'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/logs)" = 401 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/logs?level=shouting')" = 400 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/api/v1/logs)" = 401 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/logs?level=shouting")" = 400 ]
 # A credential must never be readable through the log surface.
 if printf '%s' "$service_logs" | grep -qF "$SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"; then
 	echo 'the service log contains credential material' >&2
 	exit 1
 fi
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/logs | grep -q 'Service log'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/logs | grep -q 'Service log'
 
 # Sessions are listable across accounts and endable by token, not only one
 # account at a time from a browser.
-all_sessions=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/sessions?state=active')
+all_sessions=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/sessions?state=active")
 printf '%s' "$all_sessions" | grep -q '"schema_version":"shauth.sessions/v1"'
 printf '%s' "$all_sessions" | grep -q '"username":"admin"'
 printf '%s' "$all_sessions" | grep -q '"active":true'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/sessions?state=nonsense')" = 400 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/sessions)" = 401 ]
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/sessions | grep -q 'Signed-in sessions'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/sessions?state=nonsense")" = 400 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/api/v1/sessions)" = 401 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/sessions | grep -q 'Signed-in sessions'
 
 # The monitoring page reports every dependency the deep check knows, not two
 # of them, and reads the durable counts.
-monitoring_page=$(curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring)
+monitoring_page=$(curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/monitoring)
 printf '%s' "$monitoring_page" | grep -q 'Dependencies'
 printf '%s' "$monitoring_page" | grep -q 'managed_app_registration'
 printf '%s' "$monitoring_page" | grep -q 'Connected apps'
 
 # Sign-in offers each provider's own mark rather than a geometric stand-in.
-login_page=$(curl --fail --silent --show-error http://localhost:8080/login)
+login_page=$(curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login)
 printf '%s' "$login_page" | grep -q 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59'
 printf '%s' "$login_page" | grep -q 'aria-hidden="true" focusable="false"'
 
 # The session policy reports when it last changed, so an operator can tell a
 # policy that was moved from one that never was.
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/session-policy | grep -q '"updated_at":'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/session-policy | grep -q 'Last changed'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/session-policy | grep -q '"updated_at":'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/session-policy | grep -q 'Last changed'
 
 # The retired refresh-token schema must be gone rather than left as a durable
 # claim nothing honours.
@@ -688,54 +705,54 @@ curl --fail --silent --show-error http://gateway-integration.localhost:5556/auth
 
 # A person can review and end their own sessions; an administrator's view of
 # someone else stays behind the administration credential.
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/api/v1/me/sessions | grep -q '"schema_version":"shauth.my-sessions/v1"'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/api/v1/me/sessions)" = 401 ]
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/account | grep -q 'Your sessions'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/audit | grep -q 'Recorded events'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/api/v1/me/sessions | grep -q '"schema_version":"shauth.my-sessions/v1"'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/api/v1/me/sessions)" = 401 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/account | grep -q 'Your sessions'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/audit | grep -q 'Recorded events'
 
 # The application catalog is readable with either read credential.
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/apps)" = 200 ]
-admin_users_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" 'http://localhost:8080/api/v1/users?q=admin')
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/apps)" = 200 ]
+admin_users_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}/api/v1/users?q=admin")
 printf '%s' "$admin_users_response" | grep -q '"schema_version":"shauth.users/v1"'
 printf '%s' "$admin_users_response" | grep -q '"username":"admin"'
 printf '%s' "$admin_users_response" | grep -q '"identity_source":"local"'
-admin_monitoring_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/monitoring)
+admin_monitoring_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/monitoring)
 printf '%s' "$admin_monitoring_response" | grep -q '"schema_version":"shauth.monitoring/v1"'
 printf '%s' "$admin_monitoring_response" | grep -q '"postgresql_healthy":true'
 printf '%s' "$admin_monitoring_response" | grep -q '"hydra_healthy":true'
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/session-policy | grep -q '"schema_version":"shauth.session-policy/v1"'
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/oidc-clients | grep -q '"client_id":"gateway-integration"'
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/connectors | grep -q '"schema_version":"shauth.connectors/v1"'
-curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/invitations | grep -q '"schema_version":"shauth.invitations/v1"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/session-policy | grep -q '"schema_version":"shauth.session-policy/v1"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/oidc-clients | grep -q '"client_id":"gateway-integration"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/connectors | grep -q '"schema_version":"shauth.connectors/v1"'
+curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/invitations | grep -q '"schema_version":"shauth.invitations/v1"'
 
 # The browser interface must not depend on JavaScript for state changes: the
 # CSRF token is rendered into the form, and a POST carrying only that token
 # must be accepted.
 noscript_jar=$(mktemp)
-noscript_page=$(curl --fail --silent --show-error --cookie-jar "$noscript_jar" http://localhost:8080/login)
+noscript_page=$(curl --fail --silent --show-error --cookie-jar "$noscript_jar" "${SHAUTH_PUBLIC_URL}"/login)
 noscript_csrf=$(printf '%s' "$noscript_page" | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1)
 [ -n "$noscript_csrf" ]
 printf '%s' "$noscript_page" | grep -q '<title>Sign in · Shauth</title>'
-curl --fail --silent --show-error --location --cookie "$noscript_jar" --cookie-jar "$noscript_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie "$noscript_jar" --cookie-jar "$noscript_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${noscript_csrf}" --data-urlencode 'username=admin' \
   --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" --data-urlencode 'next=/' \
-  http://localhost:8080/login | grep -q 'Welcome back, admin.'
+  "${SHAUTH_PUBLIC_URL}"/login | grep -q 'Welcome back, admin.'
 rm -f "$noscript_jar"
 
 # An unrouted path answers in the shape its caller parses.
-curl --silent http://localhost:8080/no-such-page | grep -q 'aria-label="Primary navigation"'
-curl --silent http://localhost:8080/api/v1/no-such-endpoint | grep -q '"error":"no such endpoint"'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8080/favicon.svg)" = 200 ]
+curl --silent "${SHAUTH_PUBLIC_URL}"/no-such-page | grep -q 'aria-label="Primary navigation"'
+curl --silent "${SHAUTH_PUBLIC_URL}"/api/v1/no-such-endpoint | grep -q '"error":"no such endpoint"'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/favicon.svg)" = 200 ]
 
 # Timestamps are rendered for people, not as Go debug syntax.
-if curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q '+0000 UTC'; then
+if curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q '+0000 UTC'; then
 	echo 'the administration interface rendered a raw Go timestamp' >&2
 	exit 1
 fi
 
 # A 401 advertises its scheme, and the scheme is matched case-insensitively.
-curl --silent --dump-header - --output /dev/null http://localhost:8080/api/v1/users | grep -qi '^www-authenticate: Bearer'
-curl --fail --silent --show-error --header "authorization: bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" http://localhost:8080/api/v1/users | grep -q '"schema_version":"shauth.users/v1"'
+curl --silent --dump-header - --output /dev/null "${SHAUTH_PUBLIC_URL}"/api/v1/users | grep -qi '^www-authenticate: Bearer'
+curl --fail --silent --show-error --header "authorization: bearer ${SHAUTH_ADMIN_API_READ_TOKEN}" "${SHAUTH_PUBLIC_URL}"/api/v1/users | grep -q '"schema_version":"shauth.users/v1"'
 
 # Disabling must contain an account: the session ends and the unchanged
 # password stops working. Revoking sessions alone would let it sign straight
@@ -743,28 +760,28 @@ curl --fail --silent --show-error --header "authorization: bearer ${SHAUTH_ADMIN
 SHAUTH_CONTAINMENT_PASSWORD=$(random_secret)
 containment_user=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" --header 'Content-Type: application/json' \
   --data "$(printf '{"username":"containment","email":"containment@localhost.test","password":"%s","role":"developer"}' "$SHAUTH_CONTAINMENT_PASSWORD")" \
-  http://localhost:8080/internal/users | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p')
+  "${SHAUTH_PUBLIC_URL}"/internal/users | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p')
 [ -n "$containment_user" ]
 containment_jar=$(mktemp)
-curl --fail --silent --show-error --cookie-jar "$containment_jar" http://localhost:8080/login >/dev/null
+curl --fail --silent --show-error --cookie-jar "$containment_jar" "${SHAUTH_PUBLIC_URL}"/login >/dev/null
 containment_csrf=$(awk '$6 == "shauth_csrf" { print $7 }' "$containment_jar")
-curl --fail --silent --show-error --location --cookie "$containment_jar" --cookie-jar "$containment_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie "$containment_jar" --cookie-jar "$containment_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${containment_csrf}" --data-urlencode 'username=containment' \
   --data-urlencode "password=${SHAUTH_CONTAINMENT_PASSWORD}" --data-urlencode 'next=/' \
-  http://localhost:8080/login | grep -q 'Welcome back, containment.'
+  "${SHAUTH_PUBLIC_URL}"/login | grep -q 'Welcome back, containment.'
 curl --fail --silent --show-error --output /dev/null --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" \
-  --request POST "http://localhost:8080/internal/users/${containment_user}/disable"
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$containment_jar" http://localhost:8080/apps)" = 303 ]
-curl --fail --silent --show-error --location --cookie "$containment_jar" --header 'Origin: http://localhost:8080' \
+  --request POST "${SHAUTH_PUBLIC_URL}/internal/users/${containment_user}/disable"
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$containment_jar" "${SHAUTH_PUBLIC_URL}"/apps)" = 303 ]
+curl --fail --silent --show-error --location --cookie "$containment_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${containment_csrf}" --data-urlencode 'username=containment' \
   --data-urlencode "password=${SHAUTH_CONTAINMENT_PASSWORD}" --data-urlencode 'next=/' \
-  http://localhost:8080/login | grep -q 'Invalid username or password.'
+  "${SHAUTH_PUBLIC_URL}"/login | grep -q 'Invalid username or password.'
 curl --fail --silent --show-error --output /dev/null --header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" \
-  --request POST "http://localhost:8080/internal/users/${containment_user}/enable"
-curl --fail --silent --show-error --location --cookie "$containment_jar" --header 'Origin: http://localhost:8080' \
+  --request POST "${SHAUTH_PUBLIC_URL}/internal/users/${containment_user}/enable"
+curl --fail --silent --show-error --location --cookie "$containment_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${containment_csrf}" --data-urlencode 'username=containment' \
   --data-urlencode "password=${SHAUTH_CONTAINMENT_PASSWORD}" --data-urlencode 'next=/' \
-  http://localhost:8080/login | grep -q 'Welcome back, containment.'
+  "${SHAUTH_PUBLIC_URL}"/login | grep -q 'Welcome back, containment.'
 rm -f "$containment_jar"
 for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE" "$SHAUTH_GATEWAY_TERTIARY_DATABASE"; do
 	[ "$(compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL")" = 0 ]
@@ -819,16 +836,16 @@ fi
 gateway_test_pid=
 # The provider-initiated browser test deliberately signs the administrator out
 # of every Shauth device, including this shell's independent cookie jar.
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'username=admin' \
   --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
   --data-urlencode 'next=/' \
-  http://localhost:8080/login >/dev/null
+  "${SHAUTH_PUBLIC_URL}"/login >/dev/null
 auto_consent_client_id=auto-consent-client
 auto_consent_client_secret=$(random_secret)
 auto_consent_redirect_uri=http://localhost:5570/callback
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode "client_id=${auto_consent_client_id}" \
   --data-urlencode 'client_name=Automatic consent integration client' \
@@ -836,8 +853,8 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode "redirect_uris=${auto_consent_redirect_uri}" \
   --data-urlencode 'post_logout_redirect_uris=http://localhost:5570/auth/shauth/logout/complete' \
   --data-urlencode 'frontchannel_logout_uri=http://localhost:5570/frontchannel-logout' \
-  http://localhost:8080/admin/clients | grep -q "$auto_consent_client_id"
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+  "${SHAUTH_PUBLIC_URL}"/admin/clients | grep -q "$auto_consent_client_id"
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'slug=auto-consent-app' \
   --data-urlencode 'name=Automatic consent app' \
@@ -848,9 +865,9 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'validation_url=http://localhost:5570/' \
   --data-urlencode 'signed_out_url=http://localhost:5570/signed-out' \
   --data-urlencode 'release_revision=999999999999' \
-  http://localhost:8080/admin/apps | grep -q 'Automatic consent app'
+  "${SHAUTH_PUBLIC_URL}"/admin/apps | grep -q 'Automatic consent app'
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
-  "http://localhost:8080/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=integration" |
+  "${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=integration" |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 consent_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$login_location" |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
@@ -862,7 +879,7 @@ consent_page_location=$(curl --fail --silent --show-error --dump-header - --outp
 callback_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$consent_page_location" |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$callback_location" in
-	http://localhost:8080/oauth2/auth?*consent_verifier=*) ;;
+	${SHAUTH_PUBLIC_URL}/oauth2/auth?*consent_verifier=*) ;;
 	*) echo "managed application did not receive automatic consent: ${callback_location}" >&2; exit 1 ;;
 esac
 final_callback_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$callback_location" |
@@ -875,7 +892,7 @@ token_response=$(curl --fail --silent --show-error \
 	--data-urlencode "redirect_uri=${auto_consent_redirect_uri}" \
 	--data-urlencode "client_id=${auto_consent_client_id}" \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
-	http://localhost:8080/oauth2/token)
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token)
 access_token=$(printf '%s' "$token_response" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 refresh_token=$(printf '%s' "$token_response" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
 [ -n "$access_token" ]
@@ -883,7 +900,7 @@ refresh_token=$(printf '%s' "$token_response" | sed -n 's/.*"refresh_token":"\([
 printf '%s\n' 'reading OpenID Connect UserInfo through Shauth'
 userinfo_response=$(curl --fail --silent --show-error \
 	--header "Authorization: Bearer ${access_token}" \
-	http://localhost:8080/userinfo)
+	"${SHAUTH_PUBLIC_URL}"/userinfo)
 printf '%s' "$userinfo_response" | grep -q '"email":"admin@localhost.test"'
 printf '%s' "$userinfo_response" | grep -q '"preferred_username":"admin"'
 printf '%s' "$userinfo_response" | grep -q '"role":"admin"'
@@ -894,22 +911,22 @@ curl --fail --silent --show-error \
 	--data-urlencode "refresh_token=${refresh_token}" \
 	--data-urlencode "client_id=${auto_consent_client_id}" \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
-	http://localhost:8080/oauth2/token | grep -q '"access_token"'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin/users | grep -q 'admin@localhost.test'
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/admin | grep -q 'Private administration'
-curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token | grep -q '"access_token"'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q 'admin@localhost.test'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin | grep -q 'Private administration'
+curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'kind=user' \
   --data-urlencode 'target=integration-github-user' \
   --data-urlencode 'role=developer' \
-  http://localhost:8080/admin/github | grep -q 'integration-github-user'
+  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'integration-github-user'
 github_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'user' AND target = 'integration-github-user'")
-curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/github/${github_mapping_id}/delete" | grep -q 'GitHub access rules'
+curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${github_mapping_id}/delete" | grep -q 'GitHub access rules'
 developer_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'team' AND target = 'e6qu-org/e6qu-org-members'")
-curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/github/${developer_mapping_id}/delete" >/dev/null
+curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${developer_mapping_id}/delete" >/dev/null
 compose restart shauth >/dev/null
 attempt=0
-while [ "$attempt" -lt 30 ] && ! curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1; do
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   sleep 1
 done
@@ -922,7 +939,7 @@ curl --fail --silent --show-error http://localhost:4445/admin/clients/gateway-in
 # The page names every dependency the deep check knows, not the two it used
 # to summarise, so these assert the store and the provider by the names both
 # the page and the contract use for them.
-monitoring_after_restart=$(curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/monitoring)
+monitoring_after_restart=$(curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/monitoring)
 printf '%s' "$monitoring_after_restart" | grep -q 'hydra_public'
 printf '%s' "$monitoring_after_restart" | grep -q 'hydra_admin'
 printf '%s' "$monitoring_after_restart" | grep -q 'postgresql'
@@ -930,7 +947,7 @@ printf '%s' "$monitoring_after_restart" | grep -q 'Active browser sessions'
 printf '%s' "$monitoring_after_restart" | grep -q 'No infrastructure source configured'
 attempt=0
 while [ "$attempt" -lt 30 ]; do
-  if curl --fail --silent http://localhost:8080/.well-known/openid-configuration 2>/dev/null | grep -q 'issuer'; then
+  if curl --fail --silent "${SHAUTH_PUBLIC_URL}"/.well-known/openid-configuration 2>/dev/null | grep -q 'issuer'; then
     break
   fi
   attempt=$((attempt + 1))
@@ -945,61 +962,61 @@ fi
 # the user's correlated Ory Hydra sessions before rendering a durable signed-out
 # page; relying applications use Ory Hydra's published logout endpoint. The
 # local Shauth session is revoked before the browser leaves the form POST.
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data '' http://localhost:8080/logout)" = 403 ]
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data-urlencode 'challenge=invalid' http://localhost:8080/oauth/logout)" = 403 ]
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/logout | grep -q 'Sign out of all apps?'
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data '' "${SHAUTH_PUBLIC_URL}"/logout)" = 403 ]
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" --header 'Origin: https://attacker.example.test' --data-urlencode 'challenge=invalid' "${SHAUTH_PUBLIC_URL}"/oauth/logout)" = 403 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/logout | grep -q 'Sign out of all apps?'
 node scripts/test-browser-global-logout.mjs "$cookie_jar"
-curl --fail --silent --show-error --cookie "$cookie_jar" http://localhost:8080/signed-out | grep -q 'Sign in to Shauth'
-apps_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/signed-out | grep -q 'Sign in to Shauth'
+apps_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/apps)
 [ "$apps_status" = 303 ]
 
 # Continue the administrative revocation coverage with a fresh local session
 # after testing normal browser logout.
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'username=admin' \
   --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
   --data-urlencode 'next=/' \
-  http://localhost:8080/login >/dev/null
+  "${SHAUTH_PUBLIC_URL}"/login >/dev/null
 admin_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username = 'admin'")
 single_session_setup=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
-	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Fgateway-integration.localhost%3A5556%2Fauth%2Fcallback&state=single-session-setup&nonce=single-session-setup&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	"${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Fgateway-integration.localhost%3A5556%2Fauth%2Fcallback&state=single-session-setup&nonce=single-session-setup&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256" |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$single_session_setup" in
-	http://localhost:8080/oauth/login?login_challenge=*) ;;
+	${SHAUTH_PUBLIC_URL}/oauth/login?login_challenge=*) ;;
 	*) echo "fresh OpenID Connect session did not request Shauth login: ${single_session_setup}" >&2; exit 1 ;;
 esac
 single_session_accept=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$single_session_setup" |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$single_session_accept" in
-	http://localhost:8080/oauth2/auth?*login_verifier=*) ;;
+	${SHAUTH_PUBLIC_URL}/oauth2/auth?*login_verifier=*) ;;
 	*) echo "Shauth did not accept the OpenID Connect login session: ${single_session_accept}" >&2; exit 1 ;;
 esac
 curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$single_session_accept" >/dev/null
 current_session_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM sessions WHERE user_id='${admin_id}'::uuid AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1")
-curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --header 'Referer: http://localhost:8080/admin/users' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/sessions/${current_session_id}/revoke"
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" http://localhost:8080/apps)" = 303 ]
+curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/users" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/sessions/${current_session_id}/revoke"
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/apps)" = 303 ]
 single_session_login=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
-	'http://localhost:8080/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Fgateway-integration.localhost%3A5556%2Fauth%2Fcallback&state=single-session-revocation&nonce=single-session-revocation&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256' |
+	"${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=gateway-integration&response_type=code&scope=openid%20profile%20email&redirect_uri=http%3A%2F%2Fgateway-integration.localhost%3A5556%2Fauth%2Fcallback&state=single-session-revocation&nonce=single-session-revocation&code_challenge=6ZPyvBxk3i_6fw7GZ1sKcSmw5Q3e4V1uNQf2JgQJ9bU&code_challenge_method=S256" |
 	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
 case "$single_session_login" in
-	http://localhost:8080/oauth/login?login_challenge=*) ;;
+	${SHAUTH_PUBLIC_URL}/oauth/login?login_challenge=*) ;;
 	*) echo "revoked OpenID Connect session was still remembered: ${single_session_login}" >&2; exit 1 ;;
 esac
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
 	--data-urlencode "_csrf=${csrf_token}" \
 	--data-urlencode 'username=admin' \
 	--data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
 	--data-urlencode 'next=/' \
-	http://localhost:8080/login >/dev/null
-curl --fail --silent --show-error --location --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' --data-urlencode "_csrf=${csrf_token}" "http://localhost:8080/admin/users/${admin_id}/sessions/revoke" >/dev/null
-curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header 'Origin: http://localhost:8080' \
+	"${SHAUTH_PUBLIC_URL}"/login >/dev/null
+curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_id}/sessions/revoke" >/dev/null
+curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'username=admin' \
   --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
   --data-urlencode 'next=/' \
-  http://localhost:8080/login >/dev/null
-curl --fail --silent --show-error --cookie "$cookie_jar" "http://localhost:8080/admin/users/${admin_id}" | grep -q 'Revoked'
+  "${SHAUTH_PUBLIC_URL}"/login >/dev/null
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_id}" | grep -q 'Revoked'
 
 # Subject-wide invalidation must revoke Hydra's refresh grants as well as each
 # Shauth browser session. A successful refresh here would leave a revoked user
@@ -1009,7 +1026,7 @@ if curl --fail --silent \
 	--data-urlencode "refresh_token=${refresh_token}" \
 	--data-urlencode "client_id=${auto_consent_client_id}" \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
-	http://localhost:8080/oauth2/token >/dev/null 2>&1; then
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token >/dev/null 2>&1; then
 	echo 'revoked OIDC refresh token was accepted' >&2
 	exit 1
 fi
@@ -1060,7 +1077,7 @@ SHAUTH_BOOTSTRAP_APPS_JSON=$valid_bootstrap_apps_json
 export SHAUTH_BOOTSTRAP_APPS_JSON
 compose up --force-recreate --no-deps --detach shauth
 attempt=0
-while [ "$attempt" -lt 30 ] && ! curl --fail --silent http://localhost:8080/healthz >/dev/null 2>&1; do
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
 	attempt=$((attempt + 1))
 	sleep 1
 done

@@ -8,7 +8,9 @@ import http from "node:http";
 import path from "node:path";
 import { chromium } from "playwright";
 import { applicationSignOutControl } from "../validator/application-ui.mjs";
+import { requiredShauthPublicURL } from "./test-public-url.mjs";
 
+const issuer = requiredShauthPublicURL();
 const password = process.env.SHAUTH_BOOTSTRAP_ADMIN_PASSWORD;
 const primaryDatabase = process.env.SHAUTH_GATEWAY_PRIMARY_DATABASE;
 const secondaryDatabase = process.env.SHAUTH_GATEWAY_SECONDARY_DATABASE;
@@ -91,7 +93,7 @@ try {
   assert.equal(protectedResponse.headers()["content-security-policy"], "default-src 'self'; frame-ancestors 'self'");
   assert.equal(protectedResponse.headers()["x-frame-options"], "SAMEORIGIN");
   const gatewayResponse = await gatewayRequest(context, "GET", "http://gateway-integration.localhost:5556/auth/session");
-  assert.match(gatewayResponse.headers()["content-security-policy"], /form-action 'self' http:\/\/localhost:8080/);
+  assert.ok(gatewayResponse.headers()["content-security-policy"].includes(`form-action 'self' ${issuer}`));
   assert.equal(gatewayResponse.headers()["x-frame-options"], "DENY");
   assert.ok(primary.identity(), "primary upstream did not observe the administrator request");
   assert.deepEqual(primary.identity(), {
@@ -120,7 +122,7 @@ try {
   try {
     const terminatedProviderSession = await providerContext.request.delete(`http://localhost:4445/admin/oauth2/auth/sessions/login?sid=${encodeURIComponent(providerSessionID)}`);
     assert.equal(terminatedProviderSession.status(), 204);
-    const acceptedFrontchannel = await gatewayRequest(providerContext, "GET", `http://gateway-integration.localhost:5556/auth/frontchannel-logout?iss=${encodeURIComponent("http://localhost:8080")}&sid=${encodeURIComponent(providerSessionID)}`);
+    const acceptedFrontchannel = await gatewayRequest(providerContext, "GET", `http://gateway-integration.localhost:5556/auth/frontchannel-logout?iss=${encodeURIComponent(issuer)}&sid=${encodeURIComponent(providerSessionID)}`);
     assert.equal(acceptedFrontchannel.status(), 200);
   } finally {
     await providerContext.close();
@@ -184,11 +186,11 @@ try {
   // current browser continues through Hydra's public front/back-channel flow.
   const remoteContext = await browser.newContext();
   const remotePage = await remoteContext.newPage();
-  await remotePage.goto("http://localhost:8080/login");
+  await remotePage.goto(`${issuer}/login`);
   await remotePage.locator("#username").fill("admin");
   await remotePage.locator("#password").fill(password);
   await remotePage.getByRole("button", { name: "Sign in with password" }).click();
-  await remotePage.waitForURL("http://localhost:8080/");
+  await remotePage.waitForURL(`${issuer}/`);
   await remotePage.goto("http://gateway-integration.localhost:5556/");
   await remotePage.waitForURL("http://gateway-integration.localhost:5556/");
   await assertSession(remoteContext, "http://gateway-integration.localhost:5556", 200);
@@ -206,20 +208,20 @@ try {
 
   // Provider-initiated logout starts at Shauth rather than either relying
   // party. It must still notify all three independently persisted RP sessions.
-  await page.goto("http://localhost:8080/logout");
+  await page.goto(`${issuer}/logout`);
   const providerLogoutTraceStart = navigationTrace.length;
   const [providerLogoutSubmit] = await Promise.all([
-    page.waitForResponse((response) => response.url() === "http://localhost:8080/logout" && response.request().method() === "POST"),
+    page.waitForResponse((response) => response.url() === `${issuer}/logout` && response.request().method() === "POST"),
     page.getByRole("button", { name: "Sign out of all apps" }).click(),
   ]);
   assert.equal(providerLogoutSubmit.status(), 303);
   assert.equal(providerLogoutSubmit.headers().location, "/oauth2/sessions/logout");
   assert.equal(providerLogoutSubmit.request().isNavigationRequest(), true, "Shauth logout form must use a document navigation");
-  await waitForURL(page, "http://localhost:8080/signed-out", navigationTrace, browserErrors);
+  await waitForURL(page, `${issuer}/signed-out`, navigationTrace, browserErrors);
   const providerLogoutTrace = navigationTrace.slice(providerLogoutTraceStart);
   for (const expected of [
-    "request GET http://localhost:8080/oauth2/sessions/logout",
-    "request GET http://localhost:8080/oauth/logout",
+    `request GET ${issuer}/oauth2/sessions/logout`,
+    `request GET ${issuer}/oauth/logout`,
   ]) {
     assert.ok(providerLogoutTrace.includes(expected), `provider logout skipped ${expected}:\n${providerLogoutTrace.join("\n")}`);
   }
@@ -242,15 +244,15 @@ try {
   assert.equal(queryShauth(`SELECT count(*) FROM sessions WHERE user_id='${session.subject}'::uuid AND revoked_at IS NULL`), "0", "provider logout must revoke every Shauth browser session for the user");
   assert.equal(queryShauth(`SELECT count(*) FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id WHERE s.user_id='${session.subject}'::uuid AND s.revoked_at IS NULL`), "0", "provider logout must leave no Ory Hydra login session correlated with a live Shauth session");
   await waitForSessionStatus(remoteContext, "http://gateway-integration.localhost:5556", 401);
-  await remotePage.goto("http://localhost:8080/apps");
-  await remotePage.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
+  await remotePage.goto(`${issuer}/apps`);
+  await remotePage.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
   await remoteContext.close();
 
   await providerSignInControl.click();
   await page.locator("#username").fill("admin");
   await page.locator("#password").fill(password);
   await page.getByRole("button", { name: "Sign in with password" }).click();
-  await page.waitForURL("http://localhost:8080/");
+  await page.waitForURL(`${issuer}/`);
   await signInFromLocalTerminal(page, "http://gateway-integration.localhost:5556");
   await assertSession(context, "http://gateway-integration.localhost:5556", 200);
   await signInFromLocalTerminal(page, "http://gateway-secondary.localhost:5558");
@@ -271,10 +273,10 @@ try {
   assert.equal(await signInControl.getAttribute("href"), "/auth/login", "reloaded signed-out page must preserve the application-local sign-in control");
   const injectedBridge = await gatewayRequest(context, "GET", "http://gateway-integration.localhost:5556/auth/shauth/logout/complete?next=https%3A%2F%2Fattacker.example&redirect_uri=https%3A%2F%2Fattacker.example", { maxRedirects: 0 });
   assert.equal(injectedBridge.status(), 303);
-  assert.equal(injectedBridge.headers().location, "http://localhost:8080/oauth/logout/complete");
+  assert.equal(injectedBridge.headers().location, `${issuer}/oauth/logout/complete`);
   const replayPage = await context.newPage();
-  await replayPage.goto("http://localhost:8080/oauth/logout/complete?next=https%3A%2F%2Fattacker.example");
-  await replayPage.waitForURL("http://localhost:8080/signed-out");
+  await replayPage.goto(`${issuer}/oauth/logout/complete?next=https%3A%2F%2Fattacker.example`);
+  await replayPage.waitForURL(`${issuer}/signed-out`);
   await replayPage.getByRole("link", { name: "Sign in to Shauth" }).waitFor();
   await replayPage.close();
   await assertSession(context, "http://gateway-integration.localhost:5556", 401);
@@ -292,20 +294,20 @@ try {
   });
   assert.equal(noLocalSessionLogout.status(), 303);
   const noLocalSessionTarget = new URL(noLocalSessionLogout.headers().location);
-  assert.equal(noLocalSessionTarget.origin, "http://localhost:8080");
+  assert.equal(noLocalSessionTarget.origin, issuer);
   assert.equal(noLocalSessionTarget.pathname, "/oauth2/sessions/logout");
   assert.equal(noLocalSessionTarget.searchParams.get("client_id"), "gateway-integration");
   assert.equal(noLocalSessionTarget.searchParams.get("post_logout_redirect_uri"), "http://gateway-integration.localhost:5556/auth/shauth/logout/complete");
   assert.equal(noLocalSessionTarget.searchParams.has("id_token_hint"), false);
   const signInTraceStart = navigationTrace.length;
   await signInControl.click();
-  await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
+  await page.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
   assert.ok(
     navigationTrace.slice(signInTraceStart).includes("request GET http://gateway-integration.localhost:5556/auth/login"),
     `signed-out sign-in control bypassed the application-local login starter:\n${navigationTrace.slice(signInTraceStart).join("\n")}`,
   );
-  await page.goto("http://localhost:8080/apps");
-  await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
+  await page.goto(`${issuer}/apps`);
+  await page.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
   assert.deepEqual(browserErrors, []);
 
   // A Shauth-only browser has no relying-party ID token or Hydra login cookie.
@@ -316,28 +318,28 @@ try {
   try {
     const providerOnlyPage = await providerOnlyContext.newPage();
     const providerOnlyWitnessPage = await providerOnlyWitnessContext.newPage();
-    await providerOnlyPage.goto("http://localhost:8080/login");
+    await providerOnlyPage.goto(`${issuer}/login`);
     await providerOnlyPage.locator("#username").fill("admin");
     await providerOnlyPage.locator("#password").fill(password);
     await providerOnlyPage.getByRole("button", { name: "Sign in with password" }).click();
-    await providerOnlyPage.waitForURL("http://localhost:8080/");
-    await providerOnlyWitnessPage.goto("http://localhost:8080/login");
+    await providerOnlyPage.waitForURL(`${issuer}/`);
+    await providerOnlyWitnessPage.goto(`${issuer}/login`);
     await providerOnlyWitnessPage.locator("#username").fill("admin");
     await providerOnlyWitnessPage.locator("#password").fill(password);
     await providerOnlyWitnessPage.getByRole("button", { name: "Sign in with password" }).click();
-    await providerOnlyWitnessPage.waitForURL("http://localhost:8080/");
+    await providerOnlyWitnessPage.waitForURL(`${issuer}/`);
     await providerOnlyWitnessPage.goto("http://gateway-integration.localhost:5556/auth/login");
     await providerOnlyWitnessPage.waitForURL("http://gateway-integration.localhost:5556/");
     await assertSession(providerOnlyWitnessContext, "http://gateway-integration.localhost:5556", 200);
-    await providerOnlyPage.goto("http://localhost:8080/logout");
+    await providerOnlyPage.goto(`${issuer}/logout`);
     await providerOnlyPage.getByRole("button", { name: "Sign out of all apps" }).click();
-    await providerOnlyPage.waitForURL("http://localhost:8080/signed-out");
+    await providerOnlyPage.waitForURL(`${issuer}/signed-out`);
     await providerOnlyPage.reload();
     await providerOnlyPage.getByRole("link", { name: "Sign in to Shauth" }).waitFor();
-    await providerOnlyPage.goto("http://localhost:8080/apps");
-    await providerOnlyPage.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
-    await providerOnlyWitnessPage.goto("http://localhost:8080/apps");
-    await providerOnlyWitnessPage.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
+    await providerOnlyPage.goto(`${issuer}/apps`);
+    await providerOnlyPage.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
+    await providerOnlyWitnessPage.goto(`${issuer}/apps`);
+    await providerOnlyWitnessPage.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
     await waitForSessionStatus(providerOnlyWitnessContext, "http://gateway-integration.localhost:5556", 401);
     await providerOnlyWitnessPage.goto("http://gateway-integration.localhost:5556/");
     await providerOnlyWitnessPage.waitForURL("http://gateway-integration.localhost:5556/auth/signed-out");
@@ -370,15 +372,15 @@ async function exerciseStaleHydraCorrelationRebind(browserInstance, secondaryDat
 
     revokeTestShauthSession(oldSessionID);
     await context.clearCookies({ name: "shauth_session" });
-    await page.goto("http://localhost:8080/login");
+    await page.goto(`${issuer}/login`);
     await page.locator("#username").fill("admin");
     await page.locator("#password").fill(password);
     await page.getByRole("button", { name: "Sign in with password" }).click();
-    await page.waitForURL("http://localhost:8080/");
+    await page.waitForURL(`${issuer}/`);
     freshSessionID = await currentShauthSessionID(context);
     assert.notEqual(freshSessionID, oldSessionID, "re-login did not create a fresh Shauth browser session");
 
-    await page.goto("http://localhost:8080/apps");
+    await page.goto(`${issuer}/apps`);
     await page.getByRole("link", { name: "Open Gateway secondary", exact: true }).click();
     await page.waitForURL("http://gateway-secondary.localhost:5558/");
     await assertSession(context, "http://gateway-secondary.localhost:5558", 200);
@@ -404,8 +406,8 @@ async function exerciseLogoutCorrelationFailure(browserInstance, database) {
     assert.ok(providerSessionID, "abandoned-flow relying party has no provider session");
     const correlationCookie = await interruptProviderStart(abandonedPage, abandonedContext);
     assert.equal(activeShauthSessionCount(), "0", "POST /logout must revoke the Shauth session before provider navigation");
-    await abandonedPage.goto("http://localhost:8080/apps");
-    await abandonedPage.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
+    await abandonedPage.goto(`${issuer}/apps`);
+    await abandonedPage.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
     const tokenHash = createHash("sha256").update(correlationCookie.value).digest("hex");
     queryShauth(`UPDATE logout_correlation_grants SET created_at=now()-interval '3 minutes',expires_at=now()-interval '1 minute',cleanup_after=now() WHERE token_hash=decode('${tokenHash}','hex')`);
     await waitForQuery(`SELECT count(*) FROM logout_correlation_grants WHERE completed_at IS NOT NULL AND token_hash=decode('${tokenHash}','hex')`, "1");
@@ -415,7 +417,7 @@ async function exerciseLogoutCorrelationFailure(browserInstance, database) {
     await abandonedPage.waitForURL("http://gateway-integration.localhost:5556/auth/signed-out");
     assert.equal(await abandonedPage.getByRole("link", { name: "Sign in with Shauth", exact: true }).getAttribute("href"), "/auth/login");
     await abandonedPage.goto("http://gateway-integration.localhost:5556/auth/login");
-    await abandonedPage.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/login");
+    await abandonedPage.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
   } finally {
     await abandonedContext.close();
   }
@@ -466,7 +468,7 @@ async function exerciseCorrelationCreationFailure(browserInstance, database) {
     try {
       await page.goto("http://gateway-integration.localhost:5556/");
       await (await applicationSignOutControl(page, "admin", "primary application")).click();
-      await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/oauth/logout");
+      await page.waitForURL((url) => url.origin === issuer && url.pathname === "/oauth/logout");
       await page.getByText("OAuth logout could not be correlated with an exact provider session").waitFor();
     } finally {
       allowLogoutCorrelationInserts();
@@ -492,7 +494,7 @@ async function exerciseCorrelationCreationFailure(browserInstance, database) {
     try {
       await page.goto("http://gateway-integration.localhost:5556/");
       await (await applicationSignOutControl(page, "admin", "primary application")).click();
-      await page.waitForURL((url) => url.origin === "http://localhost:8080" && url.pathname === "/oauth/logout");
+      await page.waitForURL((url) => url.origin === issuer && url.pathname === "/oauth/logout");
       await page.getByText("OAuth logout could not be correlated with an exact provider session").waitFor();
     } finally {
       allowLogoutCorrelationInserts();
@@ -516,25 +518,25 @@ function allowLogoutCorrelationInserts() {
 }
 
 async function signInPortalAndPrimaryRP(page, context) {
-  await page.goto("http://localhost:8080/login");
+  await page.goto(`${issuer}/login`);
   await page.locator("#username").fill("admin");
   await page.locator("#password").fill(password);
   await page.getByRole("button", { name: "Sign in with password" }).click();
-  await page.waitForURL("http://localhost:8080/");
+  await page.waitForURL(`${issuer}/`);
   await page.goto("http://gateway-integration.localhost:5556/auth/login");
   await page.waitForURL("http://gateway-integration.localhost:5556/");
   await assertSession(context, "http://gateway-integration.localhost:5556", 200);
 }
 
 async function interruptProviderStart(page, context) {
-  await page.goto("http://localhost:8080/logout");
-  const csrf = (await context.cookies("http://localhost:8080/logout")).find((candidate) => candidate.name === "shauth_csrf");
+  await page.goto(`${issuer}/logout`);
+  const csrf = (await context.cookies(`${issuer}/logout`)).find((candidate) => candidate.name === "shauth_csrf");
   assert.ok(csrf, "Shauth logout page did not issue a CSRF cookie");
   const body = new URLSearchParams({ _csrf: csrf.value });
-  const response = await context.request.post("http://localhost:8080/logout", {
+  const response = await context.request.post(`${issuer}/logout`, {
     data: body.toString(),
     headers: {
-      origin: "http://localhost:8080",
+      origin: issuer,
       "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
     },
     maxRedirects: 0,
@@ -543,7 +545,7 @@ async function interruptProviderStart(page, context) {
   const diagnostic = JSON.stringify({
     status: response.status(),
     body: responseBody.slice(0, 200),
-    origin: "http://localhost:8080",
+    origin: issuer,
     contentType: "application/x-www-form-urlencoded;charset=UTF-8",
     cookieTokenLength: csrf.value.length,
     formTokenLength: body.get("_csrf")?.length ?? 0,
@@ -551,7 +553,7 @@ async function interruptProviderStart(page, context) {
   });
   assert.equal(response.status(), 303, diagnostic);
   assert.equal(response.headers().location, "/oauth2/sessions/logout");
-  const cookie = (await context.cookies("http://localhost:8080/oauth/logout")).find((candidate) => candidate.name === "shauth_logout_correlation");
+  const cookie = (await context.cookies(`${issuer}/oauth/logout`)).find((candidate) => candidate.name === "shauth_logout_correlation");
   assert.ok(cookie, "logout correlation cookie was not created");
   assert.equal(cookie.httpOnly, true);
   assert.equal(cookie.path, "/oauth/logout");
@@ -570,7 +572,7 @@ function newestActiveShauthSessionID() {
 }
 
 async function currentShauthSessionID(context) {
-  const cookie = (await context.cookies("http://localhost:8080/")).find((candidate) => candidate.name === "shauth_session");
+  const cookie = (await context.cookies(`${issuer}/`)).find((candidate) => candidate.name === "shauth_session");
   assert.ok(cookie, "Shauth browser session cookie is unavailable");
   const tokenHash = createHash("sha256").update(cookie.value).digest("hex");
   const sessionID = queryShauth(`SELECT id::text FROM sessions WHERE browser_token_hash=decode('${tokenHash}','hex')`);

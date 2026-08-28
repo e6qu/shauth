@@ -64,7 +64,10 @@ with that boundary's security-group coordinates.
 
 Shauth's task role has only the permissions required for identity delivery.
 Administrators register each managed app with its OIDC client, launch URL,
-published health URL, and optional monitoring URL. Shauth checks health through
+published health URL, and optional machine observation endpoint in
+`monitoring_url`. Shauth reads observations server-side with the deployment
+credential and presents them to administrators on its protected Monitoring
+page; the endpoint is not a browser destination. Shauth checks health through
 standard HTTP and remains independent of deployment platforms and log systems.
 Each `bootstrap_apps` client also supplies its sign-in redirect URIs, allowed
 post-logout redirect URIs, and at least one front-channel or back-channel

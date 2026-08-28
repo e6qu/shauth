@@ -66,6 +66,11 @@ Pull requests run the full integration suite, Terraform formatting, validation,
 tests, and a high/critical Trivy configuration scan before merge. After a merge
 to `main`, only the container publishing flow runs; it builds, verifies,
 publishes, and retains the immutable image releases.
+Run the complete local acceptance stack with `./scripts/test-stack.sh`. It uses
+host port `8080` by default; when that port belongs to another development
+service, choose an available port explicitly, for example
+`SHAUTH_HOST_PORT=18080 ./scripts/test-stack.sh`. The selected origin is used
+consistently by Compose, Hydra, the gateway processes, and every browser test.
 Shauth exposes Ory Hydra's complete public OpenID Connect surface at its public
 issuer, including discovery, authorization, token, UserInfo, revocation,
 introspection, and front-channel logout endpoints. Relying applications never
@@ -186,7 +191,10 @@ Terraform can supply `bootstrap_apps` as a sensitive input to register clients
 and catalog records idempotently during Shauth startup. The input is stored only
 in the Shauth runtime secret and contains each confidential client secret,
 sign-in and post-logout redirect URIs, at least one front-channel or
-back-channel logout URI, launch URL, health URL, and optional monitoring URL.
+back-channel logout URI, launch URL, health URL, and optional observation
+endpoint in `monitoring_url`. Shauth reads that endpoint server-side with its
+deployment credential and presents the result to administrators on
+`/monitoring`; it is not browser navigation.
 Every coordinate for one connected application uses the same scheme, host, and
 port, and the client registers the exact app-origin
 `/auth/shauth/logout/complete` bridge as its only `post_logout_redirect_uri`. The
