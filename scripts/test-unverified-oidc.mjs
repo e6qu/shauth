@@ -5,8 +5,9 @@ import crypto from "node:crypto";
 import http from "node:http";
 import { chromium } from "playwright";
 import { isStrictOIDCIdentity } from "./oidc-claims.mjs";
+import { requiredShauthPublicURL } from "./test-public-url.mjs";
 
-const issuer = "http://localhost:8080";
+const issuer = requiredShauthPublicURL();
 const hydraAdmin = "http://localhost:4445";
 const callbackURL = "http://localhost:5555/callback";
 const clientID = "shauth-integration-client";

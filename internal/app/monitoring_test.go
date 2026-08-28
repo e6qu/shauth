@@ -9,8 +9,94 @@ import (
 	"testing"
 	"time"
 
+	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/monitoring"
 )
+
+func TestApplicationMonitoringNavigationStaysInsideShauth(t *testing.T) {
+	pages, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	const observationEndpoint = "https://example.test/monitoring/observation"
+	app := newManagedAppView(identity.ManagedApp{
+		Slug: "example", Name: "Example", Description: "An example application.",
+		LaunchURL: "https://example.test/", MonitoringURL: observationEndpoint,
+	})
+
+	for name, test := range map[string]struct {
+		data                 map[string]any
+		wantMonitoringAction bool
+	}{
+		"administrator": {
+			data:                 map[string]any{"SignedIn": true, "IsAdmin": true, "Apps": []managedAppView{app}},
+			wantMonitoringAction: true,
+		},
+		"non-administrator": {
+			data: map[string]any{"SignedIn": true, "IsAdmin": false, "Apps": []managedAppView{app}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			apps := test.data["Apps"].([]managedAppView)
+			if test.data["IsAdmin"].(bool) {
+				setMonitoringPageURLs(apps, identity.RoleAdmin)
+			} else {
+				setMonitoringPageURLs(apps, identity.RoleDeveloper)
+			}
+			var output bytes.Buffer
+			if err := pages.ExecuteTemplate(&output, "apps", test.data); err != nil {
+				t.Fatalf("ExecuteTemplate() error = %v", err)
+			}
+			rendered := output.String()
+			if strings.Contains(rendered, `href="`+observationEndpoint+`"`) {
+				t.Fatalf("application catalog exposed the machine observation endpoint as browser navigation: %s", rendered)
+			}
+			hasMonitoringAction := strings.Contains(rendered, `href="/monitoring"`) && strings.Contains(rendered, `View monitoring`)
+			if hasMonitoringAction != test.wantMonitoringAction {
+				t.Fatalf("monitoring action present = %t, want %t", hasMonitoringAction, test.wantMonitoringAction)
+			}
+		})
+	}
+}
+
+func TestApplicationAdministrationIdentifiesMachineObservationEndpoint(t *testing.T) {
+	pages, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	const observationEndpoint = "https://example.test/monitoring/observation"
+	app := newManagedAppView(identity.ManagedApp{
+		Slug: "example", Name: "Example", Description: "An example application.",
+		LaunchURL: "https://example.test/", MonitoringURL: observationEndpoint,
+	})
+	var output bytes.Buffer
+	if err := pages.ExecuteTemplate(&output, "admin-apps", map[string]any{"Apps": []managedAppView{app}}); err != nil {
+		t.Fatalf("ExecuteTemplate() error = %v", err)
+	}
+	rendered := output.String()
+	for _, expected := range []string{"Observation endpoint", "Shauth reads this endpoint", `href="/monitoring"`, "View monitoring"} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("application administration page omitted %q", expected)
+		}
+	}
+	if strings.Contains(rendered, `href="`+observationEndpoint+`"`) {
+		t.Fatalf("application administration exposed the machine observation endpoint as browser navigation: %s", rendered)
+	}
+
+	output.Reset()
+	if err := pages.ExecuteTemplate(&output, "admin-app", map[string]any{"App": app}); err != nil {
+		t.Fatalf("ExecuteTemplate(admin-app) error = %v", err)
+	}
+	rendered = output.String()
+	for _, expected := range []string{"Observation endpoint", observationEndpoint, `href="/monitoring"`, "View monitoring"} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("application detail page omitted %q", expected)
+		}
+	}
+	if strings.Contains(rendered, `href="`+observationEndpoint+`"`) {
+		t.Fatalf("application detail page exposed the machine observation endpoint as browser navigation: %s", rendered)
+	}
+}
 
 func TestMonitoringPageRendersGenericResourceMetricsAndPriceBasis(t *testing.T) {
 	pages, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)

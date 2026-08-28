@@ -3,9 +3,11 @@
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import { chromium } from "playwright";
+import { requiredShauthPublicURL } from "./test-public-url.mjs";
 
 const cookieJarPath = process.argv[2];
 if (!cookieJarPath) throw new Error("cookie jar path is required");
+const shauthURL = requiredShauthPublicURL();
 
 const cookies = (await readFile(cookieJarPath, "utf8"))
   .split("\n")
@@ -41,9 +43,9 @@ try {
   await page.getByRole("heading", { name: "Primary application", exact: true }).waitFor({ state: "visible" });
   const authenticatedSession = await browserResponse(context, "http://gateway-integration.localhost:5556/auth/session");
   if (authenticatedSession.status() !== 200) throw new Error("relying-party browser session was not established");
-  await page.goto("http://localhost:8080/logout", { waitUntil: "domcontentloaded" });
+  await page.goto(`${shauthURL}/logout`, { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "Sign out of all apps", exact: true }).click();
-  await page.waitForURL("http://localhost:8080/signed-out", { timeout: 30_000 });
+  await page.waitForURL(`${shauthURL}/signed-out`, { timeout: 30_000 });
   await page.getByRole("link", { name: "Sign in to Shauth", exact: true }).waitFor({ state: "visible" });
   await page.goto("http://gateway-integration.localhost:5556/", { waitUntil: "domcontentloaded" });
   await page.waitForURL("http://gateway-integration.localhost:5556/auth/signed-out", { timeout: 30_000 });
