@@ -908,45 +908,51 @@ func scanAppValidationRun(rows pgx.Rows) (AppValidationRun, error) {
 	return run, nil
 }
 
-// ClaimAppValidation leases exactly one queued check. PostgreSQL serializes all
-// workers globally and enforces at least 30 seconds between check starts.
+// appValidationClaimLockID serializes the count-and-claim decision in
+// ClaimAppValidation across every worker, the same way the row lock on the
+// single control row this replaced did -- without it, two workers could both
+// read a running count under appValidationConcurrencyLimit and both claim,
+// running one more validation than the budget allows.
+const appValidationClaimLockID int64 = 0x5348415554484156
+
+// appValidationConcurrencyLimit bounds how many browser checks run at once.
+// A full redeploy re-queues both directions for every registered app; run
+// one at a time and that queue drains at the pace of its slowest check
+// instead of its number of checks. Each worker is one Chromium instance
+// (2 vCPU / 2 GiB in its deployment), so this is sized to the host's real
+// headroom, not chosen arbitrarily.
+const appValidationConcurrencyLimit = 3
+
+// appValidationLeaseDuration must cover the slowest legitimate check, not
+// the typical one. ECS Dev Desktop's core-functionality check provisions a
+// real workspace and waits out its full stop-and-snapshot lifecycle (up to
+// 20 minutes) before tearing it down -- a 10-minute lease failed that check
+// on its own account, not on an actual defect, indistinguishable in the
+// record from a worker that really had hung.
+const appValidationLeaseDuration = 30 * time.Minute
+
+// ClaimAppValidation leases one queued check, up to appValidationConcurrencyLimit
+// running at once. A worker that never completed its lease (crashed, or the
+// deploy that recreates every container mid-check) is reaped inline here
+// rather than left to block that slot indefinitely.
 func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppValidationRun, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim application validation: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var activeRunID *string
-	var nextStart time.Time
-	if err := tx.QueryRow(ctx, `SELECT active_run_id::text,next_start_at FROM app_validation_control WHERE singleton=TRUE FOR UPDATE`).Scan(&activeRunID, &nextStart); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, appValidationClaimLockID); err != nil {
 		return nil, fmt.Errorf("lock application validation queue: %w", err)
 	}
-	if activeRunID != nil {
-		var status string
-		var lease *time.Time
-		if err := tx.QueryRow(ctx, `SELECT status,lease_expires_at FROM app_validation_runs WHERE id=$1::uuid FOR UPDATE`, *activeRunID).Scan(&status, &lease); err != nil {
-			return nil, fmt.Errorf("read active application validation lease: %w", err)
-		}
-		if status != ValidationRunning || lease == nil {
-			if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
-				return nil, fmt.Errorf("clear stale application validation lease: %w", err)
-			}
-		} else if lease.After(now) {
-			return nil, tx.Commit(ctx)
-		} else {
-			command, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, now.UTC())
-			if err != nil {
-				return nil, fmt.Errorf("expire abandoned application validation: %w", err)
-			}
-			if command.RowsAffected() != 1 {
-				return nil, fmt.Errorf("active application validation not found")
-			}
-			if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
-				return nil, fmt.Errorf("clear abandoned application validation: %w", err)
-			}
-		}
+	nowUTC := now.UTC()
+	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$1,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($1-started_at))*1000)::bigint,failure='validator lease expired' WHERE status='running' AND lease_expires_at<$1`, nowUTC); err != nil {
+		return nil, fmt.Errorf("expire abandoned application validations: %w", err)
 	}
-	if nextStart.After(now) {
+	var runningCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM app_validation_runs WHERE status='running'`).Scan(&runningCount); err != nil {
+		return nil, fmt.Errorf("count running application validations: %w", err)
+	}
+	if runningCount >= appValidationConcurrencyLimit {
 		return nil, tx.Commit(ctx)
 	}
 	var run AppValidationRun
@@ -967,13 +973,10 @@ func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppVali
 	if witnessID != nil {
 		run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
 	}
-	started := now.UTC()
-	lease := started.Add(10 * time.Minute)
+	started := nowUTC
+	lease := started.Add(appValidationLeaseDuration)
 	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='running',started_at=$2,lease_expires_at=$3 WHERE id=$1::uuid`, run.ID, started, lease); err != nil {
 		return nil, fmt.Errorf("lease application validation: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=$1::uuid,next_start_at=$2 WHERE singleton=TRUE`, run.ID, started.Add(30*time.Second)); err != nil {
-		return nil, fmt.Errorf("advance application validation cooldown: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit claim application validation: %w", err)
@@ -994,22 +997,12 @@ func (s *Store) CompleteAppValidation(ctx context.Context, runID, status, failur
 		return fmt.Errorf("begin complete application validation: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var activeRunID *string
-	if err := tx.QueryRow(ctx, `SELECT active_run_id::text FROM app_validation_control WHERE singleton=TRUE FOR UPDATE`).Scan(&activeRunID); err != nil {
-		return fmt.Errorf("lock application validation queue: %w", err)
-	}
-	if activeRunID == nil || *activeRunID != runID {
-		return fmt.Errorf("active application validation not found")
-	}
 	command, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status=$2,completed_at=$3,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($3-started_at))*1000)::bigint,failure=$4 WHERE id=$1::uuid AND status='running'`, runID, status, now.UTC(), strings.TrimSpace(failure))
 	if err != nil {
 		return fmt.Errorf("complete application validation: %w", err)
 	}
 	if command.RowsAffected() != 1 {
 		return fmt.Errorf("active application validation not found")
-	}
-	if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, runID); err != nil {
-		return fmt.Errorf("release application validation queue: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit application validation result: %w", err)
@@ -1025,37 +1018,8 @@ func (s *Store) ExpireAbandonedAppValidation(ctx context.Context, now time.Time)
 		return fmt.Errorf("begin expire application validation: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var activeRunID *string
-	if err := tx.QueryRow(ctx, `SELECT active_run_id::text FROM app_validation_control WHERE singleton=TRUE FOR UPDATE`).Scan(&activeRunID); err != nil {
-		return fmt.Errorf("lock application validation queue: %w", err)
-	}
-	if activeRunID == nil {
-		return tx.Commit(ctx)
-	}
-	var status string
-	var lease *time.Time
-	if err := tx.QueryRow(ctx, `SELECT status,lease_expires_at FROM app_validation_runs WHERE id=$1::uuid FOR UPDATE`, *activeRunID).Scan(&status, &lease); err != nil {
-		return fmt.Errorf("read active application validation lease: %w", err)
-	}
-	if status != ValidationRunning || lease == nil {
-		if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
-			return fmt.Errorf("release stale application validation queue: %w", err)
-		}
-		return tx.Commit(ctx)
-	}
-	if lease.After(now) {
-		return tx.Commit(ctx)
-	}
-	completed := now.UTC()
-	command, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$2,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($2-started_at))*1000)::bigint,failure='validator lease expired' WHERE id=$1::uuid AND status='running'`, *activeRunID, completed)
-	if err != nil {
-		return fmt.Errorf("expire abandoned application validation: %w", err)
-	}
-	if command.RowsAffected() != 1 {
-		return fmt.Errorf("active application validation not found")
-	}
-	if _, err := tx.Exec(ctx, `UPDATE app_validation_control SET active_run_id=NULL WHERE singleton=TRUE AND active_run_id=$1::uuid`, *activeRunID); err != nil {
-		return fmt.Errorf("release abandoned application validation: %w", err)
+	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$1,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($1-started_at))*1000)::bigint,failure='validator lease expired' WHERE status='running' AND lease_expires_at<$1`, now.UTC()); err != nil {
+		return fmt.Errorf("expire abandoned application validations: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit expired application validation: %w", err)

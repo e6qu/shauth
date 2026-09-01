@@ -78,10 +78,8 @@ func newAdminAPIAcceptanceService(t *testing.T) (*pgxpool.Pool, *Server, *identi
 		CREATE TABLE %[1]s.hydra_login_sessions (LIKE public.hydra_login_sessions INCLUDING ALL);
 		CREATE TABLE %[1]s.managed_apps (LIKE public.managed_apps INCLUDING ALL);
 		CREATE TABLE %[1]s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
-		CREATE TABLE %[1]s.app_validation_control (LIKE public.app_validation_control INCLUDING ALL);
 		CREATE TABLE %[1]s.audit_events (LIKE public.audit_events INCLUDING ALL);
 		CREATE TABLE %[1]s.logout_correlation_grants (LIKE public.logout_correlation_grants INCLUDING ALL);
-		INSERT INTO %[1]s.app_validation_control(singleton) VALUES (TRUE);
 		INSERT INTO %[1]s.session_policy (singleton,browser_absolute_lifetime_seconds,browser_idle_timeout_seconds,oidc_session_lifetime_seconds,access_token_lifetime_seconds,id_token_lifetime_seconds,refresh_token_lifetime_seconds,updated_at)
 		VALUES (TRUE, 2592000, 43200, 2592000, 900, 900, 2592000, now())`, schema)); err != nil {
 		t.Fatalf("create isolated administration API schema: %v", err)
