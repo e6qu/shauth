@@ -32,9 +32,7 @@ func newAcceptanceValidationStore(t *testing.T, prefix string) (*pgxpool.Pool, *
 	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
 		CREATE SCHEMA %s;
 		CREATE TABLE %s.managed_apps (LIKE public.managed_apps INCLUDING ALL);
-		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
-		CREATE TABLE %s.app_validation_control (LIKE public.app_validation_control INCLUDING ALL);
-		INSERT INTO %s.app_validation_control(singleton) VALUES (TRUE)`, schema, schema, schema, schema, schema)); err != nil {
+		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL)`, schema, schema, schema)); err != nil {
 		t.Fatalf("create isolated validation schema: %v", err)
 	}
 	t.Cleanup(func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })

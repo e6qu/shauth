@@ -1,0 +1,14 @@
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+-- Concurrent application validation: a queue serialized through one global
+-- singleton slot meant every real browser check after a full redeploy ran
+-- one at a time, each up to its 10-minute lease, so a mass re-validation of
+-- every registered app could take far longer than the checks themselves
+-- warranted -- and one legitimately slow check (ECS Dev Desktop's full
+-- workspace-provisioning lifecycle) could occupy that single slot for its
+-- entire lease, blocking every other app's check behind it.
+--
+-- ClaimAppValidation now bounds concurrency by counting rows with
+-- status='running' instead of tracking one active_run_id, serialized by a
+-- session advisory lock around the count-and-claim decision rather than a
+-- row lock on this table. Nothing reads or writes it any longer.
+DROP TABLE app_validation_control;
