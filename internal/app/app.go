@@ -1510,7 +1510,8 @@ type validatorResult struct {
 }
 
 type validatorBootstrapRequest struct {
-	Next []string `json:"next"`
+	RunID string   `json:"run_id"`
+	Next  []string `json:"next"`
 }
 
 type validatorBootstrapResponse struct {
@@ -1848,6 +1849,7 @@ func (s *Server) validatorClaim(w http.ResponseWriter, r *http.Request) {
 		"oidc_client_id": run.OIDCClientID, "launch_url": run.LaunchURL, "direction": run.Direction,
 		"validation_url": run.ValidationURL, "signed_out_url": run.SignedOutURL, "logout_bridge_url": run.LogoutBridgeURL,
 		"release_revision": run.ReleaseRevision, "shauth_url": s.config.PublicURL.String(), "witness": run.Witness,
+		"validation_username": run.ValidationUsername, "validation_email": run.ValidationEmail,
 	})
 }
 
@@ -1857,7 +1859,7 @@ func (s *Server) validatorCreateBrowserBootstraps(w http.ResponseWriter, r *http
 		return
 	}
 	var request validatorBootstrapRequest
-	if err := decodeSingleJSONBody(http.MaxBytesReader(w, r.Body, 4*1024), &request); err != nil || len(request.Next) == 0 || len(request.Next) > 3 {
+	if err := decodeSingleJSONBody(http.MaxBytesReader(w, r.Body, 4*1024), &request); err != nil || strings.TrimSpace(request.RunID) == "" || len(request.Next) == 0 || len(request.Next) > 3 {
 		writeAdminAPIError(w, http.StatusBadRequest, "invalid browser bootstrap request")
 		return
 	}
@@ -1867,7 +1869,7 @@ func (s *Server) validatorCreateBrowserBootstraps(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	tokens, err := s.store.CreateValidationBrowserBootstraps(r.Context(), request.Next, time.Now())
+	tokens, err := s.store.CreateValidationBrowserBootstraps(r.Context(), request.RunID, request.Next, time.Now())
 	if err != nil {
 		writeAdminAPIError(w, http.StatusInternalServerError, "could not create browser bootstraps")
 		return

@@ -640,10 +640,11 @@ func TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt(t *testing.T) {
 // stop validation without containing a real account.
 func TestAdminAPIRefusesToDisableTheValidationIdentity(t *testing.T) {
 	_, handler, store := newAdminAPIAcceptanceServer(t)
-	validation, err := store.EnsureValidationUser(context.Background(), "shauth-validator", "shauth-validator@example.test")
+	validationPool, err := store.EnsureValidationUsers(context.Background(), "shauth-validator", "shauth-validator@example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
+	validation := validationPool[0]
 	response := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/users/"+validation.ID+"/disable", adminAPIAcceptanceWriteToken, "")
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusConflict, response.Body.String())

@@ -15,6 +15,7 @@ func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 		LaunchURL: "https://bleephub.example.test/", ValidationURL: "https://bleephub.example.test/auth/validation",
 		SignedOutURL: "https://bleephub.example.test/ui/signed-out", LogoutBridgeURL: "https://bleephub.example.test/auth/shauth/logout/complete", Direction: "from_app",
 		ReleaseRevision: "0123456789ab", ShauthURL: "https://auth.example.test",
+		ValidationUsername: "shauth-validator-1", ValidationEmail: "shauth-validator+1@example.test",
 		Witness: &witness{ManagedAppID: "sharecrop-id", AppSlug: "sharecrop", AppName: "Sharecrop", OIDCClientID: "sharecrop", LaunchURL: "https://sharecrop.example.test/", ValidationURL: "https://sharecrop.example.test/me", SignedOutURL: "https://sharecrop.example.test/signed-out", LogoutBridgeURL: "https://sharecrop.example.test/auth/shauth/logout/complete", ReleaseRevision: "abcdef012345"},
 	}
 	if err := validateJob("https://auth.example.test", valid); err != nil {
@@ -38,14 +39,16 @@ func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 			value.SignedOutURL = "http://bleephub.example.test/ui/signed-out"
 			value.LogoutBridgeURL = "http://bleephub.example.test/auth/shauth/logout/complete"
 		},
-		"credentials in URL":       func(value *job) { value.LaunchURL = "https://user:secret@bleephub.example.test/" },
-		"fragment":                 func(value *job) { value.SignedOutURL += "#credential-form" },
-		"mutable app revision":     func(value *job) { value.ReleaseRevision = "main" },
-		"mutable witness revision": func(value *job) { value.Witness.ReleaseRevision = "latest" },
-		"unknown direction":        func(value *job) { value.Direction = "outside" },
-		"missing witness":          func(value *job) { value.Witness = nil },
-		"same witness app":         func(value *job) { value.Witness.ManagedAppID = value.ManagedAppID },
-		"same witness client":      func(value *job) { value.Witness.OIDCClientID = value.OIDCClientID },
+		"credentials in URL":          func(value *job) { value.LaunchURL = "https://user:secret@bleephub.example.test/" },
+		"fragment":                    func(value *job) { value.SignedOutURL += "#credential-form" },
+		"mutable app revision":        func(value *job) { value.ReleaseRevision = "main" },
+		"mutable witness revision":    func(value *job) { value.Witness.ReleaseRevision = "latest" },
+		"unknown direction":           func(value *job) { value.Direction = "outside" },
+		"missing validation username": func(value *job) { value.ValidationUsername = "" },
+		"missing validation email":    func(value *job) { value.ValidationEmail = "" },
+		"missing witness":             func(value *job) { value.Witness = nil },
+		"same witness app":            func(value *job) { value.Witness.ManagedAppID = value.ManagedAppID },
+		"same witness client":         func(value *job) { value.Witness.OIDCClientID = value.OIDCClientID },
 		"same witness origin": func(value *job) {
 			value.Witness.LaunchURL = "https://bleephub.example.test/witness"
 			value.Witness.ValidationURL = "https://bleephub.example.test/witness/me"
@@ -71,6 +74,7 @@ func TestValidateJobAllowsLoopbackHTTP(t *testing.T) {
 		LaunchURL: "http://local-app.localhost:5556/", ValidationURL: "http://local-app.localhost:5556/me",
 		SignedOutURL: "http://local-app.localhost:5556/auth/signed-out", LogoutBridgeURL: "http://local-app.localhost:5556/auth/shauth/logout/complete", Direction: "from_shauth",
 		ReleaseRevision: "0123456789ab", ShauthURL: "http://localhost:8080",
+		ValidationUsername: "shauth-validator-1", ValidationEmail: "shauth-validator+1@example.test",
 		Witness: &witness{ManagedAppID: "local-peer-id", AppSlug: "local-peer", AppName: "Local peer", OIDCClientID: "local-peer", LaunchURL: "http://local-peer.localhost:5558/", ValidationURL: "http://local-peer.localhost:5558/me", SignedOutURL: "http://local-peer.localhost:5558/auth/signed-out", LogoutBridgeURL: "http://local-peer.localhost:5558/auth/shauth/logout/complete", ReleaseRevision: "abcdef012345"},
 	}
 	if err := validateJob("http://localhost:8080", value); err != nil {
@@ -79,13 +83,13 @@ func TestValidateJobAllowsLoopbackHTTP(t *testing.T) {
 }
 
 func TestSanitizeFailureRemovesSecretsAndOAuthArtifacts(t *testing.T) {
-	t.Setenv("SHAUTH_VALIDATION_USERNAME", "shauth-validator")
 	t.Setenv("SHAUTH_VALIDATOR_TOKEN", "validator-token-value")
 	bootstrapToken := strings.Repeat("b", 64)
 	encodedBootstrap := base64.RawURLEncoding.EncodeToString([]byte(url.QueryEscape(base64.StdEncoding.EncodeToString([]byte(bootstrapToken)))))
 	encodedToken := url.QueryEscape(url.QueryEscape("validator-token-value"))
 	failure := sanitizeJobFailure("shauth-validator validator-token-value "+bootstrapToken+" "+encodedBootstrap+" "+encodedToken+" https://auth.example.test/callback?code=oauth-code&state=oauth-state&id_token_hint=id-token&refresh_token=refresh-token&logout_verifier=logout-verifier", job{
-		BootstrapURLs: []string{"https://auth.example.test/validator/bootstrap#" + bootstrapToken},
+		ValidationUsername: "shauth-validator",
+		BootstrapURLs:      []string{"https://auth.example.test/validator/bootstrap#" + bootstrapToken},
 	})
 	for _, forbidden := range []string{"shauth-validator", "validator-token-value", bootstrapToken, encodedBootstrap, encodedToken, "oauth-code", "oauth-state", "id-token", "refresh-token", "logout-verifier"} {
 		if strings.Contains(failure, forbidden) {

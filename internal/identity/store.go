@@ -164,6 +164,8 @@ type AppValidationRun struct {
 	CompletedAt            *time.Time
 	DurationMilliseconds   *int64
 	Failure                string
+	ValidationUsername     string
+	ValidationEmail        string
 	Witness                *AppValidationWitness
 }
 
@@ -945,8 +947,32 @@ func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppVali
 		return nil, fmt.Errorf("lock application validation queue: %w", err)
 	}
 	nowUTC := now.UTC()
-	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$1,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($1-started_at))*1000)::bigint,failure='validator lease expired' WHERE status='running' AND lease_expires_at<$1`, nowUTC); err != nil {
+	expiredRows, err := tx.Query(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$1,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($1-started_at))*1000)::bigint,failure='validator lease expired' WHERE status='running' AND lease_expires_at<$1 RETURNING id::text`, nowUTC)
+	if err != nil {
 		return nil, fmt.Errorf("expire abandoned application validations: %w", err)
+	}
+	var expiredIDs []string
+	for expiredRows.Next() {
+		var expiredID string
+		if err := expiredRows.Scan(&expiredID); err != nil {
+			expiredRows.Close()
+			return nil, fmt.Errorf("scan expired application validation: %w", err)
+		}
+		expiredIDs = append(expiredIDs, expiredID)
+	}
+	expiredRows.Close()
+	if err := expiredRows.Err(); err != nil {
+		return nil, fmt.Errorf("expire abandoned application validations: %w", err)
+	}
+	if len(expiredIDs) > 0 {
+		// A run that never completed never released the validation identity it
+		// checked out in ClaimAppValidation below; an abandoned lease must free
+		// it back to the pool the same way a normal completion does, or that
+		// identity stays checked out forever and the pool shrinks by one every
+		// time a worker crashes mid-check.
+		if _, err := tx.Exec(ctx, `UPDATE users SET validation_run_id=NULL WHERE validation_run_id=ANY($1::uuid[])`, expiredIDs); err != nil {
+			return nil, fmt.Errorf("release validation identities for expired application validations: %w", err)
+		}
 	}
 	var runningCount int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM app_validation_runs WHERE status='running'`).Scan(&runningCount); err != nil {
@@ -991,6 +1017,23 @@ func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppVali
 	if witnessID != nil {
 		run.Witness = &AppValidationWitness{ManagedAppID: *witnessID, AppSlug: *witnessSlug, AppName: *witnessName, OIDCClientID: *witnessClientID, LaunchURL: *witnessLaunchURL, ValidationURL: *witnessValidationURL, SignedOutURL: *witnessSignedOutURL, ReleaseRevision: *witnessRevision}
 	}
+	// Every concurrently running check needs its own validation identity: Ory
+	// Hydra's back-channel logout token carries both sid and sub, and a
+	// relying party that correlates by sub as well as sid would otherwise
+	// treat one run's routine sign-out check as revoking every other running
+	// run's session for the same subject. The pool is sized to
+	// appValidationConcurrencyLimit, so a free identity is always available
+	// here precisely because runningCount was just proven under that limit.
+	var validationUserID string
+	if err := tx.QueryRow(ctx, `SELECT id::text,username,email FROM users WHERE is_validation=TRUE AND validation_run_id IS NULL FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&validationUserID, &run.ValidationUsername, &run.ValidationEmail); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("no validation identity available despite capacity for a new run")
+		}
+		return nil, fmt.Errorf("claim validation identity: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET validation_run_id=$2::uuid WHERE id=$1::uuid`, validationUserID, run.ID); err != nil {
+		return nil, fmt.Errorf("check out validation identity: %w", err)
+	}
 	started := nowUTC
 	lease := started.Add(appValidationLeaseDuration)
 	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='running',started_at=$2,lease_expires_at=$3 WHERE id=$1::uuid`, run.ID, started, lease); err != nil {
@@ -1022,6 +1065,9 @@ func (s *Store) CompleteAppValidation(ctx context.Context, runID, status, failur
 	if command.RowsAffected() != 1 {
 		return fmt.Errorf("active application validation not found")
 	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET validation_run_id=NULL WHERE validation_run_id=$1::uuid`, runID); err != nil {
+		return fmt.Errorf("release validation identity: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit application validation result: %w", err)
 	}
@@ -1036,8 +1082,27 @@ func (s *Store) ExpireAbandonedAppValidation(ctx context.Context, now time.Time)
 		return fmt.Errorf("begin expire application validation: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$1,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($1-started_at))*1000)::bigint,failure='validator lease expired' WHERE status='running' AND lease_expires_at<$1`, now.UTC()); err != nil {
+	expiredRows, err := tx.Query(ctx, `UPDATE app_validation_runs SET status='failed',completed_at=$1,lease_expires_at=NULL,duration_milliseconds=GREATEST(0,EXTRACT(EPOCH FROM ($1-started_at))*1000)::bigint,failure='validator lease expired' WHERE status='running' AND lease_expires_at<$1 RETURNING id::text`, now.UTC())
+	if err != nil {
 		return fmt.Errorf("expire abandoned application validations: %w", err)
+	}
+	var expiredIDs []string
+	for expiredRows.Next() {
+		var expiredID string
+		if err := expiredRows.Scan(&expiredID); err != nil {
+			expiredRows.Close()
+			return fmt.Errorf("scan expired application validation: %w", err)
+		}
+		expiredIDs = append(expiredIDs, expiredID)
+	}
+	expiredRows.Close()
+	if err := expiredRows.Err(); err != nil {
+		return fmt.Errorf("expire abandoned application validations: %w", err)
+	}
+	if len(expiredIDs) > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE users SET validation_run_id=NULL WHERE validation_run_id=ANY($1::uuid[])`, expiredIDs); err != nil {
+			return fmt.Errorf("release validation identities for expired application validations: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit expired application validation: %w", err)
@@ -1192,56 +1257,70 @@ func (s *Store) EnsureBootstrapAdmin(ctx context.Context, email, password string
 	return user, nil
 }
 
-// EnsureValidationUser provisions the dedicated real browser-validation
-// account. It has the developer role and no administrative privileges.
-func (s *Store) EnsureValidationUser(ctx context.Context, username, email string) (User, error) {
+// EnsureValidationUsers provisions the dedicated real browser-validation
+// identity pool: appValidationConcurrencyLimit accounts (username-1/email+1,
+// username-2/email+2, ...), each developer-role with no administrative
+// privileges. ClaimAppValidation checks one out per running validation, so
+// every concurrently running check authenticates as its own subject --
+// see the pool's schema comment (migration 000014) for why that matters.
+func (s *Store) EnsureValidationUsers(ctx context.Context, username, email string) ([]User, error) {
 	if username == "" && email == "" {
-		return User{}, nil
+		return nil, nil
 	}
 	username = strings.TrimSpace(username)
 	email = strings.ToLower(strings.TrimSpace(email))
 	if username == "" || email == "" {
-		return User{}, fmt.Errorf("validation username and email are required")
+		return nil, fmt.Errorf("validation username and email are required")
+	}
+	atSign := strings.LastIndex(email, "@")
+	if atSign < 1 {
+		return nil, fmt.Errorf("validation email is invalid")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return User{}, fmt.Errorf("begin validation user provisioning: %w", err)
+		return nil, fmt.Errorf("begin validation user provisioning: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('shauth-validation-identity'))`); err != nil {
-		return User{}, fmt.Errorf("lock validation user provisioning: %w", err)
+		return nil, fmt.Errorf("lock validation user provisioning: %w", err)
 	}
-	var existingID string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM users WHERE is_validation=TRUE FOR UPDATE`).Scan(&existingID)
-	var user User
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		err = tx.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,is_validation,created_at)
-			VALUES ($1::uuid,$2,$3,TRUE,NULL,'developer',TRUE,now())
-			RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, randomUUID(), username, email).
-			Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
-	case err == nil:
-		err = tx.QueryRow(ctx, `UPDATE users
-			SET username=$2,email=$3,password_hash=NULL,github_id=NULL,github_login=NULL,entra_tenant_id=NULL,entra_object_id=NULL,email_verified=TRUE,role='developer',disabled_at=NULL
-			WHERE id=$1::uuid AND is_validation=TRUE
-			RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, existingID, username, email).
-			Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
-	default:
-		return User{}, fmt.Errorf("find validation user: %w", err)
-	}
-	if err != nil {
-		return User{}, fmt.Errorf("ensure validation user: %w", err)
+	users := make([]User, 0, appValidationConcurrencyLimit)
+	for slot := 1; slot <= appValidationConcurrencyLimit; slot++ {
+		slotUsername := fmt.Sprintf("%s-%d", username, slot)
+		slotEmail := fmt.Sprintf("%s+%d%s", email[:atSign], slot, email[atSign:])
+		var existingID string
+		err = tx.QueryRow(ctx, `SELECT id::text FROM users WHERE username=$1 AND is_validation=TRUE FOR UPDATE`, slotUsername).Scan(&existingID)
+		var user User
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			err = tx.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,is_validation,created_at)
+				VALUES ($1::uuid,$2,$3,TRUE,NULL,'developer',TRUE,now())
+				RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, randomUUID(), slotUsername, slotEmail).
+				Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+		case err == nil:
+			err = tx.QueryRow(ctx, `UPDATE users
+				SET email=$2,password_hash=NULL,github_id=NULL,github_login=NULL,entra_tenant_id=NULL,entra_object_id=NULL,email_verified=TRUE,role='developer',disabled_at=NULL
+				WHERE id=$1::uuid AND is_validation=TRUE
+				RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, existingID, slotEmail).
+				Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+		default:
+			return nil, fmt.Errorf("find validation identity %q: %w", slotUsername, err)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ensure validation identity %q: %w", slotUsername, err)
+		}
+		users = append(users, user)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return User{}, fmt.Errorf("commit validation user provisioning: %w", err)
+		return nil, fmt.Errorf("commit validation user provisioning: %w", err)
 	}
-	return user, nil
+	return users, nil
 }
 
 // CreateValidationBrowserBootstraps creates short-lived, single-use browser
 // session grants for the dedicated validation identity. Only SHA-256 hashes are
 // persisted; the raw tokens are returned once to the authenticated worker.
-func (s *Store) CreateValidationBrowserBootstraps(ctx context.Context, nextPaths []string, now time.Time) ([]string, error) {
+func (s *Store) CreateValidationBrowserBootstraps(ctx context.Context, runID string, nextPaths []string, now time.Time) ([]string, error) {
 	if len(nextPaths) == 0 || len(nextPaths) > 3 {
 		return nil, fmt.Errorf("one to three validation browser bootstraps are required")
 	}
@@ -1250,9 +1329,13 @@ func (s *Store) CreateValidationBrowserBootstraps(ctx context.Context, nextPaths
 		return nil, fmt.Errorf("begin validation browser bootstrap creation: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// The identity checked out for this run in ClaimAppValidation, not any
+	// identity in the pool: every bootstrap this call mints must authenticate
+	// as the one subject this run -- and only this run -- currently holds, so
+	// concurrently running checks never share a subject.
 	var userID string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE is_validation=TRUE AND disabled_at IS NULL AND role='developer'`).Scan(&userID); err != nil {
-		return nil, fmt.Errorf("find validation identity: %w", err)
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE is_validation=TRUE AND disabled_at IS NULL AND role='developer' AND validation_run_id=$1::uuid`, runID).Scan(&userID); err != nil {
+		return nil, fmt.Errorf("find validation identity for run: %w", err)
 	}
 	created := now.UTC()
 	if _, err := tx.Exec(ctx, `DELETE FROM validation_browser_bootstraps WHERE expires_at<$1 OR consumed_at<$2`, created, created.Add(-24*time.Hour)); err != nil {

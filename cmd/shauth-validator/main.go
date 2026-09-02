@@ -29,20 +29,22 @@ var immutableReleaseRevision = regexp.MustCompile(`^([0-9a-f]{12,64}|sha256:[0-9
 var browserBootstrapTokenPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type job struct {
-	ID              string   `json:"id"`
-	ManagedAppID    string   `json:"managed_app_id"`
-	AppSlug         string   `json:"app_slug"`
-	AppName         string   `json:"app_name"`
-	OIDCClientID    string   `json:"oidc_client_id"`
-	LaunchURL       string   `json:"launch_url"`
-	ValidationURL   string   `json:"validation_url"`
-	SignedOutURL    string   `json:"signed_out_url"`
-	LogoutBridgeURL string   `json:"logout_bridge_url"`
-	Direction       string   `json:"direction"`
-	ReleaseRevision string   `json:"release_revision"`
-	ShauthURL       string   `json:"shauth_url"`
-	BootstrapURLs   []string `json:"bootstrap_urls"`
-	Witness         *witness `json:"witness"`
+	ID                 string   `json:"id"`
+	ManagedAppID       string   `json:"managed_app_id"`
+	AppSlug            string   `json:"app_slug"`
+	AppName            string   `json:"app_name"`
+	OIDCClientID       string   `json:"oidc_client_id"`
+	LaunchURL          string   `json:"launch_url"`
+	ValidationURL      string   `json:"validation_url"`
+	SignedOutURL       string   `json:"signed_out_url"`
+	LogoutBridgeURL    string   `json:"logout_bridge_url"`
+	Direction          string   `json:"direction"`
+	ReleaseRevision    string   `json:"release_revision"`
+	ShauthURL          string   `json:"shauth_url"`
+	BootstrapURLs      []string `json:"bootstrap_urls"`
+	Witness            *witness `json:"witness"`
+	ValidationUsername string   `json:"validation_username"`
+	ValidationEmail    string   `json:"validation_email"`
 }
 
 type witness struct {
@@ -69,8 +71,6 @@ type bootstrapResponse struct {
 func main() {
 	baseURL := required("SHAUTH_URL")
 	token := required("SHAUTH_VALIDATOR_TOKEN")
-	_ = required("SHAUTH_VALIDATION_USERNAME")
-	_ = required("SHAUTH_VALIDATION_EMAIL")
 	script := required("SHAUTH_VALIDATOR_SCRIPT")
 	client := &http.Client{Timeout: 30 * time.Second}
 	consecutiveClaimFailures := 0
@@ -100,9 +100,9 @@ func main() {
 		if claimed.Direction == "from_shauth" {
 			nextPaths[0] = "/apps"
 		}
-		bootstrapURLs, err := createBrowserBootstraps(context.Background(), client, baseURL, token, nextPaths)
+		bootstrapURLs, err := createBrowserBootstraps(context.Background(), client, baseURL, token, claimed.ID, nextPaths)
 		if err != nil {
-			outcome := result{Status: "failed", Failure: sanitizeFailure("create validation browser sessions: " + err.Error())}
+			outcome := result{Status: "failed", Failure: sanitizeFailure("create validation browser sessions: "+err.Error(), claimed.ValidationUsername)}
 			if completeErr := complete(context.Background(), client, baseURL, token, claimed.ID, outcome); completeErr != nil {
 				observe.Errorf("record browser bootstrap failure for validation %s: %v", claimed.ID, completeErr)
 			}
@@ -123,8 +123,8 @@ func main() {
 	}
 }
 
-func createBrowserBootstraps(ctx context.Context, client *http.Client, baseURL, token string, nextPaths []string) ([]string, error) {
-	payload, err := json.Marshal(map[string]any{"next": nextPaths})
+func createBrowserBootstraps(ctx context.Context, client *http.Client, baseURL, token, runID string, nextPaths []string) ([]string, error) {
+	payload, err := json.Marshal(map[string]any{"run_id": runID, "next": nextPaths})
 	if err != nil {
 		return nil, err
 	}
@@ -234,8 +234,7 @@ func run(ctx context.Context, script string, claimed job) result {
 	return outcome
 }
 
-func sanitizeFailure(value string) string {
-	username := os.Getenv("SHAUTH_VALIDATION_USERNAME")
+func sanitizeFailure(value, username string) string {
 	secrets := []string{
 		username,
 		os.Getenv("SHAUTH_VALIDATOR_TOKEN"),
@@ -258,7 +257,7 @@ func sanitizeJobFailure(value string, claimed job) string {
 		}
 	}
 	value = redactCredentialMaterial(value, secrets)
-	return sanitizeFailure(value)
+	return sanitizeFailure(value, claimed.ValidationUsername)
 }
 
 func redactCredentialMaterial(value string, secrets []string) string {
@@ -334,6 +333,9 @@ func validateJob(baseURL string, claimed job) error {
 	}
 	if strings.TrimSpace(claimed.ManagedAppID) == "" || strings.TrimSpace(claimed.OIDCClientID) == "" {
 		return fmt.Errorf("job application identity is invalid")
+	}
+	if strings.TrimSpace(claimed.ValidationUsername) == "" || strings.TrimSpace(claimed.ValidationEmail) == "" {
+		return fmt.Errorf("job validation identity is invalid")
 	}
 	if !immutableReleaseRevision.MatchString(claimed.ReleaseRevision) {
 		return fmt.Errorf("job application release revision is not immutable")
