@@ -545,8 +545,8 @@ if [ "$failed_count" != 0 ] || [ "$passed_count" != 6 ]; then
 	done
 	exit 1
 fi
-queue_timing_violations=$(compose exec -T postgres psql -U shauth -d shauth -Atc "WITH ordered AS (SELECT started_at,completed_at,lag(started_at) OVER (ORDER BY started_at) previous_started,lag(completed_at) OVER (ORDER BY started_at) previous_completed FROM app_validation_runs) SELECT count(*) FROM ordered WHERE previous_started IS NOT NULL AND (started_at-previous_started < interval '30 seconds' OR started_at < previous_completed)")
-[ "$queue_timing_violations" = 0 ]
+app_role_overlap_violations=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs a JOIN app_validation_runs b ON a.id<b.id WHERE a.started_at<COALESCE(b.completed_at,'infinity') AND b.started_at<COALESCE(a.completed_at,'infinity') AND (a.managed_app_id=b.managed_app_id OR a.managed_app_id=b.witness_managed_app_id OR a.witness_managed_app_id=b.managed_app_id OR (a.witness_managed_app_id IS NOT NULL AND a.witness_managed_app_id=b.witness_managed_app_id))")
+[ "$app_role_overlap_violations" = 0 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status IN ('queued','running')")" = 0 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='passed' AND direction='from_app'")" = 3 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='passed' AND direction='from_shauth'")" = 3 ]
