@@ -957,11 +957,29 @@ func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppVali
 	}
 	var run AppValidationRun
 	var witnessID, witnessSlug, witnessName, witnessClientID, witnessLaunchURL, witnessValidationURL, witnessSignedOutURL, witnessRevision *string
+	// A running validation's witness app must stay untouched by anything else
+	// for the run's duration: the witness step signs it in and depends on that
+	// session surviving until the target's own checks finish observing it. A
+	// second, concurrently running validation that targets that same app (its
+	// own direct sign-out check, say) or uses it as its own witness invalidates
+	// that assumption from underneath the first run. Excluding every app that
+	// is a target or a witness of a currently running row -- from being
+	// claimed as either a target or a witness -- keeps every app in exactly
+	// one active role at a time, the invariant true validation runs relied on
+	// before concurrency existed to break it.
 	err = tx.QueryRow(ctx, `
+		WITH busy_apps AS (
+			SELECT managed_app_id AS id FROM app_validation_runs WHERE status='running'
+			UNION
+			SELECT witness_managed_app_id FROM app_validation_runs WHERE status='running' AND witness_managed_app_id IS NOT NULL
+		)
 		SELECT r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.status,r.requested_at,
 			r.witness_managed_app_id::text,r.witness_app_slug,r.witness_app_name,r.witness_oidc_client_id,r.witness_launch_url,r.witness_validation_url,r.witness_signed_out_url,r.witness_release_revision
 		FROM app_validation_runs r
-		WHERE r.status='queued' ORDER BY r.requested_at,r.id LIMIT 1 FOR UPDATE OF r SKIP LOCKED`).
+		WHERE r.status='queued'
+		  AND r.managed_app_id NOT IN (SELECT id FROM busy_apps)
+		  AND (r.witness_managed_app_id IS NULL OR r.witness_managed_app_id NOT IN (SELECT id FROM busy_apps))
+		ORDER BY r.requested_at,r.id LIMIT 1 FOR UPDATE OF r SKIP LOCKED`).
 		Scan(&run.ID, &run.ManagedAppID, &run.AppSlug, &run.AppName, &run.OIDCClientID, &run.LaunchURL, &run.ValidationURL, &run.SignedOutURL, &run.Direction, &run.ReleaseRevision, &run.Status, &run.RequestedAt,
 			&witnessID, &witnessSlug, &witnessName, &witnessClientID, &witnessLaunchURL, &witnessValidationURL, &witnessSignedOutURL, &witnessRevision)
 	if errors.Is(err, pgx.ErrNoRows) {

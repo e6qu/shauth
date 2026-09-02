@@ -472,7 +472,6 @@ curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='integration-app'")" = 0 ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
 DELETE FROM app_validation_runs;
-UPDATE app_validation_control SET active_run_id=NULL,next_start_at='1970-01-01 00:00:00+00' WHERE singleton=TRUE;
 SQL
 for validator_app_slug in gateway-integration gateway-secondary gateway-tertiary; do
 	validator_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='${validator_app_slug}'")
@@ -546,8 +545,8 @@ if [ "$failed_count" != 0 ] || [ "$passed_count" != 6 ]; then
 	done
 	exit 1
 fi
-queue_timing_violations=$(compose exec -T postgres psql -U shauth -d shauth -Atc "WITH ordered AS (SELECT started_at,completed_at,lag(started_at) OVER (ORDER BY started_at) previous_started,lag(completed_at) OVER (ORDER BY started_at) previous_completed FROM app_validation_runs) SELECT count(*) FROM ordered WHERE previous_started IS NOT NULL AND (started_at-previous_started < interval '30 seconds' OR started_at < previous_completed)")
-[ "$queue_timing_violations" = 0 ]
+app_role_overlap_violations=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs a JOIN app_validation_runs b ON a.id<b.id WHERE a.started_at<COALESCE(b.completed_at,'infinity') AND b.started_at<COALESCE(a.completed_at,'infinity') AND (a.managed_app_id=b.managed_app_id OR a.managed_app_id=b.witness_managed_app_id OR a.witness_managed_app_id=b.managed_app_id OR (a.witness_managed_app_id IS NOT NULL AND a.witness_managed_app_id=b.witness_managed_app_id))")
+[ "$app_role_overlap_violations" = 0 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status IN ('queued','running')")" = 0 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='passed' AND direction='from_app'")" = 3 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM app_validation_runs WHERE status='passed' AND direction='from_shauth'")" = 3 ]
@@ -796,16 +795,16 @@ validator_secondary_pid=
 abandoned_validation_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM app_validation_runs WHERE status='passed' ORDER BY requested_at,id LIMIT 1")
 [ -n "$abandoned_validation_id" ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 \
-	-c "UPDATE app_validation_runs SET status='running',started_at=now()-interval '2 minutes',completed_at=NULL,lease_expires_at=now()-interval '1 second',duration_milliseconds=NULL,failure='' WHERE id='${abandoned_validation_id}'::uuid; UPDATE app_validation_control SET active_run_id='${abandoned_validation_id}'::uuid WHERE singleton=TRUE" >/dev/null
+	-c "UPDATE app_validation_runs SET status='running',started_at=now()-interval '2 minutes',completed_at=NULL,lease_expires_at=now()-interval '1 second',duration_milliseconds=NULL,failure='' WHERE id='${abandoned_validation_id}'::uuid" >/dev/null
 attempt=0
 lease_recovery=
 while [ "$attempt" -lt 20 ]; do
-	lease_recovery=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',run.status,run.failure,COALESCE(control.active_run_id::text,'')) FROM app_validation_runs run CROSS JOIN app_validation_control control WHERE run.id='${abandoned_validation_id}'::uuid AND control.singleton=TRUE")
-	[ "$lease_recovery" = 'failed|validator lease expired|' ] && break
+	lease_recovery=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',status,failure) FROM app_validation_runs WHERE id='${abandoned_validation_id}'::uuid")
+	[ "$lease_recovery" = 'failed|validator lease expired' ] && break
 	attempt=$((attempt + 1))
 	sleep 1
 done
-[ "$lease_recovery" = 'failed|validator lease expired|' ]
+[ "$lease_recovery" = 'failed|validator lease expired' ]
 
 # Production application validation requires both logout channels so Shauth
 # can revoke sessions in another browser or device. The focused gateway matrix
