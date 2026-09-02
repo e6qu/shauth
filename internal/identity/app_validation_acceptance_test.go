@@ -29,7 +29,8 @@ func TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized(t *testing.T
 	schema := "validation_" + strings.ReplaceAll(randomUUID(), "-", "")
 	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
 		CREATE SCHEMA %s;
-		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL)`, schema, schema)); err != nil {
+		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
+		CREATE TABLE %s.users (LIKE public.users INCLUDING ALL)`, schema, schema, schema)); err != nil {
 		t.Fatalf("create isolated validation schema: %v", err)
 	}
 	defer func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
@@ -47,6 +48,9 @@ func TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized(t *testing.T
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := store.EnsureValidationUsers(ctx, "validation-acceptance", "validation-acceptance@example.test"); err != nil {
+		t.Fatalf("provision validation identity pool: %v", err)
 	}
 
 	now := time.Now().UTC()
@@ -113,7 +117,8 @@ func TestAppValidationClaimIsBoundedByRunningConcurrencyLimit(t *testing.T) {
 	schema := "validation_limit_" + strings.ReplaceAll(randomUUID(), "-", "")
 	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
 		CREATE SCHEMA %s;
-		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL)`, schema, schema)); err != nil {
+		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
+		CREATE TABLE %s.users (LIKE public.users INCLUDING ALL)`, schema, schema, schema)); err != nil {
 		t.Fatalf("create isolated validation schema: %v", err)
 	}
 	defer func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
@@ -131,6 +136,9 @@ func TestAppValidationClaimIsBoundedByRunningConcurrencyLimit(t *testing.T) {
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := store.EnsureValidationUsers(ctx, "validation-limit", "validation-limit@example.test"); err != nil {
+		t.Fatalf("provision validation identity pool: %v", err)
 	}
 
 	now := time.Now().UTC()
@@ -161,6 +169,129 @@ func TestAppValidationClaimIsBoundedByRunningConcurrencyLimit(t *testing.T) {
 	}
 }
 
+// TestAppValidationClaimGivesEveryConcurrentRunItsOwnValidationIdentity
+// exercises the collision fixed by the validation identity pool: every
+// concurrently running check used to authenticate as the same single
+// account, so Ory Hydra's back-channel logout token -- which carries both
+// sid and sub -- let one run's routine sign-out check revoke every other
+// concurrently running run's session for that shared subject. Claiming up
+// to appValidationConcurrencyLimit runs at once must now check out
+// appValidationConcurrencyLimit distinct identities, and completing a run
+// must return its identity to the pool for reuse.
+func TestAppValidationClaimGivesEveryConcurrentRunItsOwnValidationIdentity(t *testing.T) {
+	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("SHAUTH_ACCEPTANCE_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	adminPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	defer adminPool.Close()
+	schema := "validation_identity_" + strings.ReplaceAll(randomUUID(), "-", "")
+	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
+		CREATE SCHEMA %s;
+		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
+		CREATE TABLE %s.users (LIKE public.users INCLUDING ALL)`, schema, schema, schema)); err != nil {
+		t.Fatalf("create isolated validation schema: %v", err)
+	}
+	defer func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect isolated validation schema: %v", err)
+	}
+	defer pool.Close()
+	store, err := NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureValidationUsers(ctx, "validation-identity", "validation-identity@example.test"); err != nil {
+		t.Fatalf("provision validation identity pool: %v", err)
+	}
+
+	now := time.Now().UTC()
+	queued := make([]string, appValidationConcurrencyLimit+1)
+	for i := range queued {
+		queued[i] = insertAcceptanceValidationRun(t, pool, ValidationQueued, now)
+	}
+
+	claimedRunIdentities := map[string]string{}
+	checkedOut := map[string]bool{}
+	for i := 0; i < appValidationConcurrencyLimit; i++ {
+		claimed, err := store.ClaimAppValidation(ctx, now.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatalf("claim %d: %v", i, err)
+		}
+		if claimed == nil {
+			t.Fatalf("claim %d = nil, want a queued run", i)
+		}
+		identity := acceptanceValidationIdentityForRun(t, pool, claimed.ID)
+		if checkedOut[identity] {
+			t.Fatalf("claim %d checked out validation identity %q, already held by another concurrently running run", i, identity)
+		}
+		checkedOut[identity] = true
+		claimedRunIdentities[claimed.ID] = identity
+	}
+	if len(checkedOut) != appValidationConcurrencyLimit {
+		t.Fatalf("distinct validation identities checked out = %d, want %d", len(checkedOut), appValidationConcurrencyLimit)
+	}
+
+	// The pool is sized exactly to appValidationConcurrencyLimit, so with
+	// every identity checked out the queue's own concurrency gate and the
+	// identity pool exhaust at the same run -- no free identity remains.
+	blocked, err := store.ClaimAppValidation(ctx, now.Add(10*time.Second))
+	if err != nil {
+		t.Fatalf("claim at running concurrency limit: %v", err)
+	}
+	if blocked != nil {
+		t.Fatalf("claim at running concurrency limit = %#v, want nil", blocked)
+	}
+
+	var completedRunID, releasedIdentity string
+	for runID, identity := range claimedRunIdentities {
+		completedRunID, releasedIdentity = runID, identity
+		break
+	}
+	if err := store.CompleteAppValidation(ctx, completedRunID, ValidationPassed, "", now.Add(20*time.Second)); err != nil {
+		t.Fatalf("complete a running validation: %v", err)
+	}
+	var stillCheckedOut *string
+	if err := pool.QueryRow(ctx, `SELECT validation_run_id::text FROM users WHERE id=$1::uuid`, releasedIdentity).Scan(&stillCheckedOut); err != nil {
+		t.Fatalf("read validation identity after completion: %v", err)
+	}
+	if stillCheckedOut != nil {
+		t.Fatalf("completing the run did not release its validation identity: still checked out as %q", *stillCheckedOut)
+	}
+
+	reclaimed, err := store.ClaimAppValidation(ctx, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("claim after freeing a slot: %v", err)
+	}
+	if reclaimed == nil {
+		t.Fatal("claim after freeing a slot = nil, want the last queued run")
+	}
+	if identity := acceptanceValidationIdentityForRun(t, pool, reclaimed.ID); identity != releasedIdentity {
+		t.Fatalf("claim after freeing a slot checked out identity %q, want the just-released identity %q", identity, releasedIdentity)
+	}
+}
+
+func acceptanceValidationIdentityForRun(t *testing.T, pool *pgxpool.Pool, runID string) string {
+	t.Helper()
+	var identity string
+	if err := pool.QueryRow(context.Background(), `SELECT id::text FROM users WHERE is_validation=TRUE AND validation_run_id=$1::uuid`, runID).Scan(&identity); err != nil {
+		t.Fatalf("find validation identity checked out for run %q: %v", runID, err)
+	}
+	return identity
+}
+
 // TestAppValidationClaimNeverRunsAnAppAsTargetAndWitnessConcurrently exercises
 // the collision a fixed cyclic witness assignment and bounded concurrency
 // created together: with only two apps registered, each is the other's
@@ -185,7 +316,8 @@ func TestAppValidationClaimNeverRunsAnAppAsTargetAndWitnessConcurrently(t *testi
 	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
 		CREATE SCHEMA %s;
 		CREATE TABLE %s.managed_apps (LIKE public.managed_apps INCLUDING ALL);
-		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL)`, schema, schema, schema)); err != nil {
+		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL);
+		CREATE TABLE %s.users (LIKE public.users INCLUDING ALL)`, schema, schema, schema, schema)); err != nil {
 		t.Fatalf("create isolated witness-conflict schema: %v", err)
 	}
 	defer func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
@@ -203,6 +335,9 @@ func TestAppValidationClaimNeverRunsAnAppAsTargetAndWitnessConcurrently(t *testi
 	store, err := NewStore(pool)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := store.EnsureValidationUsers(ctx, "witness-conflict", "witness-conflict@example.test"); err != nil {
+		t.Fatalf("provision validation identity pool: %v", err)
 	}
 
 	appAID, appBID := randomUUID(), randomUUID()

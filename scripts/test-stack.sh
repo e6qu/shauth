@@ -196,9 +196,12 @@ if curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'unp
 fi
 curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/initial'
 curl --fail --silent --show-error http://localhost:4445/admin/clients/bootstrap-app | grep -q 'https://bootstrap.dev.e6qu.dev/oidc/frontchannel-logout'
-validation_identity=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',CASE WHEN is_validation THEN 'validation' ELSE 'regular' END,role,COALESCE(github_id::text,''),COALESCE(entra_object_id::text,''),CASE WHEN password_hash IS NULL THEN 'passwordless' ELSE 'password' END) FROM users WHERE username='shauth-validator'")
-[ "$validation_identity" = 'validation|developer|||passwordless' ]
-[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc 'SELECT count(*) FROM users WHERE is_validation=TRUE')" = 1 ]
+# Every concurrently running validation check gets its own pool identity
+# (migration 000014): three accounts, shauth-validator-1..3, each shaped the
+# same way the old singleton account was.
+validation_identities=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT concat_ws('|',username,CASE WHEN is_validation THEN 'validation' ELSE 'regular' END,role,COALESCE(github_id::text,''),COALESCE(entra_object_id::text,''),CASE WHEN password_hash IS NULL THEN 'passwordless' ELSE 'password' END) FROM users WHERE is_validation=TRUE ORDER BY username")
+[ "$validation_identities" = "$(printf 'shauth-validator-1|validation|developer|||passwordless\nshauth-validator-2|validation|developer|||passwordless\nshauth-validator-3|validation|developer|||passwordless')" ]
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc 'SELECT count(*) FROM users WHERE is_validation=TRUE')" = 3 ]
 
 # The validation identity has no reusable login credential. Only the
 # validator-token-authenticated Shauth endpoint can mint short-lived browser
@@ -208,25 +211,37 @@ validation_csrf=$(awk '$6 == "shauth_csrf" { print $7 }' "$validation_cookie_jar
 [ -n "$validation_csrf" ]
 curl --fail --silent --show-error --cookie "$validation_cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${validation_csrf}" \
-  --data-urlencode 'username=shauth-validator' \
+  --data-urlencode 'username=shauth-validator-1' \
   --data-urlencode 'password=not-a-validation-credential' \
   --data-urlencode 'next=/apps' \
   "${SHAUTH_PUBLIC_URL}"/login | grep -q 'Invalid username or password.'
-[ "$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["https://attacker.example.test/"]}' "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)" = 400 ]
-bootstrap_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["/apps"]}' "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)
+# A bootstrap now mints for the validation identity checked out to a
+# specific claimed run (migration 000014), not a global one -- claim a real
+# run to exercise the mechanism against. It is completed below and the whole
+# queue is reset before the concurrency test claims for real, so this leaves
+# no trace on the counts that test asserts.
+early_claim=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --request POST "${SHAUTH_PUBLIC_URL}"/internal/validator/jobs/claim)
+early_run_id=$(printf '%s' "$early_claim" | sed -n 's|.*"id":"\([^"]*\)".*|\1|p')
+[ -n "$early_run_id" ]
+
+early_reject_code=$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data "{\"run_id\":\"${early_run_id}\",\"next\":[\"https://attacker.example.test/\"]}" "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)
+[ "$early_reject_code" = 400 ]
+bootstrap_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data "{\"run_id\":\"${early_run_id}\",\"next\":[\"/apps\"]}" "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)
 bootstrap_token=$(printf '%s' "$bootstrap_response" | sed -n 's|.*validator/bootstrap#\([0-9a-f][0-9a-f]*\)".*|\1|p')
 [ "${#bootstrap_token}" -eq 64 ]
 bootstrap_headers=$(printf '_csrf=%s&token=%s' "$validation_csrf" "$bootstrap_token" | curl --silent --show-error --dump-header - --output /dev/null --cookie-jar "$validation_cookie_jar" --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- "${SHAUTH_PUBLIC_URL}"/validator/bootstrap)
 printf '%s' "$bootstrap_headers" | grep -Eq '^HTTP/[0-9.]+ 303'
 printf '%s' "$bootstrap_headers" | grep -Eqi '^location: /apps'
 [ "$(printf '_csrf=%s&token=%s' "$validation_csrf" "$bootstrap_token" | curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- "${SHAUTH_PUBLIC_URL}"/validator/bootstrap)" = 410 ]
-expired_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"next":["/"]}' "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)
+expired_response=$(curl --fail --silent --show-error --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data "{\"run_id\":\"${early_run_id}\",\"next\":[\"/\"]}" "${SHAUTH_PUBLIC_URL}"/internal/validator/browser-bootstraps)
 expired_token=$(printf '%s' "$expired_response" | sed -n 's|.*validator/bootstrap#\([0-9a-f][0-9a-f]*\)".*|\1|p')
 [ "${#expired_token}" -eq 64 ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 -c "UPDATE validation_browser_bootstraps SET created_at=now()-interval '11 minutes',expires_at=now()-interval '1 minute' WHERE consumed_at IS NULL" >/dev/null
 [ "$(printf '_csrf=%s&token=%s' "$validation_csrf" "$expired_token" | curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$validation_cookie_jar" --header 'Origin: null' --data-binary @- "${SHAUTH_PUBLIC_URL}"/validator/bootstrap)" = 410 ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc 'SELECT count(*) FROM validation_browser_bootstraps WHERE octet_length(token_hash)<>32')" = 0 ]
-compose exec -T postgres psql -U shauth -d shauth -c "UPDATE sessions SET revoked_at=now() WHERE user_id=(SELECT id FROM users WHERE is_validation=TRUE) AND revoked_at IS NULL" >/dev/null
+curl --fail --silent --show-error --output /dev/null --header "Authorization: Bearer ${SHAUTH_VALIDATOR_TOKEN}" --header 'Content-Type: application/json' --data '{"status":"passed","failure":""}' "${SHAUTH_PUBLIC_URL}/internal/validator/jobs/${early_run_id}/complete"
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM users WHERE validation_run_id='${early_run_id}'::uuid")" = 0 ]
+compose exec -T postgres psql -U shauth -d shauth -c "UPDATE sessions SET revoked_at=now() WHERE user_id IN (SELECT id FROM users WHERE is_validation=TRUE) AND revoked_at IS NULL" >/dev/null
 
 curl --fail --silent --show-error --cookie-jar "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/login >/dev/null
 csrf_token=$(awk '$6 == "shauth_csrf" { print $7 }' "$cookie_jar")
@@ -516,15 +531,11 @@ fi
 
 SHAUTH_URL=${SHAUTH_PUBLIC_URL} \
 SHAUTH_VALIDATOR_TOKEN=$SHAUTH_VALIDATOR_TOKEN \
-SHAUTH_VALIDATION_USERNAME=shauth-validator \
-SHAUTH_VALIDATION_EMAIL=shauth-validator@localhost.test \
 SHAUTH_VALIDATOR_SCRIPT=$root/validator/validate.mjs \
 	"$validator_binary" &
 validator_pid=$!
 SHAUTH_URL=${SHAUTH_PUBLIC_URL} \
 SHAUTH_VALIDATOR_TOKEN=$SHAUTH_VALIDATOR_TOKEN \
-SHAUTH_VALIDATION_USERNAME=shauth-validator \
-SHAUTH_VALIDATION_EMAIL=shauth-validator@localhost.test \
 SHAUTH_VALIDATOR_SCRIPT=$root/validator/validate.mjs \
 	"$validator_binary" &
 validator_secondary_pid=$!
@@ -785,7 +796,7 @@ rm -f "$containment_jar"
 for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECONDARY_DATABASE" "$SHAUTH_GATEWAY_TERTIARY_DATABASE"; do
 	[ "$(compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc "SELECT count(*) FROM oidc_gateway_sessions WHERE revoked_at IS NULL")" = 0 ]
 done
-[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM sessions JOIN users ON users.id=sessions.user_id WHERE users.username='shauth-validator' AND sessions.revoked_at IS NULL")" = 0 ]
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM sessions JOIN users ON users.id=sessions.user_id WHERE users.is_validation=TRUE AND sessions.revoked_at IS NULL")" = 0 ]
 compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 \
 	-c "UPDATE managed_apps SET validation_url='http://gateway-integration.localhost:5556/auth/validation' WHERE slug='gateway-integration'" >/dev/null
 stop_process "$validator_pid" 'primary application validator'

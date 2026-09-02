@@ -13,8 +13,12 @@ const input = await new Promise((resolve, reject) => {
 });
 
 const job = JSON.parse(input);
-const username = process.env.SHAUTH_VALIDATION_USERNAME;
-const email = process.env.SHAUTH_VALIDATION_EMAIL;
+// Every concurrently running check authenticates as its own pool identity
+// (Shauth checks it out for the run's lifetime), not a fixed configured
+// account, so the identity to assert against travels with the claimed job
+// rather than a static environment variable.
+const username = job.validation_username;
+const email = job.validation_email;
 if (!username || !email) throw new Error("validation account identity is unavailable");
 if (!Array.isArray(job.bootstrap_urls) || job.bootstrap_urls.length !== 3) throw new Error("validation browser bootstraps are unavailable");
 const expectedLogoutBridgeURL = new URL("/auth/shauth/logout/complete", job.launch_url).toString();

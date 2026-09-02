@@ -38,7 +38,7 @@ func main() {
 	if _, err := store.EnsureBootstrapAdmin(context.Background(), cfg.BootstrapAdminEmail, cfg.BootstrapAdminPassword); err != nil {
 		log.Fatalf("bootstrap administrator: %v", err)
 	}
-	if _, err := store.EnsureValidationUser(context.Background(), cfg.ValidationUsername, cfg.ValidationEmail); err != nil {
+	if _, err := store.EnsureValidationUsers(context.Background(), cfg.ValidationUsername, cfg.ValidationEmail); err != nil {
 		log.Fatalf("bootstrap validation account: %v", err)
 	}
 	if err := store.EnsureInitialGitHubRoleMappings(context.Background(), cfg.GitHubDeveloperTeam, cfg.GitHubAdminTeam); err != nil {
