@@ -161,6 +161,130 @@ func TestAppValidationClaimIsBoundedByRunningConcurrencyLimit(t *testing.T) {
 	}
 }
 
+// TestAppValidationClaimNeverRunsAnAppAsTargetAndWitnessConcurrently exercises
+// the collision a fixed cyclic witness assignment and bounded concurrency
+// created together: with only two apps registered, each is the other's
+// witness in both directions, so a full re-validation sweep queues app A
+// (witness B) and app B (witness A) at the same time. A's witness step signs
+// B in and depends on that session surviving until A's own checks finish
+// observing it; claiming B's own validation concurrently -- which exercises
+// B's sign-out -- would end that session out from under A's witness step.
+func TestAppValidationClaimNeverRunsAnAppAsTargetAndWitnessConcurrently(t *testing.T) {
+	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("SHAUTH_ACCEPTANCE_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	adminPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	defer adminPool.Close()
+	schema := "witness_conflict_" + strings.ReplaceAll(randomUUID(), "-", "")
+	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
+		CREATE SCHEMA %s;
+		CREATE TABLE %s.managed_apps (LIKE public.managed_apps INCLUDING ALL);
+		CREATE TABLE %s.app_validation_runs (LIKE public.app_validation_runs INCLUDING ALL)`, schema, schema, schema)); err != nil {
+		t.Fatalf("create isolated witness-conflict schema: %v", err)
+	}
+	defer func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") }()
+
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect isolated witness-conflict schema: %v", err)
+	}
+	defer pool.Close()
+	store, err := NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appAID, appBID := randomUUID(), randomUUID()
+	for _, app := range []struct{ id, slug, hash string }{
+		{appAID, "witness-app-a", strings.Repeat("a", 64)},
+		{appBID, "witness-app-b", strings.Repeat("b", 64)},
+	} {
+		origin := "https://" + app.slug + ".example.test"
+		if _, err := pool.Exec(ctx, `INSERT INTO managed_apps(id,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,validation_url,signed_out_url,release_revision,created_at) VALUES($1::uuid,$2,$2,'witness conflict acceptance',$3,$2,$4,$3||'/health',$3||'/validation',$3||'/signed-out','0123456789ab',now())`, app.id, app.slug, origin, app.hash); err != nil {
+			t.Fatalf("insert managed app: %v", err)
+		}
+	}
+	// Reconciling both apps' contracts queues app A (witness B) strictly before
+	// app B (witness A): with only two apps registered, each is cyclically the
+	// other's only eligible witness.
+	if err := store.ReconcileManagedAppOIDCContract(ctx, appAID, strings.Repeat("c", 64)); err != nil {
+		t.Fatalf("reconcile app A contract: %v", err)
+	}
+	if err := store.ReconcileManagedAppOIDCContract(ctx, appBID, strings.Repeat("d", 64)); err != nil {
+		t.Fatalf("reconcile app B contract: %v", err)
+	}
+	var queued int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM app_validation_runs WHERE status='queued'`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 4 {
+		t.Fatalf("queued validations = %d, want 4 (two directions each for app A and app B)", queued)
+	}
+
+	now := time.Now().UTC()
+	claimed, err := store.ClaimAppValidation(ctx, now)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if claimed == nil || (claimed.ManagedAppID != appAID && claimed.ManagedAppID != appBID) {
+		t.Fatalf("first claim = %#v, want app A or app B claimed", claimed)
+	}
+	claimedApp, otherApp := claimed.ManagedAppID, appBID
+	if claimedApp == appBID {
+		otherApp = appAID
+	}
+	if claimed.Witness == nil || claimed.Witness.ManagedAppID != otherApp {
+		t.Fatalf("claimed run witness = %#v, want the other app (%s)", claimed.Witness, otherApp)
+	}
+
+	// Three queued runs remain: the claimed app's other direction (busy as the
+	// running run's target) and the other app's two directions (busy as the
+	// running run's witness). None may be claimed while this run holds the
+	// lease.
+	for attempt := 0; attempt < 3; attempt++ {
+		blocked, err := store.ClaimAppValidation(ctx, now.Add(time.Duration(attempt+1)*time.Second))
+		if err != nil {
+			t.Fatalf("claim while the first run is active: %v", err)
+		}
+		if blocked != nil {
+			t.Fatalf("claim while the first run is active = %#v, want nil (every remaining app is busy)", blocked)
+		}
+	}
+
+	if err := store.CompleteAppValidation(ctx, claimed.ID, ValidationPassed, "", now.Add(10*time.Second)); err != nil {
+		t.Fatalf("complete the first run: %v", err)
+	}
+
+	seenTargets := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		next, err := store.ClaimAppValidation(ctx, now.Add(time.Duration(20+i)*time.Second))
+		if err != nil {
+			t.Fatalf("claim after app A's run completed: %v", err)
+		}
+		if next == nil {
+			t.Fatalf("claim %d after app A's run completed = nil, want a queued run", i)
+		}
+		seenTargets[next.ManagedAppID] = true
+		if err := store.CompleteAppValidation(ctx, next.ID, ValidationPassed, "", now.Add(time.Duration(30+i)*time.Second)); err != nil {
+			t.Fatalf("complete claim %d: %v", i, err)
+		}
+	}
+	if !seenTargets[appAID] || !seenTargets[appBID] {
+		t.Fatalf("targets claimed after app A's run completed = %#v, want both app A and app B represented", seenTargets)
+	}
+}
+
 func TestOIDCRegistrationContractChangeQueuesBothDirectionsForEveryApp(t *testing.T) {
 	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
 	if databaseURL == "" {
