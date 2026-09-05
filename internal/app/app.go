@@ -731,16 +731,22 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	s.expireCookieAtPath(w, cookieName, "/oauth/github/callback")
 	token, err := s.oauth.Exchange(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
+		observe.Errorf("exchange GitHub authorization code: %v", err)
+		s.recordSignIn(r, identity.AuditSignInFailed, "github", "", "", err.Error())
 		s.failPage(w, r, http.StatusBadGateway, "GitHub authorization failed")
 		return
 	}
 	profile, err := s.github.Profile(r.Context(), token.AccessToken)
 	if err != nil {
+		observe.Errorf("read GitHub identity: %v", err)
+		s.recordSignIn(r, identity.AuditSignInFailed, "github", "", "", err.Error())
 		s.failPage(w, r, http.StatusBadGateway, "could not read GitHub identity")
 		return
 	}
 	role, allowed, err := s.githubRole(r.Context(), token.AccessToken, profile)
 	if err != nil {
+		observe.Errorf("verify GitHub organization membership for %s: %v", profile.Login, err)
+		s.recordSignIn(r, identity.AuditSignInFailed, "github", profile.Login, "", err.Error())
 		s.failPage(w, r, http.StatusBadGateway, "could not verify GitHub organization membership")
 		return
 	}

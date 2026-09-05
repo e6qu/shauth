@@ -12,10 +12,14 @@ import (
 	"strings"
 )
 
-const teamsEndpoint = "https://api.github.com/user/teams"
-const userEndpoint = "https://api.github.com/user"
-const emailsEndpoint = "https://api.github.com/user/emails"
-const organizationsEndpoint = "https://api.github.com/user/memberships/orgs"
+const defaultBaseURL = "https://api.github.com"
+
+const (
+	userPath          = "/user"
+	emailsPath        = "/user/emails"
+	teamsPath         = "/user/teams"
+	organizationsPath = "/user/memberships/orgs"
+)
 
 type Profile struct {
 	ID    int64  `json:"id"`
@@ -42,12 +46,10 @@ func (client *Client) Profile(ctx context.Context, accessToken string) (Profile,
 	if strings.TrimSpace(accessToken) == "" {
 		return Profile{}, fmt.Errorf("GitHub access token must not be empty")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, userEndpoint, nil)
+	request, err := newRequest(ctx, http.MethodGet, client.baseURL+userPath, accessToken)
 	if err != nil {
-		return Profile{}, fmt.Errorf("build GitHub user request: %w", err)
+		return Profile{}, err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("Authorization", "Bearer "+accessToken)
 	response, err := client.httpClient.Do(request)
 	if err != nil {
 		return Profile{}, fmt.Errorf("request GitHub user: %w", err)
@@ -72,12 +74,10 @@ func (client *Client) Profile(ctx context.Context, accessToken string) (Profile,
 }
 
 func (client *Client) primaryVerifiedEmail(ctx context.Context, accessToken string) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, emailsEndpoint, nil)
+	request, err := newRequest(ctx, http.MethodGet, client.baseURL+emailsPath, accessToken)
 	if err != nil {
-		return "", fmt.Errorf("build GitHub email request: %w", err)
+		return "", err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("Authorization", "Bearer "+accessToken)
 	response, err := client.httpClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("request GitHub emails: %w", err)
@@ -104,18 +104,51 @@ func (client *Client) primaryVerifiedEmail(ctx context.Context, accessToken stri
 
 type Client struct {
 	httpClient *http.Client
-	endpoint   *url.URL
+	baseURL    string
 }
 
-func NewClient(httpClient *http.Client) (*Client, error) {
+// Option configures a Client beyond its required HTTP client.
+type Option func(*Client)
+
+// WithBaseURL points the client at a GitHub REST API root other than
+// https://api.github.com, such as a GitHub Enterprise Server instance or,
+// in a test, a local fixture server that stands in for the real API.
+func WithBaseURL(baseURL string) Option {
+	return func(client *Client) { client.baseURL = baseURL }
+}
+
+func NewClient(httpClient *http.Client, opts ...Option) (*Client, error) {
 	if httpClient == nil {
 		return nil, fmt.Errorf("GitHub client requires an HTTP client")
 	}
-	endpoint, err := url.Parse(teamsEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("parse GitHub teams endpoint: %w", err)
+	client := &Client{httpClient: httpClient, baseURL: defaultBaseURL}
+	for _, opt := range opts {
+		opt(client)
 	}
-	return &Client{httpClient: httpClient, endpoint: endpoint}, nil
+	return client, nil
+}
+
+// userAgent identifies Shauth to the GitHub API. GitHub rejects every request
+// lacking a User-Agent header outright (403, "Please provide a valid User-Agent
+// header"), so this is not optional decoration: every outbound call must go
+// through newRequest rather than constructing an *http.Request directly, or it
+// silently loses this header again.
+const userAgent = "shauth-identity-service"
+
+// newRequest builds an authenticated GitHub API request carrying every header
+// GitHub's REST API requires or recommends: User-Agent (mandatory), Accept
+// (response media type), Authorization (the caller's OAuth token), and
+// X-GitHub-Api-Version (pins the response shape GitHub returns).
+func newRequest(ctx context.Context, method, endpoint, accessToken string) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build GitHub request: %w", err)
+	}
+	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	return request, nil
 }
 
 // IsMember reports whether the token's GitHub user belongs to organization/slug.
@@ -137,20 +170,22 @@ func (client *Client) Teams(ctx context.Context, accessToken string) ([]Team, er
 	if strings.TrimSpace(accessToken) == "" {
 		return nil, fmt.Errorf("GitHub access token must not be empty")
 	}
+	endpoint, err := url.Parse(client.baseURL + teamsPath)
+	if err != nil {
+		return nil, fmt.Errorf("parse GitHub teams endpoint: %w", err)
+	}
 	var result []Team
 	for page := 1; ; page++ {
-		endpoint := *client.endpoint
-		query := endpoint.Query()
+		pageEndpoint := *endpoint
+		query := pageEndpoint.Query()
 		query.Set("per_page", "100")
 		query.Set("page", fmt.Sprint(page))
-		endpoint.RawQuery = query.Encode()
+		pageEndpoint.RawQuery = query.Encode()
 
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		request, err := newRequest(ctx, http.MethodGet, pageEndpoint.String(), accessToken)
 		if err != nil {
-			return nil, fmt.Errorf("build GitHub teams request: %w", err)
+			return nil, err
 		}
-		request.Header.Set("Accept", "application/vnd.github+json")
-		request.Header.Set("Authorization", "Bearer "+accessToken)
 
 		response, err := client.httpClient.Do(request)
 		if err != nil {
@@ -179,7 +214,7 @@ func (client *Client) Organizations(ctx context.Context, accessToken string) ([]
 	if strings.TrimSpace(accessToken) == "" {
 		return nil, fmt.Errorf("GitHub access token must not be empty")
 	}
-	endpoint, err := url.Parse(organizationsEndpoint)
+	endpoint, err := url.Parse(client.baseURL + organizationsPath)
 	if err != nil {
 		return nil, fmt.Errorf("parse GitHub organizations endpoint: %w", err)
 	}
@@ -190,12 +225,10 @@ func (client *Client) Organizations(ctx context.Context, accessToken string) ([]
 		query.Set("per_page", "100")
 		query.Set("page", fmt.Sprint(page))
 		requestURL.RawQuery = query.Encode()
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+		request, err := newRequest(ctx, http.MethodGet, requestURL.String(), accessToken)
 		if err != nil {
-			return nil, fmt.Errorf("build GitHub organizations request: %w", err)
+			return nil, err
 		}
-		request.Header.Set("Accept", "application/vnd.github+json")
-		request.Header.Set("Authorization", "Bearer "+accessToken)
 		response, err := client.httpClient.Do(request)
 		if err != nil {
 			return nil, fmt.Errorf("request GitHub organizations: %w", err)
