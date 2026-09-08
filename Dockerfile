@@ -23,7 +23,9 @@ RUN wget -O hydra.tar.gz "https://github.com/ory/hydra/archive/${HYDRA_COMMIT}.t
     && tar -xzf hydra.tar.gz --strip-components=1 -C hydra
 WORKDIR /src/hydra
 COPY third_party/hydra-v26.2.0/logout-token-exp.patch /tmp/logout-token-exp.patch
-RUN patch --forward --fuzz=0 -p1 < /tmp/logout-token-exp.patch
+COPY third_party/hydra-v26.2.0/no-sentinel-error-log.patch /tmp/no-sentinel-error-log.patch
+RUN patch --forward --fuzz=0 -p1 < /tmp/logout-token-exp.patch \
+    && patch --forward --fuzz=0 -p1 < /tmp/no-sentinel-error-log.patch
 # Hydra v26.2.0 is the newest upstream release, but its module graph predates
 # several security fixes. Pin the repaired transitive modules explicitly so the
 # final OAuth server does not retain known vulnerable implementations.
