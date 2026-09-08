@@ -1,0 +1,25 @@
+diff --git a/oauth2/handler.go b/oauth2/handler.go
+index 8ccff96..7e1a987 100644
+--- a/oauth2/handler.go
++++ b/oauth2/handler.go
+@@ -762,7 +762,8 @@ func (h *Handler) performOAuth2DeviceVerificationFlow(w http.ResponseWriter, r *
+ 	// (see https://github.com/ory/hydra/pull/3851#discussion_r1843678761)
+ 	f, err := h.r.ConsentStrategy().HandleOAuth2DeviceAuthorizationRequest(ctx, w, r)
+ 	if errors.Is(err, consent.ErrAbortOAuth2Request) {
+-		x.LogError(r, err, h.r.Logger())
++		// The browser was sent to the login or consent UI: control flow, not
++		// an error (upstream 917d39a74a09).
+ 		return
+ 	} else if e := &(fosite.RFC6749Error{}); errors.As(err, &e) {
+ 		x.LogError(r, err, h.r.Logger())
+@@ -1297,8 +1298,8 @@ func (h *Handler) oAuth2Authorize(w http.ResponseWriter, r *http.Request) {
+ 
+ 	fl, err := h.r.ConsentStrategy().HandleOAuth2AuthorizationRequest(ctx, w, r, authorizeRequest)
+ 	if errors.Is(err, consent.ErrAbortOAuth2Request) {
+-		x.LogError(r, err, h.r.Logger())
+-		// do nothing
++		// The browser was sent to the login or consent UI: control flow, not
++		// an error (upstream 917d39a74a09).
+ 		return
+ 	} else if e := &(fosite.RFC6749Error{}); errors.As(err, &e) {
+ 		x.LogError(r, err, h.r.Logger())
