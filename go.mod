@@ -3,7 +3,7 @@ module github.com/e6qu/shauth
 go 1.26.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.46.0
+	github.com/aws/aws-sdk-go-v2 v1.47.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.3
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.72.0
 	github.com/coreos/go-oidc/v3 v3.21.0
