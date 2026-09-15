@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.3
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.72.0
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	golang.org/x/crypto v0.56.0
 	golang.org/x/oauth2 v0.36.0
 )
