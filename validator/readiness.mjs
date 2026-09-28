@@ -18,8 +18,16 @@ export async function waitForApplicationReady(page, registeredURL, failure, time
   try {
     await page.waitForLoadState("domcontentloaded", { timeout });
     await page.locator("body").waitFor({ state: "visible", timeout });
-  } catch {
+  } catch (error) {
     const coordinate = new URL(page.url());
-    throw new Error(`${failure}; application did not become browser-ready at ${coordinate.origin}${coordinate.pathname}`);
+    throw new Error(`${failure}; application did not become browser-ready at ${coordinate.origin}${coordinate.pathname}`, { cause: error });
+  }
+  // An application answers a refused sign-in (a spent rate limit, a failed
+  // callback) with an error document on its own origin, which is visible and
+  // same-origin but not ready.
+  const status = await page.evaluate(() => performance.getEntriesByType("navigation")[0]?.responseStatus ?? 0);
+  if (status < 200 || status >= 400) {
+    const coordinate = new URL(page.url());
+    throw new Error(`${failure}; application answered HTTP ${status} at ${coordinate.origin}${coordinate.pathname}`);
   }
 }

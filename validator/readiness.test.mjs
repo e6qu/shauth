@@ -47,3 +47,30 @@ test("application readiness accepts a rendered page with an active Server-Sent E
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("application readiness refuses an error document on the application's origin", { timeout: 15_000 }, async () => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(429, { "content-type": "text/html; charset=utf-8", "retry-after": "3" });
+    response.end("<!doctype html><title>Too many requests</title><body><main>Too many requests</main></body>");
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  const origin = `http://127.0.0.1:${address.port}`;
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto(`${origin}/callback`, { waitUntil: "domcontentloaded" });
+    await assert.rejects(
+      waitForApplicationReady(page, origin, "application was not ready", 2_000),
+      { message: `application was not ready; application answered HTTP 429 at ${origin}/callback` },
+    );
+  } finally {
+    if (browser) await browser.close();
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
