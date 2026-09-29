@@ -21,8 +21,8 @@ Shauth pages do not depend on a browser-side CDN or other external asset host.
 
 GitHub permits one callback URL per OAuth application. Shauth is therefore the
 sole GitHub OAuth callback at
-`https://auth.dev.e6qu.dev/oauth/github/callback`; it completes GitHub login
-and issues OpenID Connect tokens to registered e6qu applications. Each relying
+`https://<shauth host>/oauth/github/callback`; it completes GitHub login
+and issues OpenID Connect tokens to registered applications. Each relying
 application has its own Shauth OIDC client and redirect URI, rather than being
 added to the GitHub OAuth application. When Microsoft Entra ID is enabled,
 Shauth discovers the configured tenant-specific issuer and verifies the ID
@@ -539,10 +539,9 @@ startup fails if the dedicated database is unavailable or cannot be migrated.
 ## Deployment model
 
 The Terraform module deploys Shauth, Ory Hydra, and a standalone ARM64 browser
-validator in private Amazon ECS Fargate subnets. A public HTTPS entry point at
-`auth.dev.e6qu.dev` routes only
+validator in private Amazon ECS Fargate subnets. A public HTTPS entry point routes only
 the required identity endpoints. PostgreSQL is the durable source of truth.
-All services remain always-on in the `dev` environment.
+All services remain always-on.
 
 Runtime secret requirements: the Hydra system secret must remain stable across
 restarts. Terraform creates it and the bootstrap-admin password with a
