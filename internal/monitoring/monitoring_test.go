@@ -15,7 +15,7 @@ import (
 const testToken = "0123456789abcdef0123456789abcdef"
 
 func TestValidateSources(t *testing.T) {
-	valid := []Source{{Name: "development", URL: "https://monitoring.dev.e6qu.dev/v1/observations", BearerToken: testToken}}
+	valid := []Source{{Name: "development", URL: "https://monitoring.example.com/v1/observations", BearerToken: testToken}}
 	if err := ValidateSources(valid); err != nil {
 		t.Fatalf("ValidateSources(valid) error = %v", err)
 	}
@@ -24,10 +24,10 @@ func TestValidateSources(t *testing.T) {
 	}
 	for name, sources := range map[string][]Source{
 		"duplicate name": append(valid, valid[0]),
-		"insecure URL":   {{Name: "development", URL: "http://monitoring.dev.e6qu.dev/v1/observations", BearerToken: testToken}},
-		"short token":    {{Name: "development", URL: "https://monitoring.dev.e6qu.dev/v1/observations", BearerToken: "short"}},
+		"insecure URL":   {{Name: "development", URL: "http://monitoring.example.com/v1/observations", BearerToken: testToken}},
+		"short token":    {{Name: "development", URL: "https://monitoring.example.com/v1/observations", BearerToken: "short"}},
 		"token whitespace": {{
-			Name: "development", URL: "https://monitoring.dev.e6qu.dev/v1/observations",
+			Name: "development", URL: "https://monitoring.example.com/v1/observations",
 			BearerToken: testToken + "\n",
 		}},
 	} {

@@ -14,10 +14,10 @@ func TestOIDCClientInputValidate(t *testing.T) {
 		ID:                     "intraktible-dev",
 		Name:                   "Intraktible development",
 		Secret:                 "0123456789abcdef0123456789abcdef",
-		RedirectURIs:           []string{"https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/callback"},
-		PostLogoutRedirectURIs: []string{"https://intraktible.dev.e6qu.dev/auth/shauth/logout/complete"},
-		FrontChannelLogoutURI:  "https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/frontchannel-logout",
-		BackChannelLogoutURI:   "https://intraktible.dev.e6qu.dev/v1/auth/oidc/shauth/backchannel-logout",
+		RedirectURIs:           []string{"https://intraktible.example.com/v1/auth/oidc/shauth/callback"},
+		PostLogoutRedirectURIs: []string{"https://intraktible.example.com/auth/shauth/logout/complete"},
+		FrontChannelLogoutURI:  "https://intraktible.example.com/v1/auth/oidc/shauth/frontchannel-logout",
+		BackChannelLogoutURI:   "https://intraktible.example.com/v1/auth/oidc/shauth/backchannel-logout",
 	}
 	if err := valid.validate(); err != nil {
 		t.Fatalf("validate valid client: %v", err)
@@ -27,7 +27,7 @@ func TestOIDCClientInputValidate(t *testing.T) {
 		"invalid identifier": func(input *oidcClientInput) { input.ID = "Invalid" },
 		"short secret":       func(input *oidcClientInput) { input.Secret = "too-short" },
 		"insecure remote": func(input *oidcClientInput) {
-			input.RedirectURIs = []string{"http://intraktible.dev.e6qu.dev/callback"}
+			input.RedirectURIs = []string{"http://intraktible.example.com/callback"}
 		},
 		"front-channel origin mismatch": func(input *oidcClientInput) {
 			input.FrontChannelLogoutURI = "https://attacker.example.test/frontchannel-logout"
@@ -39,10 +39,10 @@ func TestOIDCClientInputValidate(t *testing.T) {
 			input.PostLogoutRedirectURIs = []string{"https://attacker.example.test/auth/shauth/logout/complete"}
 		},
 		"insecure remote post-logout redirect": func(input *oidcClientInput) {
-			input.PostLogoutRedirectURIs = []string{"http://auth.dev.e6qu.dev/oauth/logout/complete"}
+			input.PostLogoutRedirectURIs = []string{"http://auth.example.com/oauth/logout/complete"}
 		},
 		"fragment": func(input *oidcClientInput) {
-			input.RedirectURIs = []string{"https://intraktible.dev.e6qu.dev/callback#fragment"}
+			input.RedirectURIs = []string{"https://intraktible.example.com/callback#fragment"}
 		},
 		"missing logout receiver": func(input *oidcClientInput) {
 			input.FrontChannelLogoutURI = ""
@@ -295,8 +295,8 @@ func TestMarshalHydraClientPostLogoutRedirectURIs(t *testing.T) {
 		ID:                     "e6irc-dev",
 		Name:                   "e6irc",
 		Secret:                 "a-very-long-client-secret-that-is-safe-for-a-test",
-		RedirectURIs:           []string{"https://e6irc.dev.e6qu.dev/api/v1/auth/oidc/shauth/callback"},
-		PostLogoutRedirectURIs: []string{"https://e6irc.dev.e6qu.dev"},
+		RedirectURIs:           []string{"https://e6irc.example.com/api/v1/auth/oidc/shauth/callback"},
+		PostLogoutRedirectURIs: []string{"https://e6irc.example.com"},
 	}, identity.DefaultSessionPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +307,7 @@ func TestMarshalHydraClientPostLogoutRedirectURIs(t *testing.T) {
 	if err := json.Unmarshal(withURIs, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.PostLogout) != 1 || got.PostLogout[0] != "https://e6irc.dev.e6qu.dev" {
+	if len(got.PostLogout) != 1 || got.PostLogout[0] != "https://e6irc.example.com" {
 		t.Fatalf("post_logout_redirect_uris = %#v", got.PostLogout)
 	}
 
@@ -317,7 +317,7 @@ func TestMarshalHydraClientPostLogoutRedirectURIs(t *testing.T) {
 		ID:           "e6irc-dev",
 		Name:         "e6irc",
 		Secret:       "a-very-long-client-secret-that-is-safe-for-a-test",
-		RedirectURIs: []string{"https://e6irc.dev.e6qu.dev/api/v1/auth/oidc/shauth/callback"},
+		RedirectURIs: []string{"https://e6irc.example.com/api/v1/auth/oidc/shauth/callback"},
 	}, identity.DefaultSessionPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -334,19 +334,19 @@ func TestOIDCClientInputValidatesPostLogoutRedirectURIs(t *testing.T) {
 		ID:                   "e6irc-dev",
 		Name:                 "e6irc",
 		Secret:               "0123456789abcdef0123456789abcdef",
-		RedirectURIs:         []string{"https://e6irc.dev.e6qu.dev/api/v1/auth/oidc/shauth/callback"},
-		BackChannelLogoutURI: "https://e6irc.dev.e6qu.dev/api/v1/auth/oidc/shauth/backchannel-logout",
+		RedirectURIs:         []string{"https://e6irc.example.com/api/v1/auth/oidc/shauth/callback"},
+		BackChannelLogoutURI: "https://e6irc.example.com/api/v1/auth/oidc/shauth/backchannel-logout",
 	}
 	ok := base
-	ok.PostLogoutRedirectURIs = []string{"https://e6irc.dev.e6qu.dev"}
+	ok.PostLogoutRedirectURIs = []string{"https://e6irc.example.com"}
 	if err := ok.validate(); err != nil {
 		t.Fatalf("valid post-logout URI rejected: %v", err)
 	}
 	for name, uri := range map[string]string{
-		"insecure": "http://e6irc.dev.e6qu.dev",
-		"fragment": "https://e6irc.dev.e6qu.dev/#x",
+		"insecure": "http://e6irc.example.com",
+		"fragment": "https://e6irc.example.com/#x",
 		"relative": "/logged-out",
-		"userinfo": "https://user:password@e6irc.dev.e6qu.dev/",
+		"userinfo": "https://user:password@e6irc.example.com/",
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := base

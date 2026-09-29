@@ -14,13 +14,13 @@ import (
 // to fetch an observation. Registering an endpoint has to produce a source.
 func TestRegisteredMonitoringURLBecomesASource(t *testing.T) {
 	sources, unpublished := applicationMonitoringSources(
-		[]identity.ManagedApp{{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.dev.e6qu.dev/v1/observations"}},
+		[]identity.ManagedApp{{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"}},
 		map[string]string{"e6irc": strings.Repeat("t", 32)},
 	)
 	if len(sources) != 1 {
 		t.Fatalf("registered monitoring URL produced %d sources, want 1", len(sources))
 	}
-	if sources[0].URL != "https://e6irc.dev.e6qu.dev/v1/observations" {
+	if sources[0].URL != "https://e6irc.example.com/v1/observations" {
 		t.Errorf("source URL = %q", sources[0].URL)
 	}
 	if sources[0].BearerToken == "" {
@@ -36,7 +36,7 @@ func TestRegisteredMonitoringURLBecomesASource(t *testing.T) {
 func TestApplicationWithoutAMonitoringEndpointIsReportedNotSkipped(t *testing.T) {
 	sources, unpublished := applicationMonitoringSources(
 		[]identity.ManagedApp{
-			{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.dev.e6qu.dev/v1/observations"},
+			{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"},
 			{Slug: "bleephub", Name: "Bleephub"},
 		},
 		map[string]string{"e6irc": strings.Repeat("t", 32), "bleephub": strings.Repeat("t", 32)},
@@ -53,7 +53,7 @@ func TestApplicationWithoutAMonitoringEndpointIsReportedNotSkipped(t *testing.T)
 // and must not be reported as though the application failed to implement it.
 func TestRegisteredEndpointWithoutACredentialIsDistinguished(t *testing.T) {
 	sources, unpublished := applicationMonitoringSources(
-		[]identity.ManagedApp{{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.dev.e6qu.dev/v1/observations"}},
+		[]identity.ManagedApp{{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"}},
 		map[string]string{},
 	)
 	if len(sources) != 0 {

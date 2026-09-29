@@ -11,13 +11,13 @@ func TestValidateManagedApp(t *testing.T) {
 		Slug:             "bleephub-dev",
 		Name:             "Bleephub",
 		Description:      "A real deployed service.",
-		LaunchURL:        "https://bleephub.dev.e6qu.dev",
+		LaunchURL:        "https://bleephub.example.com",
 		OIDCClientID:     "bleephub-dev",
 		OIDCContractHash: testOIDCContractHash,
-		HealthURL:        "https://bleephub.dev.e6qu.dev/health",
-		MonitoringURL:    "https://bleephub.dev.e6qu.dev/monitoring",
-		ValidationURL:    "https://bleephub.dev.e6qu.dev/ui/",
-		SignedOutURL:     "https://bleephub.dev.e6qu.dev/ui/signed-out",
+		HealthURL:        "https://bleephub.example.com/health",
+		MonitoringURL:    "https://bleephub.example.com/monitoring",
+		ValidationURL:    "https://bleephub.example.com/ui/",
+		SignedOutURL:     "https://bleephub.example.com/ui/signed-out",
 		ReleaseRevision:  "0123456789ab",
 	}
 	if err := ValidateManagedApp(valid); err != nil {
@@ -28,8 +28,8 @@ func TestValidateManagedApp(t *testing.T) {
 		"uppercase slug":             withManagedApp(valid, func(app *ManagedApp) { app.Slug = "Bleephub" }),
 		"missing OIDC contract hash": withManagedApp(valid, func(app *ManagedApp) { app.OIDCContractHash = "" }),
 		"invalid OIDC contract hash": withManagedApp(valid, func(app *ManagedApp) { app.OIDCContractHash = "ABC" }),
-		"invalid launch URL":         withManagedApp(valid, func(app *ManagedApp) { app.LaunchURL = "http://bleephub.dev.e6qu.dev" }),
-		"invalid health URL":         withManagedApp(valid, func(app *ManagedApp) { app.HealthURL = "http://bleephub.dev.e6qu.dev/health" }),
+		"invalid launch URL":         withManagedApp(valid, func(app *ManagedApp) { app.LaunchURL = "http://bleephub.example.com" }),
+		"invalid health URL":         withManagedApp(valid, func(app *ManagedApp) { app.HealthURL = "http://bleephub.example.com/health" }),
 		"health origin mismatch": withManagedApp(valid, func(app *ManagedApp) {
 			app.HealthURL = "https://health.example.test/health"
 		}),
