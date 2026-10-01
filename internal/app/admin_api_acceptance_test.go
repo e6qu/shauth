@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
@@ -27,6 +26,7 @@ import (
 
 const adminAPIAcceptanceReadToken = "admin-api-acceptance-read-token-0123456789ab"
 const adminAPIAcceptanceWriteToken = "admin-api-acceptance-write-token-0123456789a"
+const tokenHookAcceptanceToken = "token-hook-acceptance-token-0123456789abcdef"
 
 // newAdminAPIAcceptanceServer runs the complete handler chain against real
 // PostgreSQL (an isolated schema clone) and the real Ory Hydra
@@ -111,6 +111,7 @@ func newAdminAPIAcceptanceService(t *testing.T) (*pgxpool.Pool, *Server, *identi
 			HydraPublicURL:      hydraPublicURL,
 			AdminAPIReadToken:   adminAPIAcceptanceReadToken,
 			AdminAPIWriteToken:  adminAPIAcceptanceWriteToken,
+			TokenHookToken:      tokenHookAcceptanceToken,
 			GitHubAdminTeam:     "e6qu-org/e6qu-org-admins",
 			GitHubDeveloperTeam: "e6qu-org/e6qu-org-members",
 		},
@@ -118,7 +119,7 @@ func newAdminAPIAcceptanceService(t *testing.T) (*pgxpool.Pool, *Server, *identi
 		httpClient:       &http.Client{Timeout: 15 * time.Second},
 		managedApps:      managedapps.New(),
 		monitoringClient: monitoring.NewClient(),
-		hydraPublic:      httputil.NewSingleHostReverseProxy(hydraPublicURL),
+		hydraPublic:      newHydraPublicProxy(hydraPublicURL),
 	}
 	return pool, server, store
 }

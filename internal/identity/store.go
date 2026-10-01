@@ -200,6 +200,10 @@ type Store struct{ pool *pgxpool.Pool }
 
 const bootstrapManagedAppsLockID int64 = 0x5348415554484150
 
+// bootstrapLockWait bounds how long a starting replica waits for another to
+// finish reconciling the deployment's apps.
+const bootstrapLockWait = 2 * time.Minute
+
 func NewStore(pool *pgxpool.Pool) (*Store, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("identity store requires a PostgreSQL pool")
@@ -211,13 +215,20 @@ func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
 // LockBootstrapManagedApps serializes the cross-system PostgreSQL/Ory Hydra
 // reconciliation performed by every Shauth replica during startup.
+// The wait is bounded: a replica stuck holding the lock must make the others
+// fail their start visibly rather than hang without serving or logging.
 func (s *Store) LockBootstrapManagedApps(ctx context.Context) (func(), error) {
 	connection, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire bootstrap reconciliation connection: %w", err)
 	}
-	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock($1)`, bootstrapManagedAppsLockID); err != nil {
+	lockContext, cancel := context.WithTimeout(ctx, bootstrapLockWait)
+	defer cancel()
+	if _, err := connection.Exec(lockContext, `SELECT pg_advisory_lock($1)`, bootstrapManagedAppsLockID); err != nil {
 		connection.Release()
+		if lockContext.Err() != nil && ctx.Err() == nil {
+			return nil, fmt.Errorf("lock bootstrap reconciliation: another replica held it for over %s", bootstrapLockWait)
+		}
 		return nil, fmt.Errorf("lock bootstrap reconciliation: %w", err)
 	}
 	return func() {
@@ -671,34 +682,48 @@ func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 // DeleteManagedApp removes one catalog entry addressed by identifier or slug
 // and queues fresh validations for the remaining apps, because removing a
 // relying party changes the witness ring every other check depends on.
-func (s *Store) DeleteManagedApp(ctx context.Context, ref ManagedAppRef) error {
+// ErrManagedAppDeploymentOwned reports an attempt to remove an app that the
+// deployment's bootstrap configuration declares. Removing only its catalog
+// row would leave its OAuth client behind, and every replica would then
+// refuse to start; it is removed from that configuration instead.
+var ErrManagedAppDeploymentOwned = errors.New("this app is declared by the deployment's bootstrap configuration; remove it there")
+
+// DeleteManagedApp removes an app from the catalog unless its slug is one the
+// deployment declares, and returns the removed app's slug.
+func (s *Store) DeleteManagedApp(ctx context.Context, ref ManagedAppRef, deploymentOwnedSlugs []string) (string, error) {
 	if ref.All() {
-		return invalidInput("a managed app identifier or slug is required")
+		return "", invalidInput("a managed app identifier or slug is required")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin delete managed app: %w", err)
+		return "", fmt.Errorf("begin delete managed app: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var result pgconn.CommandTag
+	var slug string
 	if ref.ID != "" {
-		result, err = tx.Exec(ctx, `DELETE FROM managed_apps WHERE id=$1::uuid`, ref.ID)
+		err = tx.QueryRow(ctx, `SELECT slug FROM managed_apps WHERE id=$1::uuid FOR UPDATE`, ref.ID).Scan(&slug)
 	} else {
-		result, err = tx.Exec(ctx, `DELETE FROM managed_apps WHERE slug=$1`, ref.Slug)
+		err = tx.QueryRow(ctx, `SELECT slug FROM managed_apps WHERE slug=$1 FOR UPDATE`, ref.Slug).Scan(&slug)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrManagedAppNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("delete managed app: %w", err)
+		return "", fmt.Errorf("find managed app: %w", err)
 	}
-	if result.RowsAffected() != 1 {
-		return ErrManagedAppNotFound
+	if slices.Contains(deploymentOwnedSlugs, slug) {
+		return "", ErrManagedAppDeploymentOwned
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM managed_apps WHERE slug=$1`, slug); err != nil {
+		return "", fmt.Errorf("delete managed app: %w", err)
 	}
 	if err := enqueueAllAppValidations(ctx, tx, nil, time.Now().UTC()); err != nil {
-		return err
+		return "", err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit delete managed app: %w", err)
+		return "", fmt.Errorf("commit delete managed app: %w", err)
 	}
-	return nil
+	return slug, nil
 }
 
 // oidcClientLockSeed keeps the advisory-lock namespace for OAuth client
@@ -720,6 +745,25 @@ func (s *Store) WithOIDCClientLock(ctx context.Context, clientID string, run fun
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,$2))`, strings.TrimSpace(clientID), oidcClientLockSeed); err != nil {
 		return fmt.Errorf("lock OAuth client: %w", err)
+	}
+	return run(ctx)
+}
+
+// sessionPolicyLockID names the advisory lock that serializes changes to the
+// session policy with OAuth client registrations, which copy its lifetimes.
+const sessionPolicyLockID int64 = 0x5348415554485350
+
+// WithSessionPolicyLock runs an operation that reads the session policy and
+// writes it into Ory Hydra, or changes it, holding a transaction-scoped
+// lock that PostgreSQL releases even if this process dies.
+func (s *Store) WithSessionPolicyLock(ctx context.Context, run func(context.Context) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin session policy lock: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, sessionPolicyLockID); err != nil {
+		return fmt.Errorf("lock session policy: %w", err)
 	}
 	return run(ctx)
 }

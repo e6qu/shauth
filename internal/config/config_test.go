@@ -19,6 +19,7 @@ func TestLoadReadsBootstrapApps(t *testing.T) {
 		"SHAUTH_PUBLIC_URL": "https://auth.example.com", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN":    strings.Repeat("h", 48),
 		"SHAUTH_BOOTSTRAP_APPS_JSON": `[{"slug":"intraktible","name":"Intraktible","description":"Decision platform","launch_url":"https://intraktible.example.com","health_url":"https://intraktible.example.com/health","oidc_client_id":"intraktible-dev","oidc_client_secret":"0123456789abcdef0123456789abcdef","redirect_uris":["https://intraktible.example.com/v1/auth/oidc/shauth/callback"],"post_logout_redirect_uris":["https://intraktible.example.com/"],"frontchannel_logout_uri":"https://intraktible.example.com/v1/auth/oidc/shauth/frontchannel-logout","backchannel_logout_uri":"https://intraktible.example.com/v1/auth/oidc/shauth/backchannel-logout","release_revision":"0123456789ab"}]`,
 	}
 	config, err := Load(func(key string) string { return values[key] })
@@ -34,7 +35,8 @@ func TestLoadRejectsInvalidBootstrapAppsJSON(t *testing.T) {
 	values := map[string]string{
 		"SHAUTH_PUBLIC_URL": "https://auth.example.com", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
-		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com", "SHAUTH_BOOTSTRAP_APPS_JSON": "{",
+		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN": strings.Repeat("h", 48), "SHAUTH_BOOTSTRAP_APPS_JSON": "{",
 	}
 	if _, err := Load(func(key string) string { return values[key] }); err == nil {
 		t.Fatal("Load accepted invalid bootstrap app JSON")
@@ -46,6 +48,7 @@ func TestLoadReadsMonitoringSources(t *testing.T) {
 		"SHAUTH_PUBLIC_URL": "https://auth.example.com", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN":        strings.Repeat("h", 48),
 		"SHAUTH_MONITORING_SOURCES_JSON": `[{"name":"development","url":"https://monitoring.example.com/v1/observations","bearer_token":"0123456789abcdef0123456789abcdef"}]`,
 	}
 	config, err := Load(func(key string) string { return values[key] })
@@ -62,6 +65,7 @@ func TestLoadRejectsInvalidMonitoringSources(t *testing.T) {
 		"SHAUTH_PUBLIC_URL": "https://auth.example.com", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN":        strings.Repeat("h", 48),
 		"SHAUTH_MONITORING_SOURCES_JSON": `[{"name":"development","url":"http://monitoring.example.com/v1/observations","bearer_token":"short"}]`,
 	}
 	if _, err := Load(func(key string) string { return values[key] }); err == nil {
@@ -81,6 +85,7 @@ func TestLoadAcceptsCompleteConfiguration(t *testing.T) {
 		"GITHUB_ADMIN_TEAM":            "e6qu-org/e6qu-org-admins",
 		"SHAUTH_SES_REGION":            "eu-west-1",
 		"SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN":      strings.Repeat("h", 48),
 	}
 	config, err := Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -96,6 +101,7 @@ func TestLoadPermitsInsecureCookiesOnlyForLoopbackDevelopment(t *testing.T) {
 		"SHAUTH_PUBLIC_URL": "http://localhost:8080", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@localhost",
+		"SHAUTH_TOKEN_HOOK_TOKEN":       strings.Repeat("h", 48),
 		"SHAUTH_ALLOW_INSECURE_COOKIES": "true",
 	}
 	if _, err := Load(func(key string) string { return values[key] }); err != nil {
@@ -119,6 +125,7 @@ func TestLoadAcceptsPasswordlessValidationConfiguration(t *testing.T) {
 		"GITHUB_ADMIN_TEAM":              "e6qu-org/e6qu-org-admins",
 		"SHAUTH_SES_REGION":              "eu-west-1",
 		"SHAUTH_INVITATION_EMAIL_FROM":   "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN":        strings.Repeat("h", 48),
 		"SHAUTH_VALIDATION_USERNAME":     "shauth-validator",
 		"SHAUTH_VALIDATION_EMAIL":        "shauth-validator@example.invalid",
 		"SHAUTH_VALIDATOR_TOKEN":         strings.Repeat("v", 48),
@@ -166,6 +173,7 @@ func TestLoadEnforcesDistinctAdminAPITokens(t *testing.T) {
 		"GITHUB_ADMIN_TEAM":            "e6qu-org/e6qu-org-admins",
 		"SHAUTH_SES_REGION":            "eu-west-1",
 		"SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN":      strings.Repeat("h", 48),
 		"SHAUTH_SESSION_RESET_TOKEN":   strings.Repeat("r", 48),
 		"SHAUTH_ADMIN_API_READ_TOKEN":  strings.Repeat("a", 48),
 		"SHAUTH_ADMIN_API_WRITE_TOKEN": strings.Repeat("w", 48),
@@ -210,6 +218,7 @@ func TestLoadRejectsPartialPasswordlessValidationConfiguration(t *testing.T) {
 		"GITHUB_ADMIN_TEAM":            "e6qu-org/e6qu-org-admins",
 		"SHAUTH_SES_REGION":            "eu-west-1",
 		"SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN":      strings.Repeat("h", 48),
 		"SHAUTH_VALIDATION_USERNAME":   "shauth-validator",
 	}
 	if _, err := Load(func(key string) string { return values[key] }); err == nil {
@@ -222,7 +231,8 @@ func TestLoadAcceptsSpecificMicrosoftEntraIDTenant(t *testing.T) {
 		"SHAUTH_PUBLIC_URL": "https://auth.example.com", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
-		"ENTRA_TENANT_ID": "12345678-1234-4234-8234-123456789abc", "ENTRA_CLIENT_ID": "entra-client", "ENTRA_CLIENT_SECRET": "entra-secret",
+		"SHAUTH_TOKEN_HOOK_TOKEN": strings.Repeat("h", 48),
+		"ENTRA_TENANT_ID":         "12345678-1234-4234-8234-123456789abc", "ENTRA_CLIENT_ID": "entra-client", "ENTRA_CLIENT_SECRET": "entra-secret",
 	}
 	config, err := Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -238,6 +248,7 @@ func TestLoadRejectsPartialOrNonSpecificMicrosoftEntraIDConfiguration(t *testing
 		"SHAUTH_PUBLIC_URL": "https://auth.example.com", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_TOKEN_HOOK_TOKEN": strings.Repeat("h", 48),
 	}
 	for name, entra := range map[string]map[string]string{
 		"partial":       {"ENTRA_TENANT_ID": "12345678-1234-4234-8234-123456789abc"},
@@ -255,5 +266,25 @@ func TestLoadRejectsPartialOrNonSpecificMicrosoftEntraIDConfiguration(t *testing
 				t.Fatal("Load() accepted unsafe Microsoft Entra ID configuration")
 			}
 		})
+	}
+}
+
+func TestLoadRequiresADistinctTokenHookCredential(t *testing.T) {
+	values := map[string]string{
+		"SHAUTH_PUBLIC_URL": "https://auth.example.com", "HYDRA_ADMIN_URL": "http://hydra:4445", "HYDRA_PUBLIC_INTERNAL_URL": "http://hydra:4444",
+		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
+		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
+		"SHAUTH_SESSION_RESET_TOKEN": strings.Repeat("r", 48),
+	}
+	if _, err := Load(func(key string) string { return values[key] }); err == nil || !strings.Contains(err.Error(), "SHAUTH_TOKEN_HOOK_TOKEN") {
+		t.Fatalf("Load() without a token hook credential: err = %v", err)
+	}
+	values["SHAUTH_TOKEN_HOOK_TOKEN"] = values["SHAUTH_SESSION_RESET_TOKEN"]
+	if _, err := Load(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("Load() accepted a token hook credential reused from another boundary")
+	}
+	values["SHAUTH_TOKEN_HOOK_TOKEN"] = "short"
+	if _, err := Load(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("Load() accepted a short token hook credential")
 	}
 }

@@ -56,6 +56,34 @@ locals {
     var.database_url_secret_arn,
     var.hydra_database_url_secret_arn,
   ], local.entra_enabled ? [var.entra_oauth_secret_arn] : [])
+
+  # Ory Hydra's settings. Compose sets the same values for the local stack.
+  # Every token Hydra issues, including each refresh, is first confirmed by
+  # Shauth's token hook in the same task.
+  hydra_environment = [
+    { name = "URLS_SELF_ISSUER", value = local.public_url },
+    { name = "URLS_LOGIN", value = "${local.public_url}/oauth/login" },
+    { name = "URLS_CONSENT", value = "${local.public_url}/oauth/consent" },
+    { name = "URLS_LOGOUT", value = "${local.public_url}/oauth/logout" },
+    { name = "URLS_POST_LOGOUT_REDIRECT", value = "${local.public_url}/signed-out" },
+    { name = "URLS_ERROR", value = "${local.public_url}/oauth/error" },
+    { name = "TTL_ACCESS_TOKEN", value = "15m" },
+    { name = "TTL_REFRESH_TOKEN", value = "720h" },
+    { name = "TTL_ID_TOKEN", value = "15m" },
+    { name = "TTL_AUTH_CODE", value = "10m" },
+    { name = "STRATEGIES_ACCESS_TOKEN", value = "jwt" },
+    { name = "SERVE_COOKIES_SAME_SITE_MODE", value = "Lax" },
+    { name = "SQA_OPT_OUT", value = "true" },
+    { name = "OAUTH2_TOKEN_HOOK_URL", value = "http://localhost:8080/internal/hydra/token-hook" },
+    { name = "OAUTH2_TOKEN_HOOK_AUTH_TYPE", value = "api_key" },
+    { name = "OAUTH2_TOKEN_HOOK_AUTH_CONFIG_IN", value = "header" },
+    { name = "OAUTH2_TOKEN_HOOK_AUTH_CONFIG_NAME", value = "Authorization" },
+  ]
+  hydra_secrets = [
+    { name = "DSN", valueFrom = var.hydra_database_url_secret_arn },
+    { name = "SECRETS_SYSTEM_0", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_SYSTEM_SECRET::" },
+    { name = "OAUTH2_TOKEN_HOOK_AUTH_CONFIG_VALUE", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_TOKEN_HOOK_AUTHORIZATION::" },
+  ]
   shauth_secrets = concat([
     { name = "DATABASE_URL", valueFrom = var.database_url_secret_arn },
     { name = "GITHUB_CLIENT_SECRET", valueFrom = "${var.github_oauth_secret_arn}:client_secret::" },
@@ -67,6 +95,7 @@ locals {
     { name = "SHAUTH_SESSION_RESET_TOKEN", valueFrom = "${aws_secretsmanager_secret.session_reset.arn}:SHAUTH_SESSION_RESET_TOKEN::" },
     { name = "SHAUTH_ADMIN_API_READ_TOKEN", valueFrom = "${aws_secretsmanager_secret.admin_api_reader.arn}:SHAUTH_ADMIN_API_READ_TOKEN::" },
     { name = "SHAUTH_ADMIN_API_WRITE_TOKEN", valueFrom = "${aws_secretsmanager_secret.admin_api_writer.arn}:SHAUTH_ADMIN_API_WRITE_TOKEN::" },
+    { name = "SHAUTH_TOKEN_HOOK_TOKEN", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:SHAUTH_TOKEN_HOOK_TOKEN::" },
     ], local.entra_enabled ? [
     { name = "ENTRA_CLIENT_SECRET", valueFrom = "${var.entra_oauth_secret_arn}:client_secret::" },
   ] : [])
@@ -246,6 +275,12 @@ resource "random_password" "admin_api_write_token" {
   length  = 64
   special = false
 }
+# Authenticates Ory Hydra's token hook call to Shauth inside the task. Only the
+# two containers of one task hold it, so it lives in the runtime secret.
+resource "random_password" "token_hook_token" {
+  length  = 64
+  special = false
+}
 
 resource "aws_secretsmanager_secret" "runtime" {
   name                    = "${var.name}/runtime"
@@ -261,6 +296,8 @@ resource "aws_secretsmanager_secret_version" "runtime" {
     SHAUTH_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap.result
     SHAUTH_BOOTSTRAP_APPS_JSON      = jsonencode(var.bootstrap_apps)
     SHAUTH_MONITORING_SOURCES_JSON  = jsonencode(var.monitoring_sources)
+    SHAUTH_TOKEN_HOOK_TOKEN         = random_password.token_hook_token.result
+    HYDRA_TOKEN_HOOK_AUTHORIZATION  = "Bearer ${random_password.token_hook_token.result}"
   })
 }
 
@@ -495,7 +532,7 @@ resource "aws_ecs_task_definition" "this" {
   container_definitions = jsonencode([
     { name = "shauth-migrate", image = var.container_image, essential = false, entryPoint = ["/shauth-migrate"], environment = [{ name = "SHAUTH_MIGRATIONS_DIR", value = "/migrations" }], secrets = [{ name = "DATABASE_URL", valueFrom = var.database_url_secret_arn }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "migrate" } } },
     { name = "hydra-migrate", image = var.container_image, essential = false, entryPoint = ["/hydra"], command = ["migrate", "sql", "up", "--read-from-env", "--yes"], dependsOn = [{ containerName = "shauth-migrate", condition = "SUCCESS" }], secrets = [{ name = "DSN", valueFrom = var.hydra_database_url_secret_arn }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra-migrate" } } },
-    { name = "hydra", image = var.container_image, essential = true, entryPoint = ["/hydra"], command = ["serve", "all"], dependsOn = [{ containerName = "hydra-migrate", condition = "SUCCESS" }], environment = [{ name = "URLS_SELF_ISSUER", value = local.public_url }, { name = "URLS_LOGIN", value = "${local.public_url}/oauth/login" }, { name = "URLS_CONSENT", value = "${local.public_url}/oauth/consent" }, { name = "URLS_LOGOUT", value = "${local.public_url}/oauth/logout" }, { name = "URLS_POST_LOGOUT_REDIRECT", value = "${local.public_url}/signed-out" }, { name = "URLS_ERROR", value = "${local.public_url}/oauth/error" }, { name = "TTL_ACCESS_TOKEN", value = "15m" }, { name = "TTL_REFRESH_TOKEN", value = "720h" }, { name = "TTL_ID_TOKEN", value = "15m" }, { name = "TTL_AUTH_CODE", value = "10m" }], secrets = [{ name = "DSN", valueFrom = var.hydra_database_url_secret_arn }, { name = "SECRETS_SYSTEM_0", valueFrom = "${aws_secretsmanager_secret.runtime.arn}:HYDRA_SYSTEM_SECRET::" }], portMappings = [{ containerPort = 4444, protocol = "tcp" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra" } } },
+    { name = "hydra", image = var.container_image, essential = true, entryPoint = ["/hydra"], command = ["serve", "all"], dependsOn = [{ containerName = "hydra-migrate", condition = "SUCCESS" }], environment = local.hydra_environment, secrets = local.hydra_secrets, portMappings = [{ containerPort = 4444, protocol = "tcp" }], logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "hydra" } } },
     { name = "shauth", image = var.container_image, essential = true, dependsOn = [{ containerName = "hydra", condition = "START" }], portMappings = [{ containerPort = 8080, protocol = "tcp" }], healthCheck = { command = ["CMD", "/shauth-healthcheck"], interval = 30, timeout = 5, retries = 3, startPeriod = 30 }, environment = local.shauth_environment, secrets = local.shauth_secrets, logConfiguration = { logDriver = "awslogs", options = { awslogs-group = aws_cloudwatch_log_group.this.name, awslogs-region = var.region, awslogs-stream-prefix = "shauth" } } }
   ])
   tags = local.tags

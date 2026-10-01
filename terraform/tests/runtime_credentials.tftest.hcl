@@ -155,3 +155,40 @@ run "data_key_admits_logs_and_secret_injection" {
     error_message = "Both execution roles must decrypt the module's secrets through Secrets Manager."
   }
 }
+
+# Ory Hydra in the task must run with the settings the local stack exercises:
+# JWT access tokens, Lax provider cookies, no telemetry, and the token hook
+# that has Shauth confirm every issued and refreshed token. The hook's
+# credential reaches Hydra only as a secret, never as plain configuration.
+run "hydra_runs_with_the_token_hook_and_the_tested_settings" {
+  command = plan
+
+  plan_options {
+    refresh = false
+  }
+
+  assert {
+    condition = alltrue([
+      for name, value in {
+        STRATEGIES_ACCESS_TOKEN            = "jwt"
+        SERVE_COOKIES_SAME_SITE_MODE       = "Lax"
+        SQA_OPT_OUT                        = "true"
+        OAUTH2_TOKEN_HOOK_URL              = "http://localhost:8080/internal/hydra/token-hook"
+        OAUTH2_TOKEN_HOOK_AUTH_TYPE        = "api_key"
+        OAUTH2_TOKEN_HOOK_AUTH_CONFIG_IN   = "header"
+        OAUTH2_TOKEN_HOOK_AUTH_CONFIG_NAME = "Authorization"
+      } : contains([for entry in local.hydra_environment : "${entry.name}=${entry.value}"], "${name}=${value}")
+    ])
+    error_message = "Hydra must issue JWT access tokens, use Lax cookies, opt out of telemetry, and call Shauth's token hook."
+  }
+
+  assert {
+    condition     = contains([for secret in local.hydra_secrets : secret.name], "OAUTH2_TOKEN_HOOK_AUTH_CONFIG_VALUE") && !contains([for entry in local.hydra_environment : entry.name], "OAUTH2_TOKEN_HOOK_AUTH_CONFIG_VALUE")
+    error_message = "The token hook credential must reach Hydra as a secret."
+  }
+
+  assert {
+    condition     = contains([for secret in local.shauth_secrets : secret.name], "SHAUTH_TOKEN_HOOK_TOKEN")
+    error_message = "Shauth must receive the token hook credential it verifies."
+  }
+}

@@ -21,6 +21,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +86,9 @@ type oidcClient struct {
 	GrantTypes             []string `json:"grant_types"`
 	ResponseTypes          []string `json:"response_types"`
 	TokenEndpointAuth      string   `json:"token_endpoint_auth_method"`
+	// DeploymentOwned marks the client of an app the bootstrap
+	// configuration declares, which the interface does not offer to delete.
+	DeploymentOwned bool `json:"-"`
 }
 
 type oidcClientInput struct {
@@ -165,9 +169,45 @@ func sameOrigin(left, right *url.URL) bool {
 	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }
 
+// validateManagedAppClient checks that a client registered in Ory Hydra is
+// one Shauth can stand behind for a catalog app: a confidential
+// authorization-code client on the app's own origin, with HTTPS (or
+// loopback) coordinates, a way to receive logout, and only the exact logout
+// bridge as its post-logout destination. A client registered directly in
+// Hydra with weaker settings is refused rather than listed.
 func validateManagedAppClient(app identity.ManagedApp, client oidcClient) error {
 	if app.OIDCClientID != client.ID {
 		return identity.Invalid("managed app OpenID Connect client does not match the registered client")
+	}
+	if client.TokenEndpointAuth != "client_secret_post" && client.TokenEndpointAuth != "client_secret_basic" {
+		return identity.Invalid("managed app OpenID Connect client must authenticate with its client secret")
+	}
+	if !slices.Contains(client.GrantTypes, "authorization_code") || slices.ContainsFunc(client.GrantTypes, func(grant string) bool {
+		return grant != "authorization_code" && grant != "refresh_token"
+	}) {
+		return identity.Invalid("managed app OpenID Connect client may use only the authorization code and refresh token grants")
+	}
+	if len(client.ResponseTypes) != 1 || client.ResponseTypes[0] != "code" {
+		return identity.Invalid("managed app OpenID Connect client must use only the code response type")
+	}
+	if len(client.RedirectURIs) == 0 {
+		return identity.Invalid("managed app OpenID Connect client must register a redirect URI")
+	}
+	if client.FrontChannelLogoutURI == "" && client.BackChannelLogoutURI == "" {
+		return identity.Invalid("managed app OpenID Connect client must register a front-channel or back-channel logout URI")
+	}
+	for _, check := range []struct {
+		label string
+		uris  []string
+	}{
+		{"redirect URI", client.RedirectURIs},
+		{"post-logout redirect URI", client.PostLogoutRedirectURIs},
+		{"front-channel logout URI", []string{client.FrontChannelLogoutURI}},
+		{"back-channel logout URI", []string{client.BackChannelLogoutURI}},
+	} {
+		if err := validateClientURIs(check.label, check.uris); err != nil {
+			return err
+		}
 	}
 	launchURL, err := url.Parse(app.LaunchURL)
 	if err != nil {
@@ -294,8 +334,7 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		return nil, err
 	}
 	appController := managedapps.New()
-	proxy := httputil.NewSingleHostReverseProxy(cfg.HydraPublicURL)
-	proxy.ModifyResponse = ensureRedirectBody
+	proxy := newHydraPublicProxy(cfg.HydraPublicURL)
 	server := &Server{config: cfg, store: store, github: client, httpClient: outboundClient, templates: templates, hydraPublic: proxy, mailer: inviter, managedApps: appController, monitoringClient: monitoring.NewClient(), traffic: newTraffic(), oauth: &oauth2.Config{ClientID: cfg.GitHubClientID, ClientSecret: cfg.GitHubClientSecret, Endpoint: oauthgithub.Endpoint, RedirectURL: callback, Scopes: []string{"read:user", "user:email", "read:org"}}}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		observe.Errorf("proxy Hydra public request %s: %v", r.URL.Path, err)
@@ -316,6 +355,92 @@ func New(cfg config.Config, store *identity.Store) (*Server, error) {
 		return nil, err
 	}
 	return server, nil
+}
+
+// newHydraPublicProxy serves Ory Hydra's public endpoints from Shauth's own
+// origin. Discovery is read uncompressed so the response modes Shauth
+// cannot serve are withdrawn from it before a client sees them.
+func newHydraPublicProxy(target *url.URL) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(request *http.Request) {
+		director(request)
+		if request.URL.Path == discoveryPath {
+			request.Header.Del("Accept-Encoding")
+		}
+	}
+	proxy.ModifyResponse = func(response *http.Response) error {
+		if response.Request != nil && response.Request.URL.Path == discoveryPath {
+			return withdrawFormPostResponseMode(response)
+		}
+		return ensureRedirectBody(response)
+	}
+	return proxy
+}
+
+const discoveryPath = "/.well-known/openid-configuration"
+
+// withdrawFormPostResponseMode removes form_post from the advertised response
+// modes. Hydra answers it with a page that submits itself through an inline
+// script to the application's origin, which Shauth's content security policy
+// rightly forbids, so a client choosing it from discovery would stall.
+func withdrawFormPostResponseMode(response *http.Response) error {
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Encoding") != "" {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read OpenID Connect discovery: %w", err)
+	}
+	if err := response.Body.Close(); err != nil {
+		return fmt.Errorf("close OpenID Connect discovery: %w", err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(body, &document); err != nil {
+		return fmt.Errorf("decode OpenID Connect discovery: %w", err)
+	}
+	var modes []string
+	if raw, ok := document["response_modes_supported"]; ok {
+		if err := json.Unmarshal(raw, &modes); err != nil {
+			return fmt.Errorf("decode advertised response modes: %w", err)
+		}
+		modes = slices.DeleteFunc(modes, func(mode string) bool { return mode == "form_post" })
+		encoded, err := json.Marshal(modes)
+		if err != nil {
+			return err
+		}
+		document["response_modes_supported"] = encoded
+		if body, err = json.Marshal(document); err != nil {
+			return err
+		}
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	response.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	return nil
+}
+
+// providerAuthorize refuses the form_post response mode before Hydra sees the
+// request, with a page saying why, rather than letting Hydra answer with a
+// self-submitting page the browser will not run. Every other authorization
+// request goes to Hydra unchanged.
+func (s *Server) providerAuthorize(w http.ResponseWriter, r *http.Request) {
+	mode := r.URL.Query().Get("response_mode")
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			s.failPage(w, r, http.StatusBadRequest, "The sign-in request could not be read.")
+			return
+		}
+		mode = r.Form.Get("response_mode")
+		// ParseForm consumed the body; Hydra reads the same parameters.
+		r.Body = io.NopCloser(strings.NewReader(r.PostForm.Encode()))
+		r.ContentLength = int64(len(r.PostForm.Encode()))
+	}
+	if mode == "form_post" {
+		s.failPage(w, r, http.StatusBadRequest, "This application asked for the form_post response mode, which Shauth does not support. The application must use the default query response mode.")
+		return
+	}
+	s.hydraPublic.ServeHTTP(w, r)
 }
 
 func ensureRedirectBody(response *http.Response) error {
@@ -356,6 +481,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+htmxAssetPath, serveHTMX)
 	mux.Handle("/.well-known/{path...}", s.hydraPublic)
 	mux.HandleFunc("GET /oauth2/sessions/logout", s.providerLogoutStart)
+	mux.HandleFunc("/oauth2/auth", s.providerAuthorize)
 	mux.Handle("/oauth2/{path...}", s.hydraPublic)
 	mux.Handle("/userinfo", s.hydraPublic)
 	mux.HandleFunc("GET /{$}", s.home)
@@ -453,6 +579,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/sessions", s.adminSessions)
 	mux.HandleFunc("POST /admin/sessions/{id}/revoke", s.adminRevokeSession)
 	mux.HandleFunc("POST /internal/sessions/reset", s.sessionResetAPI)
+	mux.HandleFunc("POST /internal/hydra/token-hook", s.hydraTokenHook)
 	// csrfPosts exempts only /oauth2/token and /internal/ paths from browser
 	// CSRF enforcement, so this bearer-token POST must live under /internal/.
 	mux.HandleFunc("POST /internal/apps/validations/enqueue", s.applicationValidationEnqueueAPI)
@@ -1595,7 +1722,10 @@ type managedAppView struct {
 	CSRF string
 	// ReturnTo is the page the re-validation control returns to, so an
 	// operator stays where they started.
-	ReturnTo               string
+	ReturnTo string
+	// DeploymentOwned marks an app the bootstrap configuration declares;
+	// it is changed there, not removed from the catalog.
+	DeploymentOwned        bool
 	DisplayReleaseRevision string
 	Healthy                bool
 	StatusCode             int
@@ -1793,6 +1923,7 @@ func (s *Server) renderAdminApps(w http.ResponseWriter, r *http.Request, status 
 	for index := range apps {
 		apps[index].CSRF = token
 		apps[index].ReturnTo = "/admin/apps"
+		apps[index].DeploymentOwned = s.isBootstrapSlug(apps[index].Slug)
 	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -2331,6 +2462,9 @@ func (s *Server) renderOIDCClients(w http.ResponseWriter, r *http.Request, statu
 		s.failPage(w, r, failureStatus, failureMessage)
 		return
 	}
+	for index := range clients {
+		clients[index].DeploymentOwned = s.isBootstrapClient(clients[index].ID)
+	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
@@ -2611,7 +2745,17 @@ func nextHydraPageToken(linkHeader string) (string, error) {
 	return "", nil
 }
 
+// createHydraClient registers a client with the lifetimes of the current
+// session policy. The policy lock keeps a concurrent policy change from
+// updating every existing client while this one is created with the old
+// lifetimes.
 func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) error {
+	return s.store.WithSessionPolicyLock(ctx, func(ctx context.Context) error {
+		return s.writeHydraClient(ctx, input)
+	})
+}
+
+func (s *Server) writeHydraClient(ctx context.Context, input oidcClientInput) error {
 	policy, err := s.store.SessionPolicy(ctx)
 	if err != nil {
 		return err
@@ -2719,7 +2863,15 @@ func sameStringSet(left, right []string) bool {
 	return true
 }
 
+// updateHydraClient replaces a client's registration, under the same policy
+// lock as createHydraClient.
 func (s *Server) updateHydraClient(ctx context.Context, input oidcClientInput) error {
+	return s.store.WithSessionPolicyLock(ctx, func(ctx context.Context) error {
+		return s.rewriteHydraClient(ctx, input)
+	})
+}
+
+func (s *Server) rewriteHydraClient(ctx context.Context, input oidcClientInput) error {
 	policy, err := s.store.SessionPolicy(ctx)
 	if err != nil {
 		return err
@@ -3713,6 +3865,13 @@ func (s *Server) view(r *http.Request, title string, data map[string]any) map[st
 	}
 	data["Title"] = title
 	data["CSRF"] = csrfToken(r)
+	// Outcome messages come from many code paths, some phrased as fragments
+	// ("could not complete the request"); every banner reads as a sentence.
+	for _, key := range []string{"Error", "Done"} {
+		if message, ok := data[key].(string); ok {
+			data[key] = asSentence(message)
+		}
+	}
 	data["Path"] = r.URL.Path
 	data["Revision"] = version.Short()
 	data["StartedAt"] = version.StartedAt()

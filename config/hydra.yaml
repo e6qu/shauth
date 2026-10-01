@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Local development only. Production sets the same values through the
+# container environment in terraform/main.tf; compose.yaml sets the rest.
 serve: {}
 strategies:
   access_token: jwt

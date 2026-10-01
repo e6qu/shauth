@@ -20,7 +20,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	githubapi "github.com/e6qu/shauth/internal/github"
@@ -74,6 +76,10 @@ var (
 	// errOIDCClientInUse reports that a managed app still depends on the
 	// OpenID Connect client a caller asked to delete.
 	errOIDCClientInUse = errors.New("delete the connected app before deleting its OAuth client")
+	// errOIDCClientDeploymentOwned reports an attempt to delete the OAuth
+	// client of an app the deployment's bootstrap configuration declares;
+	// every start would recreate it.
+	errOIDCClientDeploymentOwned = errors.New("this OAuth client belongs to an app declared by the deployment's bootstrap configuration; remove it there")
 	// errSelfDisable reports an administrator attempting to disable the
 	// account they are signed in with, which would lock them out.
 	errSelfDisable = errors.New("you cannot disable the account you are signed in with")
@@ -113,10 +119,13 @@ func describeOperationFailure(action string, err error) (int, string) {
 		observe.Errorf("%s: %s: %v", action, dependency.message, dependency.cause)
 		return http.StatusBadGateway, dependency.Error()
 	case errors.Is(err, identity.ErrAlreadyExists):
-		return http.StatusConflict, action + " already exists"
+		// The action names what was being created ("create user"); the
+		// caller is told that such a thing already exists.
+		return http.StatusConflict, "that " + strings.TrimPrefix(action, "create ") + " already exists"
 	case errors.Is(err, errHydraClientConflict):
 		return http.StatusConflict, "an OAuth client with that identifier already exists"
 	case errors.Is(err, errOIDCClientInUse), errors.Is(err, errSelfDisable),
+		errors.Is(err, errOIDCClientDeploymentOwned), errors.Is(err, identity.ErrManagedAppDeploymentOwned),
 		errors.Is(err, identity.ErrValidationUserProtected), errors.Is(err, identity.ErrActiveSessionNotFound),
 		errors.Is(err, identity.ErrUserInactive):
 		return http.StatusConflict, err.Error()
@@ -339,6 +348,19 @@ func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyR
 	if err != nil {
 		return sessionPolicyRecord{}, err
 	}
+	// Held for the whole change: a client registered meanwhile would be
+	// missed by the update below yet created with the old lifetimes, and two
+	// concurrent changes could leave Hydra and PostgreSQL holding different
+	// policies.
+	var applied sessionPolicyRecord
+	err = s.store.WithSessionPolicyLock(ctx, func(ctx context.Context) error {
+		applied, err = s.replaceSessionPolicy(ctx, policy, requester)
+		return err
+	})
+	return applied, err
+}
+
+func (s *Server) replaceSessionPolicy(ctx context.Context, policy identity.SessionPolicy, requester actor) (sessionPolicyRecord, error) {
 	previous, err := s.store.SessionPolicy(ctx)
 	if err != nil {
 		return sessionPolicyRecord{}, fmt.Errorf("load current session policy: %w", err)
@@ -388,6 +410,9 @@ func (s *Server) createOIDCClient(ctx context.Context, input oidcClientInput, re
 func (s *Server) deleteOIDCClient(ctx context.Context, clientID string, requester actor) error {
 	if !deletableOIDCClientID(clientID) {
 		return identity.Invalid("OAuth client identifier is invalid")
+	}
+	if s.isBootstrapClient(clientID) {
+		return errOIDCClientDeploymentOwned
 	}
 	// Registering an app against this client checks the provider and then
 	// writes the catalog row, so the usage check and the deletion have to
@@ -476,6 +501,28 @@ func (s *Server) deleteGitHubMapping(ctx context.Context, mappingID string, requ
 	return nil
 }
 
+// bootstrapSlugs lists the apps the deployment's configuration declares.
+func (s *Server) bootstrapSlugs() []string {
+	slugs := make([]string, 0, len(s.config.BootstrapApps))
+	for _, app := range s.config.BootstrapApps {
+		slugs = append(slugs, app.Slug)
+	}
+	return slugs
+}
+
+func (s *Server) isBootstrapSlug(slug string) bool {
+	return slices.Contains(s.bootstrapSlugs(), slug)
+}
+
+func (s *Server) isBootstrapClient(clientID string) bool {
+	for _, app := range s.config.BootstrapApps {
+		if app.OIDCClientID == clientID {
+			return true
+		}
+	}
+	return false
+}
+
 // createApp registers a managed app against an already-registered OpenID
 // Connect client, enforcing the one-origin and logout-bridge invariants that
 // make single sign-out reachable for every relying party.
@@ -525,10 +572,11 @@ func (s *Server) deleteApp(ctx context.Context, ref identity.ManagedAppRef, requ
 			return err
 		}
 	}
-	if err := s.store.DeleteManagedApp(ctx, ref); err != nil {
+	slug, err := s.store.DeleteManagedApp(ctx, ref, s.bootstrapSlugs())
+	if err != nil {
 		return err
 	}
-	s.record(ctx, requester, identity.AuditAppDeleted, "", map[string]any{"id": ref.ID, "slug": ref.Slug})
+	s.record(ctx, requester, identity.AuditAppDeleted, "", map[string]any{"id": ref.ID, "slug": slug})
 	return nil
 }
 

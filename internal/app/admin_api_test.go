@@ -285,7 +285,7 @@ func TestWriteOperationFailureSeparatesRejectionFromFailure(t *testing.T) {
 		},
 		"duplicate": {
 			err:    fmt.Errorf("create user: %w", identity.ErrAlreadyExists),
-			status: http.StatusConflict, wantMessage: "create user already exists",
+			status: http.StatusConflict, wantMessage: "that user already exists",
 		},
 		"database failure": {
 			err:         fmt.Errorf(`create user: ERROR: duplicate key value violates unique constraint "users_email_key" (SQLSTATE 23505)`),

@@ -28,16 +28,28 @@ services:
     environment: &hydra-environment
       DSN: ${HYDRA_DSN:?set HYDRA_DSN}
       HYDRA_DSN: ${HYDRA_DSN:?set HYDRA_DSN}
-      HYDRA_PUBLIC_URL: ${HYDRA_PUBLIC_URL:-http://localhost:4444}
       SHAUTH_PUBLIC_URL: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}
       HYDRA_SYSTEM_SECRET: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET}
-      URLS_SELF_ISSUER: ${HYDRA_PUBLIC_URL:-http://localhost:4444}
+      # Shauth serves Hydra's public endpoints from its own origin, so that
+      # origin is the issuer every relying party validates.
+      URLS_SELF_ISSUER: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}
       URLS_LOGIN: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/login
       URLS_CONSENT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/consent
       URLS_LOGOUT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/logout
       URLS_ERROR: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/oauth/error
       URLS_POST_LOGOUT_REDIRECT: ${SHAUTH_PUBLIC_URL:-http://localhost:8080}/signed-out
       SECRETS_SYSTEM_0: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET}
+      SQA_OPT_OUT: "true"
+      # The same provider settings as production (terraform/main.tf), so the
+      # stack exercises what is deployed. Every token Hydra issues, including
+      # each refresh, is first confirmed by Shauth's token hook.
+      STRATEGIES_ACCESS_TOKEN: jwt
+      SERVE_COOKIES_SAME_SITE_MODE: Lax
+      OAUTH2_TOKEN_HOOK_URL: http://shauth:8080/internal/hydra/token-hook
+      OAUTH2_TOKEN_HOOK_AUTH_TYPE: api_key
+      OAUTH2_TOKEN_HOOK_AUTH_CONFIG_IN: header
+      OAUTH2_TOKEN_HOOK_AUTH_CONFIG_NAME: Authorization
+      OAUTH2_TOKEN_HOOK_AUTH_CONFIG_VALUE: Bearer ${SHAUTH_TOKEN_HOOK_TOKEN:?set SHAUTH_TOKEN_HOOK_TOKEN}
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,6 +95,7 @@ services:
       SHAUTH_VALIDATION_STATUS_TOKEN: ${SHAUTH_VALIDATION_STATUS_TOKEN:?set SHAUTH_VALIDATION_STATUS_TOKEN}
       SHAUTH_ADMIN_API_READ_TOKEN: ${SHAUTH_ADMIN_API_READ_TOKEN:-}
       SHAUTH_ADMIN_API_WRITE_TOKEN: ${SHAUTH_ADMIN_API_WRITE_TOKEN:-}
+      SHAUTH_TOKEN_HOOK_TOKEN: ${SHAUTH_TOKEN_HOOK_TOKEN:?set SHAUTH_TOKEN_HOOK_TOKEN}
       SHAUTH_BOOTSTRAP_APPS_JSON: ${SHAUTH_BOOTSTRAP_APPS_JSON:-[]}
       SHAUTH_SES_REGION: eu-west-1
       SHAUTH_INVITATION_EMAIL_FROM: no-reply@localhost.test
