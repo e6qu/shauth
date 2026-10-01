@@ -502,6 +502,36 @@ if [ "$bootstrap_client_status" != 200 ]; then
 	echo "a deployment-owned OAuth client was deleted: Hydra answered HTTP ${bootstrap_client_status}" >&2
 	exit 1
 fi
+# The supported removal: drop the app from the deployment's configuration,
+# restart, and then remove the app and its client from the interface.
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '%s' "$SHAUTH_BOOTSTRAP_APPS_JSON" | node -e '
+let body = "";
+process.stdin.on("data", value => body += value);
+process.stdin.on("end", () => {
+  const apps = JSON.parse(body).filter(app => app.slug !== "bootstrap-app");
+  process.stdout.write(JSON.stringify(apps));
+});
+')
+export SHAUTH_BOOTSTRAP_APPS_JSON
+compose up --force-recreate --no-deps --detach shauth
+attempt=0
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
+	attempt=$((attempt + 1))
+	sleep 1
+done
+[ "$attempt" -lt 30 ]
+curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
+	--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/apps" \
+	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/apps/${bootstrap_app_id}/delete"
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='bootstrap-app'")" = 0 ]
+curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
+	--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/clients" \
+	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/clients/bootstrap-app/delete"
+bootstrap_client_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' 'http://localhost:4445/admin/clients/bootstrap-app')
+if [ "$bootstrap_client_status" != 404 ]; then
+	echo "the OAuth client of an app removed from the deployment configuration was not deleted: Hydra answered HTTP ${bootstrap_client_status}" >&2
+	exit 1
+fi
 integration_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='integration-app'")
 [ -n "$integration_app_id" ]
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
