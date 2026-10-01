@@ -938,6 +938,13 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
+	if app.OIDCClientID != "" {
+		// This path ends on Hydra's default post-logout page, Shauth's
+		// /signed-out, which forwards to the application that asked once
+		// every session has ended. Only the client is remembered; the
+		// destination is looked up again there.
+		s.setCookie(w, &http.Cookie{Name: logoutReturnCookie, Value: app.OIDCClientID, Path: "/signed-out", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: int(identity.LogoutCorrelationLifetime / time.Second)})
+	}
 	s.setCookie(w, &http.Cookie{Name: logoutCorrelationCookie, Value: correlation, Path: logoutCorrelationPath, HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(identity.LogoutCorrelationLifetime), MaxAge: int(identity.LogoutCorrelationLifetime / time.Second)})
 	http.Redirect(w, r, "/oauth2/sessions/logout", http.StatusSeeOther)
 }
@@ -949,7 +956,20 @@ func (s *Server) providerLogoutStart(w http.ResponseWriter, r *http.Request) {
 	s.hydraPublic.ServeHTTP(w, r)
 }
 
+// logoutReturnCookie names the application a sign-out started from, while
+// that sign-out runs through Hydra's logout flow.
+const logoutReturnCookie = "shauth_logout_return"
+
 func (s *Server) signedOut(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(logoutReturnCookie); err == nil {
+		s.expireCookieAtPath(w, logoutReturnCookie, "/signed-out")
+		if _, _, err := s.peekCurrent(r); err != nil && oidcClientIDPattern.MatchString(cookie.Value) {
+			if app, err := s.store.ManagedAppByClientID(r.Context(), cookie.Value); err == nil {
+				http.Redirect(w, r, app.SignedOutURL, http.StatusSeeOther)
+				return
+			}
+		}
+	}
 	s.render(w, "signed-out", s.view(r, "Signed out", map[string]any{"SignedIn": false}))
 }
 
