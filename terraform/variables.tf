@@ -93,20 +93,33 @@ variable "invitation_email_from" {
   }
 }
 variable "github_admin_team" {
-  type    = string
-  default = "e6qu-org/e6qu-org-admins"
+  type        = string
+  description = "GitHub organization/team-slug whose members are administrators. It seeds the first access rule; later changes are made in the interface."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$", var.github_admin_team))
+    error_message = "github_admin_team must be organization/team-slug."
+  }
 }
 variable "github_developer_team" {
-  type    = string
-  default = "e6qu-org/e6qu-org-members"
+  type        = string
+  description = "GitHub organization/team-slug whose members are developers. It seeds the first access rule; later changes are made in the interface."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$", var.github_developer_team))
+    error_message = "github_developer_team must be organization/team-slug."
+  }
+}
+variable "log_group_name" {
+  type        = string
+  default     = null
+  description = "CloudWatch Logs group for every Shauth container. Defaults to /shauth/<name>; set it to keep an existing group, because changing a log group's name replaces it."
 }
 variable "database_url_secret_arn" {
   type        = string
-  description = "AWS Secrets Manager ARN containing Shauth's dedicated PostgreSQL URL from fck-rds."
+  description = "AWS Secrets Manager ARN containing Shauth's dedicated PostgreSQL connection URL."
 }
 variable "hydra_database_url_secret_arn" {
   type        = string
-  description = "AWS Secrets Manager ARN containing Ory Hydra's dedicated PostgreSQL URL from fck-rds."
+  description = "AWS Secrets Manager ARN containing Ory Hydra's dedicated PostgreSQL connection URL."
 }
 variable "tags" {
   type    = map(string)

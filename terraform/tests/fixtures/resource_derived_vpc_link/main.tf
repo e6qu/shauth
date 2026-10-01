@@ -47,5 +47,7 @@ module "shauth" {
   bootstrap_admin_email                  = "admin@test.example.com"
   invitation_email_from                  = "invitations@test.example.com"
   database_url_secret_arn                = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:shauth-database"
+  github_admin_team                      = "example-org/admins"
+  github_developer_team                  = "example-org/developers"
   hydra_database_url_secret_arn          = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:hydra-database"
 }

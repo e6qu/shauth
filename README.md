@@ -51,9 +51,11 @@ Shauth. Ory Hydra sends signed back-channel logout tokens and, when configured,
 front-channel logout requests to every client session correlated by `sid`.
 Relying applications validate those notifications and idempotently revoke the
 correlated local sessions.
-The Shauth container includes Ory Hydra v26.2.0 with the repository's audited
-provider patch that adds the Back-Channel Logout 1.0 Errata 1 `exp` claim with
-a two-minute lifetime. The same immutable image runs Shauth, Hydra, and their
+The Shauth container includes Ory Hydra v26.2.0 with the repository's two
+audited provider patches (`third_party/hydra-v26.2.0/`): one adds the
+Back-Channel Logout 1.0 Errata 1 `exp` claim with a two-minute lifetime, and
+one stops Hydra logging the routine redirect to the login or consent page as
+an error. The same immutable image runs Shauth, Hydra, and their
 migration entry points, so production never builds or patches the provider at
 startup.
 Each push to `main` publishes `ghcr.io/e6qu/shauth:<sha12>` as a Linux amd64
@@ -607,7 +609,7 @@ from runtime secret injection; none has a default.
 | `HYDRA_ADMIN_URL` | yes | Ory Hydra admin API, reachable only from Shauth. |
 | `HYDRA_PUBLIC_INTERNAL_URL` | yes | Ory Hydra public API as Shauth reaches it internally; it is published at `SHAUTH_PUBLIC_URL`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | yes | The GitHub OAuth application whose sole callback is `/oauth/github/callback`. |
-| `GITHUB_DEVELOPER_TEAM`, `GITHUB_ADMIN_TEAM` | no | `org/team` access rules created once on first start; edit them in the interface afterwards. |
+| `GITHUB_DEVELOPER_TEAM`, `GITHUB_ADMIN_TEAM` | yes | `org/team` access rules created once on first start; edit them in the interface afterwards. |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` | together | Enable Microsoft Entra ID for one specific tenant. |
 | `SHAUTH_SES_REGION`, `SHAUTH_INVITATION_EMAIL_FROM` | yes | Amazon SES region and verified sender for invitations. |
 | `SHAUTH_BOOTSTRAP_ADMIN_EMAIL`, `SHAUTH_BOOTSTRAP_ADMIN_PASSWORD` | together | Break-glass administrator; the password is 14 to 72 bytes. A disabled bootstrap administrator stays disabled. |

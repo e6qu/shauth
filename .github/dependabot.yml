@@ -21,6 +21,14 @@ updates:
       interval: weekly
     cooldown:
       default-days: 1
+  # The local and CI stack's PostgreSQL image lives in compose.yaml, which the
+  # docker ecosystem does not read.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 1
   - package-ecosystem: terraform
     directory: /terraform
     schedule:
