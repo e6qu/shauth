@@ -1288,7 +1288,7 @@ unknown_login_status=$(curl --silent --output /dev/null --write-out '%{http_code
   "${SHAUTH_PUBLIC_URL}"/admin/github)
 [ "$unknown_login_status" = 400 ]
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${github_mapping_id}/delete" | grep -q 'GitHub access rules'
-developer_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'team' AND target = 'e6qu-org/e6qu-org-members'")
+developer_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'team' AND target = 'example-org/developers'")
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${developer_mapping_id}/delete" >/dev/null
 compose restart shauth >/dev/null
 attempt=0
@@ -1296,7 +1296,7 @@ while [ "$attempt" -lt 30 ] && ! curl --fail --silent --max-time 2 "${SHAUTH_PUB
   attempt=$((attempt + 1))
   sleep 1
 done
-remaining_developer_mappings=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM github_role_mappings WHERE kind = 'team' AND target = 'e6qu-org/e6qu-org-members'")
+remaining_developer_mappings=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM github_role_mappings WHERE kind = 'team' AND target = 'example-org/developers'")
 if [ "$attempt" -eq 30 ] || [ "$remaining_developer_mappings" != 0 ]; then
   compose logs --no-color
   exit 1

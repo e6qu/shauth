@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Shauth is the e6qu identity administration and observability service.
+// Shauth is an OpenID Connect identity provider with an administration and
+// observability interface.
 package main
 
 import (
