@@ -1,23 +1,35 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 version: 2
+# Every update waits at least a day after its release before it is proposed,
+# so a compromised or withdrawn release has time to be caught upstream.
 updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
   - package-ecosystem: terraform
     directory: /terraform
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1

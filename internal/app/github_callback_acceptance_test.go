@@ -110,7 +110,11 @@ func TestGitHubCallbackRecordsAFailedSignInWhenGitHubRejectsTheRequest(t *testin
 
 	state := hex.EncodeToString(mustRandomBytes(t, 32))
 	request := httptest.NewRequest(http.MethodGet, "/oauth/github/callback?state="+state+"&code=fixture-code", http.NoBody)
-	request.AddCookie(&http.Cookie{Name: githubStateCookieName(state), Value: "/"})
+	transaction, err := encodeUpstreamTransaction(upstreamTransaction{Next: "/", Verifier: oauth2.GenerateVerifier()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: githubStateCookieName(state), Value: transaction})
 	recorder := httptest.NewRecorder()
 
 	server.githubCallback(recorder, request)
@@ -139,4 +143,74 @@ func mustRandomBytes(t *testing.T, n int) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// Choosing not to continue at GitHub is not a gateway failure: the person
+// returns to the sign-in page with their destination intact, and the attempt
+// is still audited.
+func TestCancelledGitHubSignInReturnsToSignInWithItsDestination(t *testing.T) {
+	databaseURL := os.Getenv("SHAUTH_ACCEPTANCE_DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("SHAUTH_ACCEPTANCE_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	adminPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	t.Cleanup(adminPool.Close)
+	schema := "github_cancel_" + strings.ReplaceAll(acceptanceUUID(t), "-", "")
+	if _, err := adminPool.Exec(ctx, fmt.Sprintf(`
+		CREATE SCHEMA %s;
+		CREATE TABLE %s.audit_events (LIKE public.audit_events INCLUDING ALL)`, schema, schema)); err != nil {
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	t.Cleanup(func() { _, _ = adminPool.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Fatalf("connect isolated schema: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	store, err := identity.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	templates, err := template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates)
+	if err != nil {
+		t.Fatalf("parse templates: %v", err)
+	}
+	server := &Server{store: store, templates: templates}
+
+	state := hex.EncodeToString(mustRandomBytes(t, 32))
+	transaction, err := encodeUpstreamTransaction(upstreamTransaction{Next: "/apps", Verifier: oauth2.GenerateVerifier()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/oauth/github/callback?state="+state+"&error=access_denied", http.NoBody)
+	request.AddCookie(&http.Cookie{Name: githubStateCookieName(state), Value: transaction})
+	recorder := httptest.NewRecorder()
+	server.githubCallback(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{"GitHub sign-in was cancelled.", `name="next" value="/apps"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cancelled sign-in page lacks %q", want)
+		}
+	}
+	var eventType string
+	if err := pool.QueryRow(ctx, "SELECT event_type FROM audit_events ORDER BY created_at DESC LIMIT 1").Scan(&eventType); err != nil {
+		t.Fatalf("read audit event: %v", err)
+	}
+	if eventType != identity.AuditSignInFailed {
+		t.Fatalf("event_type = %q, want %q", eventType, identity.AuditSignInFailed)
+	}
 }

@@ -39,24 +39,39 @@ func (s *Server) applicationMonitoringSources(ctx context.Context) (sources []mo
 	if err != nil {
 		return nil, nil, fmt.Errorf("list managed apps: %w", err)
 	}
-	tokens := make(map[string]string, len(s.config.BootstrapApps))
+	tokens := make(map[string]monitoringCredential, len(s.config.BootstrapApps))
 	for _, bootstrap := range s.config.BootstrapApps {
-		tokens[bootstrap.Slug] = strings.TrimSpace(bootstrap.MonitoringToken)
+		tokens[bootstrap.Slug] = monitoringCredential{Token: strings.TrimSpace(bootstrap.MonitoringToken), URL: strings.TrimSpace(bootstrap.MonitoringURL), ClientID: bootstrap.OIDCClientID}
 	}
 	sources, unpublished = applicationMonitoringSources(apps, tokens)
 	return sources, unpublished, nil
 }
 
+// monitoringCredential is a deployed bearer token together with the exact
+// endpoint and OpenID Connect client it was issued for. A slug alone is not
+// enough: an administrator can delete an application and register another
+// under the same slug, and the token must never follow it to a new endpoint.
+type monitoringCredential struct {
+	Token    string
+	URL      string
+	ClientID string
+}
+
 // applicationMonitoringSources is the mapping on its own, so it can be tested
 // without a database behind it.
-func applicationMonitoringSources(apps []identity.ManagedApp, tokens map[string]string) (sources []monitoring.Source, unpublished []string) {
+func applicationMonitoringSources(apps []identity.ManagedApp, tokens map[string]monitoringCredential) (sources []monitoring.Source, unpublished []string) {
 	for _, managed := range apps {
 		endpoint := strings.TrimSpace(managed.MonitoringURL)
 		if endpoint == "" {
 			unpublished = append(unpublished, managed.Name)
 			continue
 		}
-		token := tokens[managed.Slug]
+		credential := tokens[managed.Slug]
+		if credential.Token != "" && (credential.URL != endpoint || credential.ClientID != managed.OIDCClientID) {
+			unpublished = append(unpublished, managed.Name+" (its monitoring credential was deployed for a different endpoint or client)")
+			continue
+		}
+		token := credential.Token
 		if token == "" {
 			// Registered an endpoint but no credential to read it with. Naming
 			// it as unpublished would claim the application is at fault for a

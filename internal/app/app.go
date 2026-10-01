@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/e6qu/shauth/internal/config"
@@ -46,6 +48,7 @@ const logoutCorrelationPath = "/oauth/logout"
 const logoutCompletionCookie = "shauth_logout_completion"
 const logoutCompletionPath = "/oauth/logout/complete"
 const csrfCookie = "shauth_csrf"
+const noticeCookie = "shauth_notice"
 const githubStateCookiePrefix = "shauth_github_state_"
 const entraStateCookiePrefix = "shauth_entra_state_"
 const bootstrapRetryInterval = time.Second
@@ -463,11 +466,16 @@ func (s *Server) Handler() http.Handler {
 	// Outermost, so a request refused by CSRF or rejected before routing is
 	// still counted: those refusals are exactly what an operator is looking
 	// for when something stops working.
-	return s.traffic.observe(mux, securityHeaders(csrfPosts(s.config.PublicURL, mux)))
+	return s.traffic.observe(mux, securityHeaders(s.config.PublicURL, csrfPosts(s.config.PublicURL, s.notices(mux))))
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+func securityHeaders(publicURL *url.URL, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if publicURL.Scheme == "https" {
+			// Every credential this service handles travels over this
+			// origin; a browser must never be talked down to plain HTTP.
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		policy := baseContentSecurityPolicy
 		if r.URL.Path == "/oauth2/sessions/logout" {
 			policy = oidcLogoutContentSecurityPolicy
@@ -504,6 +512,14 @@ if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded"
 	// Forms rendered by the server already carry their CSRF token; this
 	// covers any form inserted into the page after it loaded.
 	_, _ = w.Write([]byte(`document.addEventListener("submit",function(event){var form=event.target;if(!(form instanceof HTMLFormElement)||form.method.toLowerCase()!=="post")return;var input=form.querySelector('input[name="_csrf"]');if(!input){input=document.createElement("input");input.type="hidden";input.name="_csrf";form.appendChild(input)}if(!input.value){var match=document.cookie.match(/(?:^|; )shauth_csrf=([^;]*)/);input.value=match?decodeURIComponent(match[1]):""}},true);`))
+	// A page that arrives with an error moves focus to it, so a screen
+	// reader announces why the submission was refused and keyboard users
+	// start from the explanation.
+	_, _ = w.Write([]byte(`document.addEventListener("DOMContentLoaded",function(){var notice=document.querySelector("main .notice[role=alert]");if(notice){notice.setAttribute("tabindex","-1");notice.focus()}});`))
+	// A form that adds a row in place starts empty again once the server
+	// accepted it. A rejection is retargeted to the form's message area and
+	// keeps what was typed, so it can be corrected.
+	_, _ = w.Write([]byte(`document.addEventListener("htmx:afterRequest",function(event){var form=event.detail.elt;if(form instanceof HTMLFormElement&&form.hasAttribute("data-reset-on-success")&&event.detail.successful&&!event.detail.xhr.getResponseHeader("HX-Retarget")){form.reset()}});`))
 	// A newly inserted table row replaces the empty-state row rather than
 	// appearing beneath it.
 	_, _ = w.Write([]byte(`document.addEventListener("htmx:afterSwap",function(){var empty=document.getElementById("users-empty");if(empty&&empty.parentNode&&empty.parentNode.querySelectorAll("tr").length>1){empty.remove()}});`))
@@ -551,7 +567,16 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 				r = r.WithContext(context.WithValue(r.Context(), csrfTokenKey{}, token))
 			}
 		}
-		if r.Method == http.MethodPost && r.URL.Path != "/oauth2/token" && !strings.HasPrefix(r.URL.Path, "/internal/") {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && strings.HasPrefix(r.URL.Path, "/internal/") && r.Header.Get("Authorization") == "" {
+			// The machine namespace authenticates with bearer tokens, which
+			// a browser never attaches on its own. A request without one is
+			// a cookie-authenticated call, and only this origin may make it.
+			if origin := r.Header.Get("Origin"); origin != "" && !isPublicOrigin(publicURL, origin) {
+				http.Error(w, "cross-origin request denied", http.StatusForbidden)
+				return
+			}
+		}
+		if r.Method == http.MethodPost && !providerOwnedPath(r.URL.Path) && !strings.HasPrefix(r.URL.Path, "/internal/") {
 			if err := r.ParseForm(); err != nil {
 				http.Error(w, "invalid form", http.StatusBadRequest)
 				return
@@ -563,8 +588,7 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 			}
 			origin := r.Header.Get("Origin")
 			if origin != "" && origin != "null" {
-				parsed, err := url.Parse(origin)
-				if err == nil && parsed.Scheme == publicURL.Scheme && parsed.Host == publicURL.Host && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.User == nil {
+				if isPublicOrigin(publicURL, origin) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -575,6 +599,22 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// providerOwnedPath reports the Ory Hydra public endpoints Shauth proxies.
+// Relying parties call them server to server or through standard OAuth
+// browser flows; they carry no Shauth cookie and Hydra applies its own
+// protections, so Shauth's form CSRF token does not apply to them.
+func providerOwnedPath(path string) bool {
+	return strings.HasPrefix(path, "/oauth2/") || path == "/userinfo" || strings.HasPrefix(path, "/.well-known/")
+}
+
+// isPublicOrigin reports whether an Origin header names exactly this
+// service's public origin.
+func isPublicOrigin(publicURL *url.URL, origin string) bool {
+	parsed, err := url.Parse(origin)
+	return err == nil && parsed.Scheme == publicURL.Scheme && parsed.Host == publicURL.Host && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.User == nil
+}
+
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -607,22 +647,56 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "home", s.view(r, "Home", map[string]any{"User": newUserRecord(user), "SignedIn": err == nil, "IsAdmin": err == nil && user.Role == identity.RoleAdmin}))
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := s.current(r); err == nil {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	next := relativeNext(r.URL.Query().Get("next"))
+	// An application may ask for a fresh sign-in (OIDC prompt=login or
+	// max_age). Only then does a signed-in person see this page; otherwise
+	// they are already where signing in would take them.
+	reauthenticate := r.URL.Query().Get("reauthenticate") == "1" && isOIDCNext(next)
+	if user, _, err := s.current(r); err == nil {
+		if !reauthenticate {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		if isOIDCNext(next) {
+			allowOIDCFormAction(w)
+		}
+		s.render(w, "login", s.view(r, "Sign in again", map[string]any{"Next": next, "Reauthenticate": true, "Username": user.Username, "EntraEnabled": s.entraOAuth != nil, "SignedIn": false}))
 		return
 	}
-	next := relativeNext(r.URL.Query().Get("next"))
 	if isOIDCNext(next) {
 		allowOIDCFormAction(w)
 	}
-	s.render(w, "login", s.view(r, "Sign in", map[string]any{"Next": next, "Error": r.URL.Query().Get("error"), "EntraEnabled": s.entraOAuth != nil, "SignedIn": false}))
+	s.render(w, "login", s.view(r, "Sign in", map[string]any{"Next": next, "Error": noticeError(r), "EntraEnabled": s.entraOAuth != nil, "SignedIn": false}))
 }
 func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		s.failPage(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
-	username := r.Form.Get("username")
+	username := strings.TrimSpace(r.Form.Get("username"))
+	next := relativeNext(r.Form.Get("next"))
+	throttled, err := s.store.PasswordSignInThrottled(r.Context(), username, clientIP(r), time.Now())
+	if err != nil {
+		// Without the count, a password cannot safely be checked.
+		observe.Errorf("check password sign-in throttle: %v", err)
+		s.failPage(w, r, http.StatusServiceUnavailable, "Password sign-in is temporarily unavailable. Try again shortly, or use another sign-in method.")
+		return
+	}
+	if throttled {
+		// Refused before the password is checked, so guessing gains nothing.
+		// The failure is not counted again: the limit lifts on its own once
+		// the earlier failures leave the window.
+		s.recordSignIn(r, identity.AuditSignInBlocked, "password", username, "", "too many recent failures")
+		if isOIDCNext(next) {
+			allowOIDCFormAction(w)
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		s.render(w, "login", s.view(r, "Sign in", map[string]any{
+			"Error": fmt.Sprintf("Too many unsuccessful sign-in attempts. Wait %d minutes and try again, or use another sign-in method.", int(identity.PasswordFailureWindow/time.Minute)),
+			"Next":  next, "Username": username, "EntraEnabled": s.entraOAuth != nil, "SignedIn": false,
+		}))
+		return
+	}
 	user, reason, err := s.store.AuthenticatePassword(r.Context(), username, r.Form.Get("password"))
 	if err != nil {
 		// The person is told only that the pair did not work; the audit
@@ -633,8 +707,11 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 			event = identity.AuditSignInBlocked
 		}
 		s.recordSignIn(r, event, "password", username, "", reason)
+		if isOIDCNext(next) {
+			allowOIDCFormAction(w)
+		}
 		s.render(w, "login", s.view(r, "Sign in", map[string]any{
-			"Error": "Invalid username or password.", "Next": relativeNext(r.Form.Get("next")),
+			"Error": "Invalid username or password.", "Next": next, "Username": username,
 			"EntraEnabled": s.entraOAuth != nil, "SignedIn": false,
 		}))
 		return
@@ -643,7 +720,7 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordSignIn(r, identity.AuditSignInSucceeded, "password", user.Username, user.ID, "")
-	http.Redirect(w, r, relativeNext(r.Form.Get("next")), http.StatusSeeOther)
+	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 func (s *Server) logoutConfirm(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
@@ -717,19 +794,78 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusInternalServerError, "could not begin GitHub login")
 		return
 	}
-	s.setCookie(w, &http.Cookie{Name: githubStateCookieName(state), Value: relativeNext(r.URL.Query().Get("next")), Path: "/oauth/github/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
-	http.Redirect(w, r, s.oauth.AuthCodeURL(state), http.StatusFound)
+	verifier := oauth2.GenerateVerifier()
+	transaction, err := encodeUpstreamTransaction(upstreamTransaction{Next: relativeNext(r.URL.Query().Get("next")), Verifier: verifier})
+	if err != nil {
+		s.failPage(w, r, http.StatusInternalServerError, "GitHub sign-in could not start. Try again.")
+		return
+	}
+	s.setCookie(w, &http.Cookie{Name: githubStateCookieName(state), Value: transaction, Path: "/oauth/github/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+	http.Redirect(w, r, s.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier)), http.StatusFound)
+}
+
+// upstreamTransaction is what a browser carries, in a state-named,
+// callback-scoped HttpOnly cookie, between leaving for an upstream identity
+// provider and returning: where to go afterwards and the PKCE verifier (and,
+// for OpenID Connect providers, the nonce) bound to this one attempt.
+type upstreamTransaction struct {
+	Next     string `json:"next"`
+	Verifier string `json:"verifier"`
+	Nonce    string `json:"nonce,omitempty"`
+}
+
+func encodeUpstreamTransaction(transaction upstreamTransaction) (string, error) {
+	encoded, err := json.Marshal(transaction)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func decodeUpstreamTransaction(value string) (upstreamTransaction, bool) {
+	var transaction upstreamTransaction
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || json.Unmarshal(decoded, &transaction) != nil || transaction.Verifier == "" {
+		return upstreamTransaction{}, false
+	}
+	return transaction, true
+}
+
+// upstreamSignInCancelled answers a provider that returned an OAuth error
+// instead of a code, which is usually the person choosing not to continue.
+// They return to the sign-in page, with their destination intact, rather
+// than to a gateway error.
+func (s *Server) upstreamSignInCancelled(w http.ResponseWriter, r *http.Request, provider, next string) {
+	message := provider + " sign-in did not complete. Choose a sign-in method to try again."
+	if r.URL.Query().Get("error") == "access_denied" {
+		message = provider + " sign-in was cancelled. Choose a sign-in method to try again."
+	}
+	if isOIDCNext(next) {
+		allowOIDCFormAction(w)
+	}
+	w.WriteHeader(http.StatusUnauthorized)
+	s.render(w, "login", s.view(r, "Sign in", map[string]any{"Next": next, "Error": message, "EntraEnabled": s.entraOAuth != nil, "SignedIn": false}))
 }
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	cookieName, validState := validGitHubStateCookieName(state)
 	cookie, err := r.Cookie(cookieName)
 	if !validState || err != nil {
-		s.failPage(w, r, http.StatusBadRequest, "GitHub login state did not match")
+		s.failPage(w, r, http.StatusBadRequest, "This GitHub sign-in link has expired or was already used. Sign in again.")
 		return
 	}
 	s.expireCookieAtPath(w, cookieName, "/oauth/github/callback")
-	token, err := s.oauth.Exchange(r.Context(), r.URL.Query().Get("code"))
+	transaction, ok := decodeUpstreamTransaction(cookie.Value)
+	if !ok {
+		s.failPage(w, r, http.StatusBadRequest, "This GitHub sign-in link has expired or was already used. Sign in again.")
+		return
+	}
+	if r.URL.Query().Get("error") != "" {
+		s.recordSignIn(r, identity.AuditSignInFailed, "github", "", "", "GitHub returned "+r.URL.Query().Get("error"))
+		s.upstreamSignInCancelled(w, r, "GitHub", relativeNext(transaction.Next))
+		return
+	}
+	token, err := s.oauth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(transaction.Verifier))
 	if err != nil {
 		observe.Errorf("exchange GitHub authorization code: %v", err)
 		s.recordSignIn(r, identity.AuditSignInFailed, "github", "", "", err.Error())
@@ -767,7 +903,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordSignIn(r, identity.AuditSignInSucceeded, "github", user.Username, user.ID, "")
-	http.Redirect(w, r, relativeNext(cookie.Value), http.StatusSeeOther)
+	http.Redirect(w, r, relativeNext(transaction.Next), http.StatusSeeOther)
 }
 
 func (s *Server) entraStart(w http.ResponseWriter, r *http.Request) {
@@ -785,13 +921,14 @@ func (s *Server) entraStart(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusInternalServerError, "could not begin Microsoft Entra ID login")
 		return
 	}
-	cookieValue, err := json.Marshal(map[string]string{"next": relativeNext(r.URL.Query().Get("next")), "nonce": nonce})
+	verifier := oauth2.GenerateVerifier()
+	cookieValue, err := encodeUpstreamTransaction(upstreamTransaction{Next: relativeNext(r.URL.Query().Get("next")), Verifier: verifier, Nonce: nonce})
 	if err != nil {
-		s.failPage(w, r, http.StatusInternalServerError, "could not begin Microsoft Entra ID login")
+		s.failPage(w, r, http.StatusInternalServerError, "Microsoft Entra ID sign-in could not start. Try again.")
 		return
 	}
-	s.setCookie(w, &http.Cookie{Name: entraStateCookieName(state), Value: base64.RawURLEncoding.EncodeToString(cookieValue), Path: "/oauth/entra/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
-	http.Redirect(w, r, s.entraOAuth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce)), http.StatusFound)
+	s.setCookie(w, &http.Cookie{Name: entraStateCookieName(state), Value: cookieValue, Path: "/oauth/entra/callback", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+	http.Redirect(w, r, s.entraOAuth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 }
 
 type entraClaims struct {
@@ -813,17 +950,21 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 	cookieName, validState := validEntraStateCookieName(state)
 	cookie, err := r.Cookie(cookieName)
 	if !validState || err != nil {
-		s.failPage(w, r, http.StatusBadRequest, "Microsoft Entra ID login state did not match")
+		s.failPage(w, r, http.StatusBadRequest, "This Microsoft Entra ID sign-in link has expired or was already used. Sign in again.")
 		return
 	}
 	s.expireCookieAtPath(w, cookieName, "/oauth/entra/callback")
-	var transaction map[string]string
-	transactionJSON, err := base64.RawURLEncoding.DecodeString(cookie.Value)
-	if err != nil || json.Unmarshal(transactionJSON, &transaction) != nil || transaction["nonce"] == "" {
-		s.failPage(w, r, http.StatusBadRequest, "Microsoft Entra ID login state was invalid")
+	transaction, ok := decodeUpstreamTransaction(cookie.Value)
+	if !ok || transaction.Nonce == "" {
+		s.failPage(w, r, http.StatusBadRequest, "This Microsoft Entra ID sign-in link has expired or was already used. Sign in again.")
 		return
 	}
-	token, err := s.entraOAuth.Exchange(r.Context(), r.URL.Query().Get("code"))
+	if r.URL.Query().Get("error") != "" {
+		s.recordSignIn(r, identity.AuditSignInFailed, "entra", "", "", "Microsoft Entra ID returned "+r.URL.Query().Get("error"))
+		s.upstreamSignInCancelled(w, r, "Microsoft Entra ID", relativeNext(transaction.Next))
+		return
+	}
+	token, err := s.entraOAuth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(transaction.Verifier))
 	if err != nil {
 		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID authorization failed")
 		return
@@ -843,7 +984,7 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID identity claims were invalid")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(transaction["nonce"])) != 1 || !strings.EqualFold(claims.TenantID, s.config.EntraTenantID) || claims.ObjectID == "" || claims.Subject == "" {
+	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(transaction.Nonce)) != 1 || !strings.EqualFold(claims.TenantID, s.config.EntraTenantID) || claims.ObjectID == "" || claims.Subject == "" {
 		s.failPage(w, r, http.StatusForbidden, "Microsoft Entra ID identity did not match this Shauth tenant")
 		return
 	}
@@ -860,7 +1001,7 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordSignIn(r, identity.AuditSignInSucceeded, "entra", user.Username, user.ID, "")
-	http.Redirect(w, r, relativeNext(transaction["next"]), http.StatusSeeOther)
+	http.Redirect(w, r, relativeNext(transaction.Next), http.StatusSeeOther)
 }
 
 func entraEmail(claims entraClaims) (string, bool) {
@@ -919,8 +1060,25 @@ func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if loginRequest.Skip && loginRequest.Subject != user.ID {
-		s.failPage(w, r, http.StatusForbidden, "OAuth login request belongs to a different account")
+		s.failPage(w, r, http.StatusForbidden, "This sign-in request belongs to a different account. Return to the application and sign in again.")
 		return
+	}
+	if !loginRequest.Skip {
+		promptLogin, maxAge := reauthenticationDemand(loginRequest.RequestURL)
+		satisfied := true
+		if promptLogin {
+			cookie, cookieErr := r.Cookie(reauthenticationCookie)
+			satisfied = cookieErr == nil && reauthenticatedSince(cookie.Value, challenge, session.CreatedAt)
+		}
+		if maxAge >= 0 && time.Since(session.CreatedAt) > maxAge {
+			satisfied = false
+		}
+		if !satisfied {
+			s.setCookie(w, &http.Cookie{Name: reauthenticationCookie, Value: reauthenticationMarker(challenge, time.Now()), Path: "/oauth/login", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+			http.Redirect(w, r, "/login?reauthenticate=1&next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+			return
+		}
+		s.expireCookieAtPath(w, reauthenticationCookie, "/oauth/login")
 	}
 	redirect, err := s.hydraAccept(r.Context(), "/admin/oauth2/auth/requests/login/accept", challenge, map[string]any{"subject": user.ID, "identity_provider_session_id": session.ID, "remember": true, "remember_for": int64(policy.OIDCSessionLifetime / time.Second)})
 	if err != nil {
@@ -951,7 +1109,11 @@ func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	consent, err := s.hydraConsentRequest(r.Context(), challenge)
 	if err != nil {
-		s.failPage(w, r, http.StatusBadGateway, "could not load OAuth consent request")
+		s.failPage(w, r, http.StatusBadGateway, "The application's authorization request could not be loaded. Return to the application and try again.")
+		return
+	}
+	if consent.Subject != user.ID {
+		s.failPage(w, r, http.StatusForbidden, consentSubjectMismatch)
 		return
 	}
 	managed, err := s.store.IsManagedOIDCClient(r.Context(), consent.ClientID)
@@ -978,11 +1140,67 @@ func (s *Server) hydraConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowOIDCFormAction(w)
-	s.render(w, "consent", s.view(r, "Authorize application", map[string]any{"Challenge": challenge, "Scopes": consent.Scopes}))
+	application := consent.ClientName
+	if application == "" {
+		application = consent.ClientID
+	}
+	s.render(w, "consent", s.view(r, "Authorize application", map[string]any{"Challenge": challenge, "Scopes": describeScopes(consent.Scopes), "Application": application, "ClientID": consent.ClientID, "SignedIn": true, "User": newUserRecord(user), "IsAdmin": user.Role == identity.RoleAdmin}))
 }
+
+// consentSubjectMismatch explains a consent challenge that belongs to a
+// different account than the one signed in to this browser, for example
+// after switching accounts in another tab.
+const consentSubjectMismatch = "This authorization request was started by a different account than the one signed in now. Return to the application and sign in again."
+
+type scopeDescription struct{ Code, Description string }
+
+// describeScopes states what each requested scope releases in plain words,
+// keeping the protocol name visible for people who need it.
+func describeScopes(scopes []string) []scopeDescription {
+	descriptions := map[string]string{
+		"openid":         "Confirm who you are with your Shauth account.",
+		"profile":        "See your username.",
+		"email":          "See your email address and whether it is verified.",
+		"offline_access": "Stay connected after you close the application, until you sign out.",
+	}
+	described := make([]scopeDescription, 0, len(scopes))
+	for _, scope := range scopes {
+		description, ok := descriptions[scope]
+		if !ok {
+			description = "An application-specific permission."
+		}
+		described = append(described, scopeDescription{Code: scope, Description: description})
+	}
+	return described
+}
+
+// grantableScopes keeps only the submitted scopes the request actually asked
+// for, so a crafted form cannot widen the grant.
+func grantableScopes(requested, submitted []string) []string {
+	allowed := make(map[string]bool, len(requested))
+	for _, scope := range requested {
+		allowed[scope] = true
+	}
+	granted := make([]string, 0, len(submitted))
+	seen := make(map[string]bool, len(submitted))
+	for _, scope := range submitted {
+		if allowed[scope] && !seen[scope] {
+			seen[scope] = true
+			granted = append(granted, scope)
+		}
+	}
+	return granted
+}
+
+var oauthErrorCodePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
 func (s *Server) hydraError(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimSpace(r.URL.Query().Get("error"))
+	// The code is shown to help support; anything that is not an OAuth
+	// error code is a crafted link and is not repeated on the page.
+	if !oauthErrorCodePattern.MatchString(code) {
+		code = ""
+	}
 	message := "The authorization request could not be completed. Return to the connected application and try again."
 	switch code {
 	case "access_denied":
@@ -998,20 +1216,38 @@ func (s *Server) hydraError(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 	user, session, err := s.current(r)
 	if err != nil {
-		http.Redirect(w, r, "/login", 303)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		s.failPage(w, r, http.StatusBadRequest, "invalid form")
+		s.failPage(w, r, http.StatusBadRequest, "The form could not be read. Go back and try again.")
 		return
 	}
 	challenge := r.Form.Get("challenge")
 	consent, err := s.hydraConsentRequest(r.Context(), challenge)
 	if err != nil {
-		s.failPage(w, r, http.StatusBadGateway, "could not load OAuth consent request")
+		s.failPage(w, r, http.StatusBadGateway, "The application's authorization request could not be loaded. Return to the application and try again.")
 		return
 	}
-	redirect, err := s.acceptHydraConsent(r.Context(), challenge, r.Form["scope"], user)
+	if consent.Subject != user.ID {
+		s.failPage(w, r, http.StatusForbidden, consentSubjectMismatch)
+		return
+	}
+	if r.Form.Get("decision") == "deny" {
+		redirect, err := s.hydraAccept(r.Context(), "/admin/oauth2/auth/requests/consent/reject", challenge, map[string]any{"error": "access_denied", "error_description": "The user denied the request."})
+		if err != nil {
+			s.failPage(w, r, http.StatusBadGateway, "Your refusal could not be sent to the application. Close this page; no access was granted.")
+			return
+		}
+		http.Redirect(w, r, redirect, http.StatusFound)
+		return
+	}
+	scopes := grantableScopes(consent.Scopes, r.Form["scope"])
+	if len(scopes) == 0 {
+		s.failPage(w, r, http.StatusBadRequest, "No requested permission was granted. Return to the application and try again.")
+		return
+	}
+	redirect, err := s.acceptHydraConsent(r.Context(), challenge, scopes, user)
 	if err != nil {
 		s.failPage(w, r, http.StatusBadGateway, "could not complete OAuth consent")
 		return
@@ -1025,7 +1261,7 @@ func (s *Server) hydraConsentAccept(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusConflict, "browser session ended before OAuth consent completed")
 		return
 	}
-	http.Redirect(w, r, redirect, 302)
+	http.Redirect(w, r, redirect, http.StatusFound)
 }
 
 func (s *Server) acceptHydraConsent(ctx context.Context, challenge string, scopes []string, user identity.User) (string, error) {
@@ -1290,7 +1526,7 @@ func (s *Server) adminConnectors(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.render(w, "connectors", s.view(r, "Connectors", map[string]any{
+	s.render(w, "connectors", s.view(r, "Identity sources", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Connectors": s.connectors(),
 	}))
 }
@@ -1300,7 +1536,10 @@ type managedAppView struct {
 	// CSRF lets the re-validation control render inside a component that is
 	// also served standalone as an HTMX fragment, where the page root is
 	// not in scope.
-	CSRF                   string
+	CSRF string
+	// ReturnTo is the page the re-validation control returns to, so an
+	// operator stays where they started.
+	ReturnTo               string
 	DisplayReleaseRevision string
 	Healthy                bool
 	StatusCode             int
@@ -1403,9 +1642,10 @@ func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
 	token := csrfToken(r)
 	for index := range apps {
 		apps[index].CSRF = token
+		apps[index].ReturnTo = "/apps"
 	}
 	setMonitoringPageURLs(apps, user.Role)
-	s.render(w, "apps", s.view(r, "Apps", map[string]any{"SignedIn": true, "User": newUserRecord(user), "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin}))
+	s.render(w, "apps", s.view(r, "Apps", map[string]any{"SignedIn": true, "User": newUserRecord(user), "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin, "Error": noticeError(r), "Done": noticeDone(r)}))
 }
 
 func (s *Server) appValidationStatus(w http.ResponseWriter, r *http.Request) {
@@ -1441,7 +1681,7 @@ func (s *Server) adminApps(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.renderAdminApps(w, r, http.StatusOK, r.URL.Query().Get("error"), identity.ManagedApp{})
+	s.renderAdminApps(w, r, http.StatusOK, noticeError(r), identity.ManagedApp{})
 }
 
 func (s *Server) renderAdminApps(w http.ResponseWriter, r *http.Request, status int, message string, form identity.ManagedApp) {
@@ -1454,13 +1694,14 @@ func (s *Server) renderAdminApps(w http.ResponseWriter, r *http.Request, status 
 	token := csrfToken(r)
 	for index := range apps {
 		apps[index].CSRF = token
+		apps[index].ReturnTo = "/admin/apps"
 	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
-	s.render(w, "admin-apps", s.view(r, "Applications", map[string]any{
+	s.render(w, "admin-apps", s.view(r, "Connected apps", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Apps": apps,
-		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+		"Error": message, "Done": noticeDone(r), "Form": form,
 	}))
 }
 
@@ -1490,7 +1731,7 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 		s.renderAdminApps(w, r, status, message, app)
 		return
 	}
-	http.Redirect(w, r, "/admin/apps?done="+url.QueryEscape("Registered the application "+created.Name+"."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/apps", false, "Registered the application "+created.Name+".")
 }
 
 func (s *Server) validateApp(w http.ResponseWriter, r *http.Request) {
@@ -1503,11 +1744,14 @@ func (s *Server) validateApp(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "queue application validation", "/apps", err)
 		return
 	}
-	destination := "/apps#validation-" + url.PathEscape(r.PathValue("id"))
-	if user.Role == identity.RoleAdmin && strings.HasPrefix(r.Referer(), s.config.PublicURL.ResolveReference(&url.URL{Path: "/admin/apps"}).String()) {
-		destination = "/admin/apps#validation-" + url.PathEscape(r.PathValue("id"))
+	// The control names the page it sits on; Shauth sends no Referer, so
+	// that cannot be inferred. Only the catalog and, for administrators,
+	// the application pages are accepted.
+	destination := "/apps"
+	if requested := r.FormValue("return_to"); strictRelativeNext(requested) && user.Role == identity.RoleAdmin && (requested == "/admin/apps" || strings.HasPrefix(requested, "/admin/apps/")) {
+		destination = requested
 	}
-	http.Redirect(w, r, destination, http.StatusSeeOther)
+	s.redirectWithNotice(w, r, destination+"#validation-"+url.PathEscape(r.PathValue("id")), false, "Both checks were queued. Their results appear here as they finish.")
 }
 
 type validatorResult struct {
@@ -1966,14 +2210,14 @@ func (s *Server) adminDeleteApp(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "delete managed app", "/admin/apps", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/apps?done="+url.QueryEscape("The application was removed."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/apps", false, "The application was removed.")
 }
 
 func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.renderOIDCClients(w, r, http.StatusOK, r.URL.Query().Get("error"), oidcClientInput{})
+	s.renderOIDCClients(w, r, http.StatusOK, noticeError(r), oidcClientInput{})
 }
 
 func (s *Server) renderOIDCClients(w http.ResponseWriter, r *http.Request, status int, message string, form oidcClientInput) {
@@ -1988,7 +2232,7 @@ func (s *Server) renderOIDCClients(w http.ResponseWriter, r *http.Request, statu
 	}
 	s.render(w, "oidc-clients", s.view(r, "OAuth clients", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Clients": clients,
-		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+		"Error": message, "Done": noticeDone(r), "Form": form,
 	}))
 }
 
@@ -2022,7 +2266,7 @@ func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
 		s.renderOIDCClients(w, r, status, message, input)
 		return
 	}
-	http.Redirect(w, r, "/admin/clients?done="+url.QueryEscape("Registered the OAuth client "+input.ID+"."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/clients", false, "Registered the OAuth client "+input.ID+".")
 }
 
 func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
@@ -2034,7 +2278,7 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "delete OAuth client", "/admin/clients", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/clients?done="+url.QueryEscape("Deleted the OAuth client "+clientID+"."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/clients", false, "Deleted the OAuth client "+clientID+".")
 }
 
 // errHydraClientNotFound reports that Ory Hydra has no client with the
@@ -2071,7 +2315,7 @@ func (s *Server) adminSessionPolicy(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusInternalServerError, "The session policy could not be loaded.")
 		return
 	}
-	s.renderSessionPolicy(w, r, http.StatusOK, r.URL.Query().Get("error"), newSessionPolicyRecord(policy))
+	s.renderSessionPolicy(w, r, http.StatusOK, noticeError(r), newSessionPolicyRecord(policy))
 }
 
 // renderSessionPolicy draws the policy form from a record, so a rejected
@@ -2088,9 +2332,9 @@ func (s *Server) renderSessionPolicy(w http.ResponseWriter, r *http.Request, sta
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
-	s.render(w, "session-policy", s.view(r, "Session limits", map[string]any{
+	s.render(w, "session-policy", s.view(r, "Session time limits", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Policy": policy,
-		"Error": message, "Saved": r.URL.Query().Get("saved") == "true",
+		"Error": message, "Done": noticeDone(r),
 	}))
 }
 
@@ -2112,7 +2356,7 @@ func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request
 		s.renderSessionPolicy(w, r, status, message, request)
 		return
 	}
-	http.Redirect(w, r, "/admin/session-policy?saved=true", http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/session-policy", false, "Session time limits were saved and applied to every OAuth client.")
 }
 
 // parseSessionPolicyForm converts the form into the same record the JSON
@@ -2534,7 +2778,7 @@ func (s *Server) adminGitHubMappings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.renderGitHubMappings(w, r, http.StatusOK, r.URL.Query().Get("error"), githubRoleMappingCreateRequest{Kind: "team", Role: string(identity.RoleDeveloper)})
+	s.renderGitHubMappings(w, r, http.StatusOK, noticeError(r), githubRoleMappingCreateRequest{Kind: "team", Role: string(identity.RoleDeveloper)})
 }
 
 func (s *Server) renderGitHubMappings(w http.ResponseWriter, r *http.Request, status int, message string, form githubRoleMappingCreateRequest) {
@@ -2551,9 +2795,9 @@ func (s *Server) renderGitHubMappings(w http.ResponseWriter, r *http.Request, st
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
-	s.render(w, "github-mappings", s.view(r, "GitHub access", map[string]any{
+	s.render(w, "github-mappings", s.view(r, "GitHub access rules", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Mappings": records,
-		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+		"Error": message, "Done": noticeDone(r), "Form": form,
 	}))
 }
 func (s *Server) adminCreateGitHubMapping(w http.ResponseWriter, r *http.Request) {
@@ -2571,7 +2815,7 @@ func (s *Server) adminCreateGitHubMapping(w http.ResponseWriter, r *http.Request
 		s.renderGitHubMappings(w, r, status, message, request)
 		return
 	}
-	http.Redirect(w, r, "/admin/github?done="+url.QueryEscape("Added the access rule for "+mapping.Target+"."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/github", false, "Added the access rule for "+mapping.Target+".")
 }
 func (s *Server) adminDeleteGitHubMapping(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -2581,13 +2825,13 @@ func (s *Server) adminDeleteGitHubMapping(w http.ResponseWriter, r *http.Request
 		s.failOperation(w, r, "delete GitHub role mapping", "/admin/github", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/github?done="+url.QueryEscape("The access rule was removed."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/github", false, "The access rule was removed.")
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	s.renderUsers(w, r, http.StatusOK, r.URL.Query().Get("error"), userCreateRequest{Role: string(identity.RoleDeveloper)})
+	s.renderUsers(w, r, http.StatusOK, noticeError(r), userCreateRequest{Role: string(identity.RoleDeveloper)})
 }
 
 // renderUsers draws the users page from the same records the API publishes,
@@ -2611,9 +2855,9 @@ func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, status int,
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
-	s.render(w, "users", s.view(r, "Users", map[string]any{
+	s.render(w, "users", s.view(r, "Users and local accounts", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Users": records, "Query": query,
-		"Error": message, "Done": r.URL.Query().Get("done"), "Form": form,
+		"Error": message, "Done": noticeDone(r), "Form": form,
 		"Page": browserPage(r, page, len(records), total),
 	}))
 }
@@ -2631,18 +2875,26 @@ func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.createUser(r.Context(), request, s.currentActor(r))
 	if err != nil {
-		// The form posts through HTMX, which does not swap a failed
-		// response, so a rejection must re-render the page with the
-		// reason and the operator's typed values still in place.
 		status, message := describeOperationFailure("create user", err)
+		if r.Header.Get("HX-Request") == "true" && status < http.StatusInternalServerError {
+			// HTMX does not swap an error status, so a rejection is
+			// answered with 200 and redirected into the form's live
+			// region; the operator's typed values stay where they are.
+			w.Header().Set("HX-Retarget", "#user-create-feedback")
+			w.Header().Set("HX-Reswap", "innerHTML")
+			s.render(w, "user-create-rejected", message)
+			return
+		}
+		// Without HTMX, the page is drawn again with the reason and the
+		// operator's typed values still in place.
 		s.renderUsers(w, r, status, message, request)
 		return
 	}
 	if r.Header.Get("HX-Request") == "true" {
-		s.render(w, "user-row", newUserRecord(user))
+		s.render(w, "user-created", newUserRecord(user))
 		return
 	}
-	http.Redirect(w, r, "/admin/users?done="+url.QueryEscape("Created the account "+user.Username+"."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/users", false, "Created the account "+user.Username+".")
 }
 func (s *Server) adminInvite(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -2662,7 +2914,7 @@ func (s *Server) adminInvite(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "create invitation", "/admin/invitations", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/invitations?done="+url.QueryEscape("Invitation sent to "+invitation.Email+"."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/invitations", false, "Invitation sent to "+invitation.Email+".")
 }
 func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -2684,7 +2936,7 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "invitations", s.view(r, "Invitations", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Invitations": records,
-		"Error": r.URL.Query().Get("error"), "Done": r.URL.Query().Get("done"),
+		"Error": noticeError(r), "Done": noticeDone(r),
 		"Page": browserPage(r, page, len(records), total),
 	}))
 }
@@ -2697,7 +2949,7 @@ func (s *Server) adminRevokeInvitation(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "revoke invitation", "/admin/invitations", err)
 		return
 	}
-	http.Redirect(w, r, "/admin/invitations?done="+url.QueryEscape("The invitation was withdrawn."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/admin/invitations", false, "The invitation was withdrawn.")
 }
 
 // adminDisableUser is the browser twin of disableUserAPI: it ends every
@@ -2718,7 +2970,7 @@ func (s *Server) adminDisableUser(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "disable account", account, err)
 		return
 	}
-	http.Redirect(w, r, account+"?done="+url.QueryEscape("The account was disabled and every session ended."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, account, false, "The account was disabled and every session ended.")
 }
 
 func (s *Server) adminEnableUser(w http.ResponseWriter, r *http.Request) {
@@ -2731,7 +2983,7 @@ func (s *Server) adminEnableUser(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "enable account", account, err)
 		return
 	}
-	http.Redirect(w, r, account+"?done="+url.QueryEscape("The account was enabled. It must sign in again."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, account, false, "The account was enabled. It must sign in again.")
 }
 func (s *Server) acceptInvitation(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
@@ -2813,6 +3065,7 @@ func (s *Server) adminApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		views[index].CSRF = token
+		views[index].ReturnTo = "/admin/apps/" + url.PathEscape(r.PathValue("slug"))
 		history, err := s.store.AppValidationRunHistory(r.Context(), slug, 20)
 		if err != nil {
 			observe.Errorf("read validation history for %s: %v", slug, err)
@@ -2825,7 +3078,7 @@ func (s *Server) adminApp(w http.ResponseWriter, r *http.Request) {
 		}
 		s.render(w, "admin-app", s.view(r, views[index].Name, map[string]any{
 			"SignedIn": true, "IsAdmin": true, "App": views[index], "History": records,
-			"Done": r.URL.Query().Get("done"), "Error": r.URL.Query().Get("error"),
+			"Done": noticeDone(r), "Error": noticeError(r),
 		}))
 		return
 	}
@@ -2858,7 +3111,7 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "sessions", s.view(r, user.Username+" · sessions", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Sessions": records, "UserID": userID,
-		"Account": newUserRecord(user), "Error": r.URL.Query().Get("error"), "Done": r.URL.Query().Get("done"),
+		"Account": newUserRecord(user), "Error": noticeError(r), "Done": noticeDone(r),
 	}))
 }
 func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
@@ -2871,7 +3124,7 @@ func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
 		s.failOperation(w, r, "revoke account sessions", account, err)
 		return
 	}
-	http.Redirect(w, r, account+"?done="+url.QueryEscape("Every session for this account was ended."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, account, false, "Every session for this account was ended.")
 }
 
 // sessionResetAPI is the token-authenticated counterpart of adminRevokeSessions:
@@ -2926,7 +3179,7 @@ func (s *Server) adminRevokeSession(w http.ResponseWriter, r *http.Request) {
 	if destination == "" {
 		destination = "/admin/users/" + url.PathEscape(revoked.UserID)
 	}
-	http.Redirect(w, r, destination+"?done="+url.QueryEscape("The session was ended."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, destination, false, "The session was ended.")
 }
 
 func (s *Server) revokeHydraLoginSession(ctx context.Context, sessionID string) error {
@@ -2943,7 +3196,8 @@ func (s *Server) revokeHydraLoginSession(ctx context.Context, sessionID string) 
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
+	// A login session Hydra no longer holds is already revoked.
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("Hydra login session deletion returned HTTP %d", response.StatusCode)
 	}
 	return nil
@@ -2990,13 +3244,17 @@ func (s *Server) revokeHydraSubjectSessions(ctx context.Context, subject string)
 type hydraConsent struct {
 	RequestedScope []string `json:"requested_scope"`
 	LoginSessionID string   `json:"login_session_id"`
+	Subject        string   `json:"subject"`
 	Client         struct {
-		ID string `json:"client_id"`
+		ID   string `json:"client_id"`
+		Name string `json:"client_name"`
 	} `json:"client"`
 }
 
 type hydraConsentRequest struct {
 	ClientID       string
+	ClientName     string
+	Subject        string
 	Scopes         []string
 	LoginSessionID string
 }
@@ -3022,7 +3280,7 @@ func (s *Server) hydraConsentRequest(ctx context.Context, challenge string) (hyd
 	if consent.Client.ID == "" || len(consent.RequestedScope) == 0 {
 		return hydraConsentRequest{}, fmt.Errorf("Hydra consent request is missing a client or scopes")
 	}
-	return hydraConsentRequest{ClientID: consent.Client.ID, Scopes: consent.RequestedScope, LoginSessionID: consent.LoginSessionID}, nil
+	return hydraConsentRequest{ClientID: consent.Client.ID, ClientName: consent.Client.Name, Subject: consent.Subject, Scopes: consent.RequestedScope, LoginSessionID: consent.LoginSessionID}, nil
 }
 func (s *Server) monitoring(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -3157,9 +3415,25 @@ func (s *Server) recordSignIn(r *http.Request, eventType, method, username, subj
 }
 
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, user identity.User) bool {
+	// A browser holds one Shauth session. Signing in again replaces the
+	// previous one instead of leaving it alive, unseen, behind an
+	// overwritten cookie. Switching to another account also ends the
+	// previous person's application sessions. Re-authenticating as the same
+	// person (for an application's prompt=login) keeps them: Ory Hydra's
+	// login session for this browser is rebound to the new browser session
+	// the next time an application signs in.
+	if previousUser, previousSession, err := s.current(r); err == nil {
+		if previousUser.ID != user.ID {
+			if _, err := s.revokeSession(r.Context(), previousSession.ID, browserActor(r, previousUser, previousSession)); err != nil && !errors.Is(err, identity.ErrActiveSessionNotFound) {
+				observe.Errorf("end the previous account's session while switching accounts: %v", err)
+			}
+		} else if err := s.store.RevokeSession(r.Context(), previousSession.ID, time.Now()); err != nil && !errors.Is(err, identity.ErrActiveSessionNotFound) {
+			observe.Errorf("replace the browser session on a repeated sign-in: %v", err)
+		}
+	}
 	raw, session, err := s.store.CreateSession(r.Context(), user.ID, r.UserAgent(), clientIP(r), time.Now())
 	if err != nil {
-		s.failPage(w, r, http.StatusInternalServerError, "could not create session")
+		s.failPage(w, r, http.StatusInternalServerError, "Your session could not be started. Try signing in again.")
 		return false
 	}
 	s.setCookie(w, &http.Cookie{Name: browserSessionCookie, Value: raw, Path: "/", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
@@ -3172,6 +3446,73 @@ func jsonBody(value any) (*bytes.Reader, error) {
 	}
 	return bytes.NewReader(encoded), nil
 }
+
+// A notice is the one-line outcome of a form submission ("Created the account
+// ada."), shown once on the page the submission redirects to. It travels in a
+// short-lived HttpOnly cookie that only this server sets, bound to the
+// destination path, rather than in the URL: a query string would let anyone
+// put their own words on a Shauth page with a crafted link.
+type notice struct {
+	Path    string `json:"path"`
+	Failure bool   `json:"failure,omitempty"`
+	Message string `json:"message"`
+}
+
+type noticeKey struct{}
+
+// redirectWithNotice ends a form submission by redirecting to destination,
+// which then shows message once.
+func (s *Server) redirectWithNotice(w http.ResponseWriter, r *http.Request, destination string, failure bool, message string) {
+	target, err := url.Parse(destination)
+	if err == nil {
+		encoded, encodeErr := json.Marshal(notice{Path: target.Path, Failure: failure, Message: message})
+		if encodeErr == nil {
+			s.setCookie(w, &http.Cookie{Name: noticeCookie, Value: base64.RawURLEncoding.EncodeToString(encoded), Path: "/", HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 60})
+		}
+	}
+	http.Redirect(w, r, destination, http.StatusSeeOther)
+}
+
+// notices consumes a pending notice when the browser arrives at the page it
+// was written for, so it is shown exactly once.
+func (s *Server) notices(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(noticeCookie)
+		if err != nil || r.Method != http.MethodGet || r.Header.Get("HX-Request") != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		var pending notice
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(cookie.Value)
+		if decodeErr != nil || json.Unmarshal(decoded, &pending) != nil {
+			s.expireCookie(w, noticeCookie)
+			next.ServeHTTP(w, r)
+			return
+		}
+		if pending.Path != r.URL.Path {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.expireCookie(w, noticeCookie)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), noticeKey{}, pending)))
+	})
+}
+
+// noticeDone and noticeError report the notice this request consumed.
+func noticeDone(r *http.Request) string {
+	if pending, ok := r.Context().Value(noticeKey{}).(notice); ok && !pending.Failure {
+		return pending.Message
+	}
+	return ""
+}
+
+func noticeError(r *http.Request) string {
+	if pending, ok := r.Context().Value(noticeKey{}).(notice); ok && pending.Failure {
+		return pending.Message
+	}
+	return ""
+}
+
 func (s *Server) setCookie(w http.ResponseWriter, cookie *http.Cookie) { http.SetCookie(w, cookie) }
 func (s *Server) expireCookie(w http.ResponseWriter, name string) {
 	s.expireCookieAtPath(w, name, "/")
@@ -3270,6 +3611,25 @@ func templateHelpers() template.FuncMap {
 			}
 			return moment.UTC().Format("15:04:05")
 		},
+		// navCurrent marks a navigation link: "page" on the page itself,
+		// "true" anywhere inside its section, so a person on
+		// /admin/users/{id} still sees where they are.
+		"navCurrent": func(value any, section string) string {
+			path, _ := value.(string)
+			switch {
+			case path == section:
+				return "page"
+			case section != "/" && strings.HasPrefix(path, section+"/"):
+				return "true"
+			}
+			return ""
+		},
+		// lines writes a list back into the textarea it was typed into,
+		// one entry per line.
+		"lines": func(value any) string {
+			values, _ := value.([]string)
+			return strings.Join(values, "\n")
+		},
 		"shortRevision": shortReleaseRevision,
 		"identityLabel": func(source, githubLogin string) string {
 			switch source {
@@ -3301,7 +3661,8 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 func (s *Server) failPage(w http.ResponseWriter, r *http.Request, status int, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	var page bytes.Buffer
-	data := s.view(r, http.StatusText(status), map[string]any{"Status": status, "StatusText": http.StatusText(status), "Message": message})
+	heading := errorHeading(status)
+	data := s.view(r, heading, map[string]any{"Status": status, "StatusText": heading, "Message": asSentence(message)})
 	if err := s.templates.ExecuteTemplate(&page, "error", data); err != nil {
 		observe.Errorf("render error page: %v", err)
 		http.Error(w, message, status)
@@ -3311,6 +3672,46 @@ func (s *Server) failPage(w http.ResponseWriter, r *http.Request, status int, me
 	_, _ = page.WriteTo(w)
 }
 
+// errorHeading names a failure the way a person experiences it, rather than
+// by its HTTP status text.
+func errorHeading(status int) string {
+	switch {
+	case status == http.StatusNotFound:
+		return "Page not found"
+	case status == http.StatusUnauthorized:
+		return "Sign in to continue"
+	case status == http.StatusForbidden:
+		return "You don't have access to this"
+	case status == http.StatusConflict:
+		return "This changed before it could finish"
+	case status == http.StatusGone:
+		return "This link is no longer valid"
+	case status == http.StatusTooManyRequests:
+		return "Too many attempts"
+	case status >= 400 && status < 500:
+		return "This request couldn't be completed"
+	case status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout:
+		return "A connected service didn't respond"
+	default:
+		return "Something went wrong on our side"
+	}
+}
+
+// asSentence presents an error message as a sentence: capitalised and
+// closed with punctuation, whichever code path produced it.
+func asSentence(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return message
+	}
+	first, size := utf8.DecodeRuneInString(message)
+	message = string(unicode.ToUpper(first)) + message[size:]
+	if last, _ := utf8.DecodeLastRuneInString(message); !strings.ContainsRune(".!?", last) {
+		message += "."
+	}
+	return message
+}
+
 // failOperation reports a failed administration operation to a browser
 // caller, using the same classification the JSON transport uses. Rejections
 // return the operator to the form with an explanation; failures render a
@@ -3318,7 +3719,7 @@ func (s *Server) failPage(w http.ResponseWriter, r *http.Request, status int, me
 func (s *Server) failOperation(w http.ResponseWriter, r *http.Request, action, back string, err error) {
 	status, message := describeOperationFailure(action, err)
 	if back != "" && status < http.StatusInternalServerError {
-		http.Redirect(w, r, back+"?error="+url.QueryEscape(message), http.StatusSeeOther)
+		s.redirectWithNotice(w, r, back, true, message)
 		return
 	}
 	s.failPage(w, r, status, message)
@@ -3365,9 +3766,54 @@ func (s *Server) hydraAccept(ctx context.Context, path, challenge string, payloa
 }
 
 type hydraLoginRequest struct {
-	SessionID string `json:"session_id"`
-	Subject   string `json:"subject"`
-	Skip      bool   `json:"skip"`
+	SessionID  string `json:"session_id"`
+	Subject    string `json:"subject"`
+	Skip       bool   `json:"skip"`
+	RequestURL string `json:"request_url"`
+}
+
+// reauthenticationDemand reads what the relying party asked for in its
+// authorization request: prompt=login demands a credential presented for
+// this request, and max_age bounds how long ago the person last presented
+// one. A negative maxAge means the request set no bound.
+func reauthenticationDemand(requestURL string) (promptLogin bool, maxAge time.Duration) {
+	maxAge = -1
+	parsed, err := url.Parse(requestURL)
+	if err != nil {
+		return false, maxAge
+	}
+	query := parsed.Query()
+	for _, prompt := range strings.Fields(query.Get("prompt")) {
+		if prompt == "login" {
+			promptLogin = true
+		}
+	}
+	if raw := query.Get("max_age"); raw != "" {
+		if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds >= 0 {
+			maxAge = time.Duration(seconds) * time.Second
+		}
+	}
+	return promptLogin, maxAge
+}
+
+// reauthenticationCookie names the attempt that sent a person back to sign
+// in for one login challenge, and when; only a browser session created
+// after that moment satisfies prompt=login for that challenge.
+const reauthenticationCookie = "shauth_reauthentication"
+
+func reauthenticationMarker(challenge string, at time.Time) string {
+	digest := sha256.Sum256([]byte(challenge))
+	return hex.EncodeToString(digest[:]) + "." + strconv.FormatInt(at.UnixNano(), 10)
+}
+
+func reauthenticatedSince(cookieValue, challenge string, sessionCreated time.Time) bool {
+	digest := sha256.Sum256([]byte(challenge))
+	prefix, nanos, found := strings.Cut(cookieValue, ".")
+	if !found || subtle.ConstantTimeCompare([]byte(prefix), []byte(hex.EncodeToString(digest[:]))) != 1 {
+		return false
+	}
+	issued, err := strconv.ParseInt(nanos, 10, 64)
+	return err == nil && sessionCreated.After(time.Unix(0, issued))
 }
 
 func (s *Server) hydraLoginRequest(ctx context.Context, challenge string) (hydraLoginRequest, error) {

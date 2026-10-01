@@ -107,24 +107,7 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 	if err != nil {
 		return nil, err
 	}
-	proxy := httputil.NewSingleHostReverseProxy(config.UpstreamURL)
-	originalDirector := proxy.Director
-	proxy.Director = func(request *http.Request) {
-		originalDirector(request)
-		sanitizeProxyHeaders(request, config)
-		removeCookie(request, configCookieName(config.InsecureCookie))
-		removeCookie(request, configTransactionCookieName(config.InsecureCookie))
-		for _, name := range []string{"X-Forwarded-User", "X-Forwarded-Email", "X-Forwarded-Preferred-Username", "X-Forwarded-Role", "X-Forwarded-Subject"} {
-			request.Header.Del(name)
-		}
-		if session, ok := request.Context().Value(identityContextKey).(Session); ok {
-			request.Header.Set("X-Forwarded-User", session.Username)
-			request.Header.Set("X-Forwarded-Preferred-Username", session.Username)
-			request.Header.Set("X-Forwarded-Email", session.Email)
-			request.Header.Set("X-Forwarded-Role", session.Role)
-			request.Header.Set("X-Forwarded-Subject", session.Subject)
-		}
-	}
+	proxy := newUpstreamProxy(config)
 	// Everything the proxy serves sits behind requireSession, so none of it may
 	// outlive the session in a browser cache. The gateway sets no-store on the
 	// pages it renders itself, but passed upstream responses through untouched,
@@ -167,6 +150,40 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 		proxy:              proxy,
 		now:                time.Now,
 	}, nil
+}
+
+// newUpstreamProxy forwards authenticated requests to the upstream. It uses
+// Rewrite rather than Director because ReverseProxy strips hop-by-hop headers
+// after Director runs: a client naming X-Forwarded-Role in its Connection
+// header could otherwise remove the identity the gateway asserts. Rewrite runs
+// after that stripping, so the asserted headers always reach the upstream.
+func newUpstreamProxy(config Config) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{Rewrite: func(proxyRequest *httputil.ProxyRequest) {
+		proxyRequest.SetURL(config.UpstreamURL)
+		// The upstream keeps receiving the Host the browser used.
+		proxyRequest.Out.Host = proxyRequest.In.Host
+		proxyRequest.SetXForwarded()
+		assertUpstreamIdentity(proxyRequest.Out, config)
+	}}
+}
+
+// assertUpstreamIdentity replaces every client-supplied forwarding and
+// identity header with the gateway's own assertion for this session.
+func assertUpstreamIdentity(request *http.Request, config Config) {
+	forwardedFor := request.Header.Get("X-Forwarded-For")
+	sanitizeProxyHeaders(request, config)
+	if forwardedFor != "" {
+		request.Header.Set("X-Forwarded-For", forwardedFor)
+	}
+	removeCookie(request, configCookieName(config.InsecureCookie))
+	removeCookie(request, configTransactionCookieName(config.InsecureCookie))
+	if session, ok := request.Context().Value(identityContextKey).(Session); ok {
+		request.Header.Set("X-Forwarded-User", session.Username)
+		request.Header.Set("X-Forwarded-Preferred-Username", session.Username)
+		request.Header.Set("X-Forwarded-Email", session.Email)
+		request.Header.Set("X-Forwarded-Role", session.Role)
+		request.Header.Set("X-Forwarded-Subject", session.Subject)
+	}
 }
 
 func sanitizeProxyHeaders(request *http.Request, config Config) {
@@ -223,7 +240,7 @@ func (server *Server) signedOut(response http.ResponseWriter, _ *http.Request) {
 func (server *Server) frontchannelLogout(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
 	sid := request.URL.Query().Get("sid")
-	if request.URL.Query().Get("iss") != server.config.Issuer.String() || sid == "" {
+	if request.URL.Query().Get("iss") != server.config.Issuer.String() || !validProviderSessionID(sid) {
 		writeFrontchannelLogoutResponse(response)
 		return
 	}
@@ -242,6 +259,24 @@ func writeFrontchannelLogoutResponse(response http.ResponseWriter) {
 	response.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = response.Write([]byte("<!doctype html><title>Signed out</title>"))
 }
+
+// validProviderSessionID bounds the unauthenticated front-channel sid before
+// it is persisted as a logout tombstone. Ory Hydra issues UUIDs; anything
+// longer or outside a token character set names no session this gateway holds
+// and would only let an anonymous caller store arbitrary data.
+func validProviderSessionID(sid string) bool {
+	if sid == "" || len(sid) > maxProviderSessionIDLength {
+		return false
+	}
+	for _, character := range sid {
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+const maxProviderSessionIDLength = 128
 
 func (server *Server) login(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")

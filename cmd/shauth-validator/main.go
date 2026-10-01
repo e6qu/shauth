@@ -5,6 +5,7 @@ package main
 
 import (
 	"github.com/e6qu/shauth/internal/observe"
+	"unicode/utf8"
 
 	"bytes"
 	"context"
@@ -242,9 +243,7 @@ func sanitizeFailure(value, username string) string {
 	value = redactCredentialMaterial(value, secrets)
 	value = oauthQueryValue.ReplaceAllString(value, "$1[redacted]")
 	value = strings.TrimSpace(value)
-	if len(value) > 1000 {
-		value = value[:1000]
-	}
+	value = truncateUTF8(value, 1000)
 	return value
 }
 
@@ -438,4 +437,18 @@ func complete(ctx context.Context, client *http.Client, baseURL, token, runID st
 		return fmt.Errorf("complete returned %s: %s", response.Status, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+// truncateUTF8 bounds value to limit bytes without splitting a character, so
+// the result is always valid UTF-8 that PostgreSQL and JSON accept unchanged.
+func truncateUTF8(value string, limit int) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }

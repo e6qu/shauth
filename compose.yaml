@@ -5,7 +5,7 @@ x-shauth-image: &shauth-image
 
 services:
   postgres:
-    image: postgres:17.5-alpine
+    image: postgres:17.11-alpine
     environment:
       POSTGRES_DB: shauth
       POSTGRES_USER: shauth

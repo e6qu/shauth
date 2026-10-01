@@ -126,7 +126,7 @@ func (s *Server) checkManagedAppRegistration(ctx context.Context) (string, strin
 }
 
 // checkValidationQueue reports a queue that has stopped draining. Browser
-// checks run one at a time, so a queue that never advances silently stops
+// checks run from one bounded queue, so a queue that never advances silently stops
 // proving that single sign-on works.
 func (s *Server) checkValidationQueue(ctx context.Context) (string, string) {
 	metrics, err := s.store.Metrics(ctx, time.Now())

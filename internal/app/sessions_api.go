@@ -118,7 +118,7 @@ func (s *Server) adminSessions(w http.ResponseWriter, r *http.Request) {
 		page = identity.Page{}
 	}
 	filter, err := requestedSessionFilter(r)
-	message := r.URL.Query().Get("error")
+	message := noticeError(r)
 	if err != nil {
 		_, message = describeOperationFailure("list sessions", err)
 		filter = identity.SessionFilter{}
@@ -135,7 +135,7 @@ func (s *Server) adminSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "sessions-all", s.view(r, "Signed-in sessions", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Sessions": sessions, "State": state,
-		"Error": message, "Done": r.URL.Query().Get("done"),
+		"Error": message, "Done": noticeDone(r),
 		"Page": browserPage(r, page, len(sessions), total),
 	}))
 }

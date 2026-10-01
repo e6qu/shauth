@@ -31,15 +31,15 @@ RUN patch --forward --fuzz=0 -p1 < /tmp/logout-token-exp.patch \
 # final OAuth server does not retain known vulnerable implementations.
 RUN go get \
     github.com/go-jose/go-jose/v3@v3.0.5 \
-    github.com/jackc/pgx/v5@v5.9.2 \
-    go.opentelemetry.io/otel@v1.43.0 \
-    go.opentelemetry.io/otel/sdk@v1.43.0 \
-    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.43.0 \
-    golang.org/x/crypto@v0.53.0 \
-    golang.org/x/net@v0.56.0 \
-    golang.org/x/sys@v0.46.0 \
-    golang.org/x/text@v0.39.0 \
-    google.golang.org/grpc@v1.82.1 \
+    github.com/jackc/pgx/v5@v5.11.0 \
+    go.opentelemetry.io/otel@v1.46.0 \
+    go.opentelemetry.io/otel/sdk@v1.46.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.46.0 \
+    golang.org/x/crypto@v0.57.0 \
+    golang.org/x/net@v0.59.0 \
+    golang.org/x/sys@v0.48.0 \
+    golang.org/x/text@v0.42.0 \
+    google.golang.org/grpc@v1.84.0 \
     && go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/hydra .
 
