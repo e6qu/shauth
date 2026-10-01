@@ -11,17 +11,17 @@ import (
 )
 
 func TestParseTeam(t *testing.T) {
-	organization, slug, err := ParseTeam("e6qu-org/e6qu-org-admins")
+	organization, slug, err := ParseTeam("example-org/admins")
 	if err != nil {
 		t.Fatalf("ParseTeam() error = %v", err)
 	}
-	if organization != "e6qu-org" || slug != "e6qu-org-admins" {
+	if organization != "example-org" || slug != "admins" {
 		t.Fatalf("ParseTeam() = %q/%q", organization, slug)
 	}
 }
 
 func TestParseTeamRejectsInvalidValue(t *testing.T) {
-	if _, _, err := ParseTeam("e6qu-org"); err == nil {
+	if _, _, err := ParseTeam("example-org"); err == nil {
 		t.Fatal("ParseTeam() accepted an invalid team")
 	}
 }
@@ -102,8 +102,8 @@ func TestTeamsSendsTheHeadersGitHubRequires(t *testing.T) {
 		if r.URL.Path != teamsPath {
 			t.Fatalf("unexpected request path %q", r.URL.Path)
 		}
-		team := Team{Slug: "e6qu-org-admins"}
-		team.Organization.Login = "e6qu-org"
+		team := Team{Slug: "admins"}
+		team.Organization.Login = "example-org"
 		_ = json.NewEncoder(w).Encode([]Team{team})
 	}))
 	defer server.Close()
@@ -112,7 +112,7 @@ func TestTeamsSendsTheHeadersGitHubRequires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Teams() error = %v", err)
 	}
-	if len(teams) != 1 || teams[0].Slug != "e6qu-org-admins" {
+	if len(teams) != 1 || teams[0].Slug != "admins" {
 		t.Fatalf("Teams() = %+v", teams)
 	}
 }
@@ -130,7 +130,7 @@ func TestOrganizationsSendsTheHeadersGitHubRequires(t *testing.T) {
 			t.Fatalf("organization memberships were requested without state=active: %s", r.URL.RawQuery)
 		}
 		membership := OrganizationMembership{State: "active"}
-		membership.Organization.Login = "e6qu-org"
+		membership.Organization.Login = "example-org"
 		_ = json.NewEncoder(w).Encode([]OrganizationMembership{membership})
 	}))
 	defer server.Close()
@@ -139,7 +139,7 @@ func TestOrganizationsSendsTheHeadersGitHubRequires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Organizations() error = %v", err)
 	}
-	if len(organizations) != 1 || organizations[0] != "e6qu-org" {
+	if len(organizations) != 1 || organizations[0] != "example-org" {
 		t.Fatalf("Organizations() = %+v", organizations)
 	}
 }

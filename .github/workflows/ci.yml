@@ -36,6 +36,7 @@ jobs:
           terraform -chdir=terraform validate
           terraform -chdir=terraform test
       - run: ./scripts/check-container-publication.sh
+      - run: ./scripts/test-docs-coverage.sh
       - run: ./scripts/test-stack.sh
 
   iac-security:

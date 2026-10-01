@@ -350,8 +350,8 @@ func TestConnectorsAPIReportsConnectorCoordinates(t *testing.T) {
 	server := &Server{
 		config: config.Config{
 			AdminAPIReadToken:   readToken,
-			GitHubAdminTeam:     "e6qu-org/e6qu-org-admins",
-			GitHubDeveloperTeam: "e6qu-org/e6qu-org-members",
+			GitHubAdminTeam:     "example-org/admins",
+			GitHubDeveloperTeam: "example-org/developers",
 		},
 		oauth: &oauth2.Config{},
 	}
@@ -381,7 +381,7 @@ func TestConnectorsAPIReportsConnectorCoordinates(t *testing.T) {
 	if envelope.SchemaVersion != "shauth.connectors/v1" || envelope.ObservedAt.IsZero() {
 		t.Fatalf("envelope = %#v", envelope)
 	}
-	if !envelope.GitHub.Enabled || envelope.GitHub.AdminTeam != "e6qu-org/e6qu-org-admins" || envelope.GitHub.DeveloperTeam != "e6qu-org/e6qu-org-members" {
+	if !envelope.GitHub.Enabled || envelope.GitHub.AdminTeam != "example-org/admins" || envelope.GitHub.DeveloperTeam != "example-org/developers" {
 		t.Fatalf("github connector = %#v", envelope.GitHub)
 	}
 	if envelope.Entra.Enabled || envelope.Entra.TenantID != "" {

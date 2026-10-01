@@ -114,8 +114,8 @@ func newAdminAPIAcceptanceService(t *testing.T) (*pgxpool.Pool, *Server, *identi
 			AdminAPIWriteToken:  adminAPIAcceptanceWriteToken,
 			TokenHookToken:      tokenHookAcceptanceToken,
 			SessionResetToken:   sessionResetAcceptanceToken,
-			GitHubAdminTeam:     "e6qu-org/e6qu-org-admins",
-			GitHubDeveloperTeam: "e6qu-org/e6qu-org-members",
+			GitHubAdminTeam:     "example-org/admins",
+			GitHubDeveloperTeam: "example-org/developers",
 		},
 		store:            store,
 		httpClient:       &http.Client{Timeout: 15 * time.Second},
@@ -354,7 +354,7 @@ func TestAdminAPISessionPolicyReadAndUpdate(t *testing.T) {
 func TestAdminAPIGitHubRoleMappingLifecycle(t *testing.T) {
 	_, handler, _ := newAdminAPIAcceptanceServer(t)
 
-	created := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/github-mappings", adminAPIAcceptanceWriteToken, `{"kind":"team","target":"e6qu-org/admin-api-team","role":"admin"}`)
+	created := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/github-mappings", adminAPIAcceptanceWriteToken, `{"kind":"team","target":"example-org/admin-api-team","role":"admin"}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", created.Code, created.Body.String())
 	}
@@ -365,11 +365,11 @@ func TestAdminAPIGitHubRoleMappingLifecycle(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &receipt); err != nil {
 		t.Fatalf("decode mapping receipt: %v: %s", err, created.Body.String())
 	}
-	if receipt.SchemaVersion != "shauth.github-role-mapping/v1" || receipt.Mapping.Kind != "team" || receipt.Mapping.Target != "e6qu-org/admin-api-team" || receipt.Mapping.Role != "admin" || receipt.Mapping.ID == "" {
+	if receipt.SchemaVersion != "shauth.github-role-mapping/v1" || receipt.Mapping.Kind != "team" || receipt.Mapping.Target != "example-org/admin-api-team" || receipt.Mapping.Role != "admin" || receipt.Mapping.ID == "" {
 		t.Fatalf("mapping receipt = %#v", receipt)
 	}
 
-	invalid := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/github-mappings", adminAPIAcceptanceWriteToken, `{"kind":"country","target":"e6qu-org","role":"admin"}`)
+	invalid := adminAPIAcceptanceRequest(t, handler, http.MethodPost, "https://auth.example.test/internal/github-mappings", adminAPIAcceptanceWriteToken, `{"kind":"country","target":"example-org","role":"admin"}`)
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid mapping status = %d, body = %s", invalid.Code, invalid.Body.String())
 	}

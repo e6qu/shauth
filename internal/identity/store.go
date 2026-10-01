@@ -713,7 +713,7 @@ func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
 }
 
 // IsManagedOIDCClient reports whether an OAuth client belongs to an app that
-// Shauth administrators have explicitly enrolled as an e6qu service.
+// Shauth administrators have explicitly enrolled in the catalog.
 func (s *Store) IsManagedOIDCClient(ctx context.Context, clientID string) (bool, error) {
 	var managed bool
 	if err := s.db(ctx).QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_apps WHERE oidc_client_id=$1)`, strings.TrimSpace(clientID)).Scan(&managed); err != nil {

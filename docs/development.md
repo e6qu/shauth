@@ -32,6 +32,7 @@ Requirements:
 | `npm run test:validator` | The validator's own unit tests. |
 | `./scripts/test-stack.sh` | The whole system. |
 | `./scripts/check-container-publication.sh` | Workflow, image-retention and process-bound contracts. |
+| `./scripts/test-docs-coverage.sh` | Every configuration variable and route appears in `docs/`. |
 | `terraform -chdir=terraform test` | Terraform module tests. |
 
 `test-stack.sh` builds the image and starts PostgreSQL, Hydra and Shauth with

@@ -158,3 +158,36 @@ administrator disable their own account.
   technology.
 - Every page footer shows the build revision and the time the deployment
   started.
+
+## Pages
+
+Every state-changing form posts to the URL shown in the right-hand column. All
+forms carry a CSRF token.
+
+| Page | Who | Form actions |
+|---|---|---|
+| `/` | Everyone | |
+| `/login`, `/logout`, `/signed-out` | Everyone | `POST /login`, `POST /logout` |
+| `/accept-invitation` | Invitees | `POST /accept-invitation` |
+| `/account` | Signed in | `POST /account/sessions/{id}/revoke` |
+| `/apps` | Signed in | `POST /apps/{id}/validate`. `/apps/{id}/validation` is the live status fragment. |
+| `/admin` | Admins | |
+| `/admin/users`, `/admin/users/{id}` | Admins | `POST /admin/users`, `/admin/users/{id}/disable`, `/admin/users/{id}/enable`, `/admin/users/{id}/sessions/revoke`. `/admin/users/{id}/sessions` redirects to the account page. |
+| `/admin/sessions` | Admins | `POST /admin/sessions/{id}/revoke` |
+| `/admin/invitations` | Admins | `POST /admin/invitations`, `/admin/invitations/{id}/revoke` |
+| `/admin/clients` | Admins | `POST /admin/clients`, `/admin/clients/{id}/delete` |
+| `/admin/apps`, `/admin/apps/{slug}` | Admins | `POST /admin/apps`, `/admin/apps/{id}/delete` |
+| `/admin/github` | Admins | `POST /admin/github`, `/admin/github/{id}/delete` |
+| `/admin/connectors` | Admins | |
+| `/admin/session-policy` | Admins | `POST /admin/session-policy` |
+| `/admin/audit`, `/admin/logs`, `/monitoring` | Admins | |
+
+Hydra and the upstream providers use these:
+
+| Route | Purpose |
+|---|---|
+| `/oauth/login`, `/oauth/consent`, `/oauth/logout`, `/oauth/error` | Hydra's login, consent, logout and error URLs. `POST /oauth/consent` records a consent decision. |
+| `/oauth/logout/complete` | One-time return from an application's logout bridge. |
+| `/oauth/github`, `/oauth/github/callback` | GitHub sign-in. |
+| `/oauth/entra`, `/oauth/entra/callback` | Microsoft Entra ID sign-in. |
+| `/validator/bootstrap` | Exchanges a validator bootstrap link for a browser session. |
