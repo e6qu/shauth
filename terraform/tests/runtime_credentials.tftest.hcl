@@ -123,3 +123,35 @@ run "validator_task_receives_only_its_own_credential" {
     error_message = "The validator execution role must be limited to its own secret."
   }
 }
+
+# The module's key encrypts the log group and every secret it creates. The
+# Logs service needs the key policy itself to admit this log group, and both
+# execution roles need decrypt through Secrets Manager, or no task starts.
+run "data_key_admits_logs_and_secret_injection" {
+  command = plan
+
+  plan_options {
+    refresh = false
+  }
+
+  assert {
+    condition = anytrue([
+      for statement in data.aws_iam_policy_document.data_key.statement :
+      contains(flatten([for principal in statement.principals : principal.identifiers]), "logs.eu-west-1.amazonaws.com")
+      && one([for condition in statement.condition : condition.values[0]]) == "arn:aws:logs:eu-west-1:123456789012:log-group:/e6qu/shauth-test"
+    ])
+    error_message = "The data key policy must admit CloudWatch Logs for exactly this module's log group."
+  }
+
+  assert {
+    condition = alltrue([
+      for document in [data.aws_iam_policy_document.secrets, data.aws_iam_policy_document.validator_secrets] :
+      anytrue([
+        for statement in document.statement :
+        contains(statement.actions, "kms:Decrypt")
+        && one([for condition in statement.condition : condition.values[0]]) == "secretsmanager.eu-west-1.amazonaws.com"
+      ])
+    ])
+    error_message = "Both execution roles must decrypt the module's secrets through Secrets Manager."
+  }
+}

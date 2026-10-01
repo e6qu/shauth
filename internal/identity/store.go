@@ -15,7 +15,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1050,9 +1052,7 @@ func (s *Store) CompleteAppValidation(ctx context.Context, runID, status, failur
 	if status != ValidationPassed && status != ValidationFailed {
 		return fmt.Errorf("application validation result must be passed or failed")
 	}
-	if len(failure) > 1000 {
-		failure = failure[:1000]
-	}
+	failure = truncateUTF8(failure, 1000)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin complete application validation: %w", err)
@@ -1214,10 +1214,17 @@ func (s *Store) CreatePasswordUser(ctx context.Context, username, email, passwor
 
 // passwordCredential validates and hashes a local credential before any
 // transaction opens, so the deliberately slow hash never holds a row lock.
+// maxPasswordBytes is bcrypt's input limit. A longer password is refused
+// as the person's input error rather than failing as an internal fault.
+const maxPasswordBytes = 72
+
 func passwordCredential(username, password string) (string, []byte, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || len(password) < 14 {
 		return "", nil, invalidInput("username, email, and a password of at least 14 characters are required")
+	}
+	if len(password) > maxPasswordBytes {
+		return "", nil, invalidInput("a password can be at most %d bytes long", maxPasswordBytes)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -1227,14 +1234,16 @@ func passwordCredential(username, password string) (string, []byte, error) {
 }
 
 // EnsureBootstrapAdmin creates the explicitly configured break-glass admin on
-// first start and promotes the same email on later starts.
+// first start and promotes the same email on later starts. A disabled
+// bootstrap account stays disabled: an operator who contained a compromised
+// break-glass credential must not see a restart silently undo that.
 func (s *Store) EnsureBootstrapAdmin(ctx context.Context, email, password string) (User, error) {
 	if email == "" {
 		return User{}, nil
 	}
 	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" || len(password) < 14 {
-		return User{}, fmt.Errorf("bootstrap admin email and a password of at least 14 characters are required")
+	if email == "" || len(password) < 14 || len(password) > maxPasswordBytes {
+		return User{}, fmt.Errorf("bootstrap admin email and a password of 14 to %d bytes are required", maxPasswordBytes)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -1244,7 +1253,7 @@ func (s *Store) EnsureBootstrapAdmin(ctx context.Context, email, password string
 	var user User
 	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,created_at)
 	VALUES ($1::uuid,$2,$3,TRUE,$4,'admin',now())
-	ON CONFLICT (email) DO UPDATE SET password_hash=EXCLUDED.password_hash,email_verified=TRUE,role='admin',disabled_at=NULL
+	ON CONFLICT (email) DO UPDATE SET password_hash=EXCLUDED.password_hash,email_verified=TRUE,role='admin'
 	WHERE users.is_validation=FALSE
 	RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, randomUUID(), username, email, hash).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
@@ -1548,18 +1557,68 @@ func (s *Store) AuthenticatePassword(ctx context.Context, username, password str
 	refused := fmt.Errorf("invalid username or password")
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
+		equalizePasswordTiming(password)
 		return User{}, SignInReasonUnknownUser, refused
 	case err != nil:
 		return User{}, SignInReasonUnavailable, refused
 	case user.DisabledAt != nil:
+		equalizePasswordTiming(password)
 		return User{}, SignInReasonDisabled, refused
 	case len(hash) == 0:
+		equalizePasswordTiming(password)
 		return User{}, SignInReasonNoPassword, refused
 	case bcrypt.CompareHashAndPassword(hash, []byte(password)) != nil:
 		return User{}, SignInReasonWrongSecret, refused
 	}
 	user.FederatedIdentity = federatedIdentityLabel(user.IdentitySource, user.GitHubLogin)
 	return user, "", nil
+}
+
+// Password sign-in throttling. Within PasswordFailureWindow, a username that
+// has failed PasswordFailuresPerUsername times, or an address that has failed
+// PasswordFailuresPerAddress times, is refused before any password is
+// checked. The counts come from the durable audit record, so every Shauth
+// instance enforces the same limit and a restart does not reset it.
+const (
+	PasswordFailureWindow       = 15 * time.Minute
+	PasswordFailuresPerUsername = 10
+	PasswordFailuresPerAddress  = 50
+)
+
+// PasswordSignInThrottled reports whether a password attempt for username
+// from address must be refused without checking the password.
+func (s *Store) PasswordSignInThrottled(ctx context.Context, username string, address net.IP, now time.Time) (bool, error) {
+	since := now.UTC().Add(-PasswordFailureWindow)
+	var byUsername, byAddress int
+	if err := s.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM audit_events WHERE event_type='sign_in.failed' AND details->>'method'='password' AND details->>'username'=$1 AND created_at>$3),
+		(SELECT count(*) FROM audit_events WHERE event_type='sign_in.failed' AND details->>'method'='password' AND $2::inet IS NOT NULL AND remote_address=$2::inet AND created_at>$3)`,
+		strings.TrimSpace(username), addressParameter(address), since).Scan(&byUsername, &byAddress); err != nil {
+		return true, fmt.Errorf("count recent password failures: %w", err)
+	}
+	return byUsername >= PasswordFailuresPerUsername || byAddress >= PasswordFailuresPerAddress, nil
+}
+
+func addressParameter(address net.IP) any {
+	if address == nil {
+		return nil
+	}
+	return address.String()
+}
+
+// timingReferenceHash is compared against on every refusal that would
+// otherwise skip bcrypt, so the response time does not reveal whether a
+// username exists, is disabled, or has no password.
+var timingReferenceHash = sync.OnceValue(func() []byte {
+	hash, err := bcrypt.GenerateFromPassword([]byte("shauth timing reference"), bcrypt.DefaultCost)
+	if err != nil {
+		panic(fmt.Sprintf("create bcrypt timing reference: %v", err))
+	}
+	return hash
+})
+
+func equalizePasswordTiming(password string) {
+	_ = bcrypt.CompareHashAndPassword(timingReferenceHash(), []byte(password))
 }
 
 func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, login, email string, role Role) (User, error) {
@@ -1610,7 +1669,11 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return User{}, fmt.Errorf("find Microsoft Entra ID user: %w", err)
 	}
-	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND entra_tenant_id IS NULL AND disabled_at IS NULL AND is_validation=FALSE RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
+	// Linking by email trusts the address on both sides: Entra must verify
+	// the claim it sent, and the existing account's address must itself be
+	// verified. A mutable, unverified mail attribute or UPN that happens to
+	// equal another account's address must never inherit that account.
+	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND $4 AND email_verified AND entra_tenant_id IS NULL AND disabled_at IS NULL AND is_validation=FALSE RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		return user, nil
@@ -2577,4 +2640,18 @@ func randomUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// truncateUTF8 bounds value to limit bytes without splitting a character, so
+// the result is always valid UTF-8 that PostgreSQL and JSON accept unchanged.
+func truncateUTF8(value string, limit int) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }

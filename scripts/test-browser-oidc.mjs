@@ -135,8 +135,19 @@ try {
   await page.locator("#new-password").fill(crypto.randomBytes(24).toString("base64url"));
   await page.getByRole("button", { name: "Create local user" }).click();
   await page.locator("#users").getByRole("link", { name: username }).waitFor();
+  await page.locator("#user-create-feedback").getByRole("status").filter({ hasText: `Created the account ${username}.` }).waitFor();
+  assert.equal(await page.locator("#new-username").inputValue(), "", "an accepted account left its values in the form");
+  // A rejected account is explained in the form's live region and keeps the
+  // operator's input, instead of failing silently.
+  await page.locator("#new-username").fill(username);
+  await page.locator("#new-email").fill(`${username}-again@localhost.test`);
+  await page.locator("#new-password").fill(crypto.randomBytes(24).toString("base64url"));
+  await page.getByRole("button", { name: "Create local user" }).click();
+  await page.locator("#user-create-feedback").getByRole("alert").waitFor();
+  assert.equal(await page.locator("#new-username").inputValue(), username, "a rejected account lost the operator's input");
+  assert.equal(await page.locator("#users").getByRole("link", { name: username }).count(), 1);
   assert.equal(page.url(), `${issuer}/admin/users`);
-  assert.deepEqual(htmxRequests, ["true"]);
+  assert.deepEqual(htmxRequests, ["true", "true"]);
   assert.deepEqual([...new Set(browserAssets)].sort(), [
     `${issuer}/assets/htmx-2.0.8.min.js`,
     `${issuer}/assets/theme.js`,

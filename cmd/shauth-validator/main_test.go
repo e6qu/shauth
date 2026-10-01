@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
@@ -146,5 +147,18 @@ func TestDecodeSingleJSONRejectsTrailingData(t *testing.T) {
 	var outcome result
 	if err := decodeSingleJSON(strings.NewReader(`{"status":"passed","failure":""}`), &outcome); err != nil {
 		t.Fatalf("valid JSON payload rejected: %v", err)
+	}
+}
+
+func TestFailureTruncationKeepsValidUTF8(t *testing.T) {
+	failure := sanitizeFailure(strings.Repeat("a", 999)+"€ and more", "")
+	if !utf8.ValidString(failure) || len(failure) > 1000 {
+		t.Fatalf("truncated failure is %d bytes, valid UTF-8 = %v", len(failure), utf8.ValidString(failure))
+	}
+	if failure != strings.Repeat("a", 999) {
+		t.Fatalf("truncation split or kept a partial character: %q", failure[990:])
+	}
+	if got := truncateUTF8("ok\xffbad", 1000); !utf8.ValidString(got) {
+		t.Fatalf("invalid bytes survived: %q", got)
 	}
 }

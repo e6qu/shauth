@@ -20,7 +20,19 @@ type ServiceStatus struct {
 
 type Controller struct{ client *http.Client }
 
-func New() *Controller { return &Controller{client: &http.Client{Timeout: 10 * time.Second}} }
+// New returns a controller whose probe reads exactly the registered health
+// endpoint. A redirect is reported as the endpoint's answer rather than
+// followed: following it would let a registered HTTPS endpoint steer the
+// probe to plain HTTP or to an internal address, and every signed-in user
+// sees the result.
+func New() *Controller {
+	return &Controller{client: &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}}
+}
 
 func (controller *Controller) Status(ctx context.Context, app identity.ManagedApp) (ServiceStatus, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, app.HealthURL, nil)

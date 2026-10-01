@@ -264,8 +264,13 @@ func (s *Server) revokeSession(ctx context.Context, sessionID string, requester 
 	if err != nil {
 		return revokeSessionResult{}, err
 	}
-	if err := s.store.RevokeSession(ctx, sessionID, time.Now()); err != nil {
-		return revokeSessionResult{}, err
+	// A browser session that already ended is still reported as a conflict,
+	// but its provider sessions are revoked again first: when an earlier
+	// attempt ended the browser session and then failed to reach Ory Hydra,
+	// retrying is the operator's only way to finish the job.
+	localErr := s.store.RevokeSession(ctx, sessionID, time.Now())
+	if localErr != nil && !errors.Is(localErr, identity.ErrActiveSessionNotFound) {
+		return revokeSessionResult{}, localErr
 	}
 	hydraSessionIDs, err := s.store.HydraLoginSessionIDs(ctx, sessionID)
 	if err != nil {
@@ -275,6 +280,9 @@ func (s *Server) revokeSession(ctx context.Context, sessionID string, requester 
 		if err := s.revokeHydraLoginSession(ctx, hydraSessionID); err != nil {
 			return revokeSessionResult{}, dependencyFailure("the session ended, but OAuth session revocation did not complete", err)
 		}
+	}
+	if localErr != nil {
+		return revokeSessionResult{}, localErr
 	}
 	s.record(ctx, requester, identity.AuditSessionRevoked, userID, map[string]any{
 		"session_id": sessionID, "revoked_provider_sessions": len(hydraSessionIDs),

@@ -1,7 +1,12 @@
 locals {
-  tags                      = merge(var.tags, { service = "shauth", managed-by = "terraform" })
-  public_url                = "https://${var.domain_name}"
-  invitation_email_domain   = split("@", var.invitation_email_from)[1]
+  tags                    = merge(var.tags, { service = "shauth", managed-by = "terraform" })
+  public_url              = "https://${var.domain_name}"
+  invitation_email_domain = split("@", var.invitation_email_from)[1]
+  # The cluster ARN names the partition and account this module deploys into,
+  # without a provider lookup.
+  aws_partition             = split(":", var.ecs_cluster_arn)[1]
+  aws_account_id            = split(":", var.ecs_cluster_arn)[4]
+  log_group_name            = "/e6qu/${var.name}"
   entra_enabled             = var.entra_tenant_id != null && var.entra_client_id != null && var.entra_oauth_secret_arn != null
   owns_api_gateway_vpc_link = var.create_api_gateway_vpc_link
   api_gateway_vpc_link_id = (
@@ -78,7 +83,7 @@ moved {
 }
 
 resource "aws_cloudwatch_log_group" "this" {
-  name              = "/e6qu/${var.name}"
+  name              = local.log_group_name
   retention_in_days = 30
   kms_key_id        = aws_kms_key.data.arn
   tags              = local.tags
@@ -89,6 +94,41 @@ resource "aws_kms_key" "data" {
   deletion_window_in_days = 30
   enable_key_rotation     = true
   tags                    = local.tags
+}
+
+# CloudWatch Logs encrypts with a customer managed key only when the key
+# policy itself admits the regional Logs service for this log group; IAM
+# alone cannot grant it. The account statement keeps IAM policies, such as
+# the execution roles' Secrets Manager decrypt grant below, effective.
+data "aws_iam_policy_document" "data_key" {
+  statement {
+    sid       = "AccountAdministration"
+    actions   = ["kms:*"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${local.aws_partition}:iam::${local.aws_account_id}:root"]
+    }
+  }
+  statement {
+    sid       = "CloudWatchLogsForThisLogGroup"
+    actions   = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["logs.${var.region}.amazonaws.com"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values   = ["arn:${local.aws_partition}:logs:${var.region}:${local.aws_account_id}:log-group:${local.log_group_name}"]
+    }
+  }
+}
+
+resource "aws_kms_key_policy" "data" {
+  key_id = aws_kms_key.data.id
+  policy = data.aws_iam_policy_document.data_key.json
 }
 
 resource "aws_security_group" "task" {
@@ -357,6 +397,17 @@ data "aws_iam_policy_document" "validator_secrets" {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = [aws_secretsmanager_secret.validator.arn]
   }
+  # The secrets are encrypted with the module's key; Secrets Manager
+  # decrypts with the caller's permission, and only on its behalf.
+  statement {
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.data.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${var.region}.amazonaws.com"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "validator_secrets" {
@@ -368,6 +419,17 @@ data "aws_iam_policy_document" "secrets" {
   statement {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = local.execution_secret_arns
+  }
+  # The secrets are encrypted with the module's key; Secrets Manager
+  # decrypts with the caller's permission, and only on its behalf.
+  statement {
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.data.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${var.region}.amazonaws.com"]
+    }
   }
 }
 

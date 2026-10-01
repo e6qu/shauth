@@ -14,8 +14,8 @@ import (
 // to fetch an observation. Registering an endpoint has to produce a source.
 func TestRegisteredMonitoringURLBecomesASource(t *testing.T) {
 	sources, unpublished := applicationMonitoringSources(
-		[]identity.ManagedApp{{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"}},
-		map[string]string{"e6irc": strings.Repeat("t", 32)},
+		[]identity.ManagedApp{{Slug: "e6irc", Name: "e6irc", OIDCClientID: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"}},
+		map[string]monitoringCredential{"e6irc": {Token: strings.Repeat("t", 32), URL: "https://e6irc.example.com/v1/observations", ClientID: "e6irc"}},
 	)
 	if len(sources) != 1 {
 		t.Fatalf("registered monitoring URL produced %d sources, want 1", len(sources))
@@ -36,10 +36,10 @@ func TestRegisteredMonitoringURLBecomesASource(t *testing.T) {
 func TestApplicationWithoutAMonitoringEndpointIsReportedNotSkipped(t *testing.T) {
 	sources, unpublished := applicationMonitoringSources(
 		[]identity.ManagedApp{
-			{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"},
+			{Slug: "e6irc", Name: "e6irc", OIDCClientID: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"},
 			{Slug: "bleephub", Name: "Bleephub"},
 		},
-		map[string]string{"e6irc": strings.Repeat("t", 32), "bleephub": strings.Repeat("t", 32)},
+		map[string]monitoringCredential{"e6irc": {Token: strings.Repeat("t", 32), URL: "https://e6irc.example.com/v1/observations", ClientID: "e6irc"}, "bleephub": {Token: strings.Repeat("t", 32)}},
 	)
 	if len(sources) != 1 {
 		t.Fatalf("sources = %d, want 1", len(sources))
@@ -54,12 +54,31 @@ func TestApplicationWithoutAMonitoringEndpointIsReportedNotSkipped(t *testing.T)
 func TestRegisteredEndpointWithoutACredentialIsDistinguished(t *testing.T) {
 	sources, unpublished := applicationMonitoringSources(
 		[]identity.ManagedApp{{Slug: "e6irc", Name: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"}},
-		map[string]string{},
+		map[string]monitoringCredential{},
 	)
 	if len(sources) != 0 {
 		t.Fatalf("sources = %d, want 0 without a credential", len(sources))
 	}
 	if len(unpublished) != 1 || !strings.Contains(unpublished[0], "credential") {
 		t.Fatalf("unpublished = %v, want the missing credential named", unpublished)
+	}
+}
+
+// A deployed monitoring token belongs to one endpoint and client. An
+// application re-registered under the same slug with another endpoint must
+// not receive it.
+func TestMonitoringCredentialNeverFollowsASlugToAnotherEndpoint(t *testing.T) {
+	credential := map[string]monitoringCredential{"e6irc": {Token: strings.Repeat("t", 32), URL: "https://e6irc.example.com/v1/observations", ClientID: "e6irc"}}
+	for _, app := range []identity.ManagedApp{
+		{Slug: "e6irc", Name: "e6irc", OIDCClientID: "e6irc", MonitoringURL: "https://collector.attacker.example/v1"},
+		{Slug: "e6irc", Name: "e6irc", OIDCClientID: "another-client", MonitoringURL: "https://e6irc.example.com/v1/observations"},
+	} {
+		sources, unpublished := applicationMonitoringSources([]identity.ManagedApp{app}, credential)
+		if len(sources) != 0 {
+			t.Fatalf("token was sent to %s for client %s", sources[0].URL, app.OIDCClientID)
+		}
+		if len(unpublished) != 1 || !strings.Contains(unpublished[0], "different endpoint") {
+			t.Fatalf("unpublished = %v, want the mismatch named", unpublished)
+		}
 	}
 }

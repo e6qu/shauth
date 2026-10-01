@@ -8,7 +8,6 @@ package app
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -381,7 +380,7 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "account", s.view(r, "Your account", map[string]any{
 		"SignedIn": true, "IsAdmin": user.Role == identity.RoleAdmin, "Account": newUserRecord(user),
-		"Sessions": records, "Done": r.URL.Query().Get("done"), "Error": r.URL.Query().Get("error"),
+		"Sessions": records, "Done": noticeDone(r), "Error": noticeError(r),
 	}))
 }
 
@@ -407,7 +406,7 @@ func (s *Server) revokeOwnSession(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/account?done="+url.QueryEscape("That session was ended."), http.StatusSeeOther)
+	s.redirectWithNotice(w, r, "/account", false, "That session was ended.")
 }
 
 // adminAudit renders the same audit record the API publishes, so an operator

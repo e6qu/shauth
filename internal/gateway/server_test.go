@@ -4,6 +4,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -387,5 +388,56 @@ func TestProxiedResponsesAreNotCacheable(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ReverseProxy strips the headers a client names in Connection after a legacy
+// Director has run, so a client could remove the identity the gateway asserts.
+// The upstream must receive the asserted identity whatever Connection says.
+func TestUpstreamReceivesAssertedIdentityDespiteConnectionHeader(t *testing.T) {
+	t.Parallel()
+	received := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		received <- request.Header.Clone()
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicURL, err := url.Parse("https://app.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newUpstreamProxy(Config{UpstreamURL: upstreamURL, PublicURL: publicURL})
+	request := httptest.NewRequest(http.MethodGet, "https://app.example.test/", nil)
+	request.Header.Set("Connection", "X-Forwarded-Role, X-Forwarded-User, X-Forwarded-Proto, X-Forwarded-Host")
+	request.Header.Set("X-Forwarded-Role", "admin")
+	request = request.WithContext(context.WithValue(request.Context(), identityContextKey, Session{Username: "ada", Email: "ada@example.test", Role: "developer", Subject: "subject-1"}))
+	proxy.ServeHTTP(httptest.NewRecorder(), request)
+	headers := <-received
+	for name, want := range map[string]string{
+		"X-Forwarded-User": "ada", "X-Forwarded-Role": "developer", "X-Forwarded-Subject": "subject-1",
+		"X-Forwarded-Proto": "https", "X-Forwarded-Host": "app.example.test",
+	} {
+		if got := headers.Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestFrontchannelSessionIDIsBoundedBeforeItIsPersisted(t *testing.T) {
+	t.Parallel()
+	for sid, want := range map[string]bool{
+		"6f1c7c0e-3d2b-4b8e-9a51-0c1f2e3d4a5b": true,
+		"":                                     false,
+		strings.Repeat("a", maxProviderSessionIDLength):   true,
+		strings.Repeat("a", maxProviderSessionIDLength+1): false,
+		"sid with spaces": false,
+		"sid'; DROP":      false,
+	} {
+		if got := validProviderSessionID(sid); got != want {
+			t.Errorf("validProviderSessionID(%q) = %v, want %v", sid, got, want)
+		}
 	}
 }

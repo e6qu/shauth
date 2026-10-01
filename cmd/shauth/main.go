@@ -35,8 +35,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if _, err := store.EnsureBootstrapAdmin(context.Background(), cfg.BootstrapAdminEmail, cfg.BootstrapAdminPassword); err != nil {
+	bootstrapAdmin, err := store.EnsureBootstrapAdmin(context.Background(), cfg.BootstrapAdminEmail, cfg.BootstrapAdminPassword)
+	if err != nil {
 		log.Fatalf("bootstrap administrator: %v", err)
+	}
+	if bootstrapAdmin.DisabledAt != nil {
+		observe.Warnf("bootstrap administrator %s is disabled and stays disabled; an administrator must enable it explicitly", bootstrapAdmin.Username)
 	}
 	if _, err := store.EnsureValidationUsers(context.Background(), cfg.ValidationUsername, cfg.ValidationEmail); err != nil {
 		log.Fatalf("bootstrap validation account: %v", err)

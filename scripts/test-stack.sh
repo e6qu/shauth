@@ -181,10 +181,15 @@ fi
 SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/shauth?sslmode=disable" \
 	SHAUTH_ACCEPTANCE_HYDRA_ADMIN_URL=http://localhost:4445 \
 	SHAUTH_ACCEPTANCE_HYDRA_PUBLIC_URL=http://localhost:4444 \
-	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app \
-	-run '^(TestAppValidationTerminalStateAndLeaseTransitionsAreSerialized|TestLogoutCorrelationGrantIsAtomicAndExpires|TestLogoutCorrelationGrantPersistsEmptyInitiatorProviderSnapshot|TestLogoutSerializationPreservesACompleteOrdering|TestStaleProviderLogoutDoesNotRevokeFreshSessions|TestPausedCallbackCannotCreateSessionAfterProviderLogout|TestEnqueueAppValidationsBySlugQueuesBothDirectionsWithoutARequester|TestEnqueueAllAppValidationsReturnsSlugsAndCollapsesDuplicates|TestAppValidationRunHistoryOrdersFiltersAndLimits|TestApplicationsAPIListsCatalogHealthAndValidations|TestApplicationValidationHistoryAPIFiltersAndValidatesLimit|TestApplicationValidationEnqueueAPIQueuesWithoutABrowserCSRFToken|TestAdminAPIUserLifecycleAndSearch|TestAdminAPIUserSessionsReadAndSingleRevoke|TestAdminAPISessionPolicyReadAndUpdate|TestAdminAPIGitHubRoleMappingLifecycle|TestAdminAPIOIDCClientAndManagedAppLifecycle|TestAdminAPIMonitoringSnapshot|TestAdminAPIInvitationValidation|TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt|TestAdminAPIRefusesToDisableTheValidationIdentity|TestAdminAPIInvitationsAreListableAndRevocable|TestAdminAPIRejectsDuplicateUserWithoutLeakingDatabaseDetail)$' -count=1
+	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app -count=1
 
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'id="main-content"'
+# The sign-in page shows only messages the server wrote; a crafted link
+# cannot put its own words on it.
+if curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}/login?error=Call+support+at+555-0100&done=Verified" | grep -q '555-0100'; then
+	echo 'the sign-in page displayed text supplied in its URL' >&2
+	exit 1
+fi
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'aria-label="Primary navigation"'
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/assets/theme.js | grep -q 'theme-toggle'
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'src="/assets/htmx-2.0.8.min.js"'
@@ -916,12 +921,110 @@ printf '%s' "$userinfo_response" | grep -q '"preferred_username":"admin"'
 printf '%s' "$userinfo_response" | grep -q '"role":"admin"'
 printf '%s' "$userinfo_response" | grep -q '"email_verified":true'
 printf '%s\n' 'refreshing access token'
-curl --fail --silent --show-error \
+refreshed_response=$(curl --fail --silent --show-error \
 	--data-urlencode 'grant_type=refresh_token' \
 	--data-urlencode "refresh_token=${refresh_token}" \
 	--data-urlencode "client_id=${auto_consent_client_id}" \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
-	"${SHAUTH_PUBLIC_URL}"/oauth2/token | grep -q '"access_token"'
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token)
+printf '%s' "$refreshed_response" | grep -q '"access_token"'
+refresh_token=$(printf '%s' "$refreshed_response" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
+[ -n "$refresh_token" ]
+# An application asking for prompt=login gets a credential presented for that
+# request: the signed-in administrator is sent back to sign in, and the same
+# challenge completes only after a new password sign-in.
+reauth_login=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
+	"${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&scope=openid&prompt=login&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=reauthentication-state" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+reauth_prompt=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$reauth_login" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$reauth_prompt" in
+	/login?reauthenticate=1\&next=*) ;;
+	*) echo "prompt=login was accepted without a fresh sign-in: ${reauth_prompt}" >&2; exit 1 ;;
+esac
+curl --fail --silent --show-error --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}${reauth_prompt}" | grep -q 'Sign in again to continue'
+reauth_next=$(node -e 'process.stdout.write(new URL(process.argv[1], "http://shauth.invalid").searchParams.get("next"))' "$reauth_prompt")
+reauth_return=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+	--data-urlencode "_csrf=${csrf_token}" \
+	--data-urlencode 'username=admin' \
+	--data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
+	--data-urlencode "next=${reauth_next}" \
+	"${SHAUTH_PUBLIC_URL}"/login | awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+[ "$reauth_return" = "$reauth_next" ]
+reauth_verified=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}${reauth_return}" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$reauth_verified" in
+	${SHAUTH_PUBLIC_URL}/oauth2/auth?*login_verifier=*) ;;
+	*) echo "a fresh sign-in did not complete the prompt=login challenge: ${reauth_verified}" >&2; exit 1 ;;
+esac
+# A client Shauth does not manage asks the person explicitly. The page names
+# the application, explains each permission, and offers a real refusal; an
+# allowed grant never exceeds the scopes the application requested.
+explicit_consent_client_id=explicit-consent-client
+explicit_consent_redirect_uri=http://localhost:5571/callback
+curl --fail --silent --show-error --header 'Content-Type: application/json' \
+	--data "{\"client_id\":\"${explicit_consent_client_id}\",\"client_name\":\"Explicit consent client\",\"client_secret\":\"$(random_secret | tr -d '/+=')\",\"redirect_uris\":[\"${explicit_consent_redirect_uri}\"],\"grant_types\":[\"authorization_code\"],\"response_types\":[\"code\"],\"scope\":\"openid profile email\",\"token_endpoint_auth_method\":\"client_secret_post\"}" \
+	http://localhost:4445/admin/clients >/dev/null
+explicit_consent_page() {
+	explicit_login=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
+		"${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${explicit_consent_client_id}&response_type=code&scope=openid%20profile&redirect_uri=http%3A%2F%2Flocalhost%3A5571%2Fcallback&state=explicit-consent-state" |
+		awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+	explicit_verifier=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$explicit_login" |
+		awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+	curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$explicit_verifier" |
+		awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}'
+}
+explicit_consent_location=$(explicit_consent_page)
+explicit_consent_html=$(curl --fail --silent --show-error --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$explicit_consent_location")
+printf '%s' "$explicit_consent_html" | grep -q 'Explicit consent client'
+printf '%s' "$explicit_consent_html" | grep -q 'See your username.'
+printf '%s' "$explicit_consent_html" | grep -q 'name="decision" value="deny"'
+explicit_challenge=$(printf '%s' "$explicit_consent_location" | sed -n 's/.*consent_challenge=\([^&]*\).*/\1/p')
+explicit_denied=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+	--data-urlencode "_csrf=${csrf_token}" --data "challenge=${explicit_challenge}" --data-urlencode 'decision=deny' \
+	"${SHAUTH_PUBLIC_URL}"/oauth/consent | awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+explicit_denied_callback=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$explicit_denied" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$explicit_denied_callback" in
+	"${explicit_consent_redirect_uri}"?*error=access_denied*) ;;
+	*) echo "denied consent did not return access_denied to the application: ${explicit_denied_callback}" >&2; exit 1 ;;
+esac
+explicit_consent_location=$(explicit_consent_page)
+explicit_challenge=$(printf '%s' "$explicit_consent_location" | sed -n 's/.*consent_challenge=\([^&]*\).*/\1/p')
+explicit_allowed=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+	--data-urlencode "_csrf=${csrf_token}" --data "challenge=${explicit_challenge}" --data-urlencode 'decision=allow' \
+	--data-urlencode 'scope=openid' --data-urlencode 'scope=profile' --data-urlencode 'scope=email' \
+	"${SHAUTH_PUBLIC_URL}"/oauth/consent | awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+explicit_allowed_callback=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$explicit_allowed" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+case "$explicit_allowed_callback" in
+	"${explicit_consent_redirect_uri}"?*code=*) ;;
+	*) echo "allowed consent did not return a code to the application: ${explicit_allowed_callback}" >&2; exit 1 ;;
+esac
+explicit_granted=$(curl --fail --silent --show-error "http://localhost:4445/admin/oauth2/auth/sessions/consent?subject=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username='admin'")" |
+	node -e 'let body="";process.stdin.on("data",value=>body+=value);process.stdin.on("end",()=>{const grant=JSON.parse(body).find(session=>session.consent_request.client.client_id===process.argv[1]);process.stdout.write(grant.grant_scope.slice().sort().join(" "))})' "$explicit_consent_client_id")
+if [ "$explicit_granted" != 'openid profile' ]; then
+	echo "explicit consent granted scopes the application did not request: ${explicit_granted}" >&2
+	exit 1
+fi
+# RFC 7009 revocation reaches Ory Hydra through Shauth's issuer; a relying
+# party revoking its refresh token at logout must not be refused.
+printf '%s\n' 'revoking the refresh token through the published revocation endpoint'
+curl --fail --silent --show-error \
+	--data-urlencode "token=${refresh_token}" \
+	--data-urlencode 'token_type_hint=refresh_token' \
+	--data-urlencode "client_id=${auto_consent_client_id}" \
+	--data-urlencode "client_secret=${auto_consent_client_secret}" \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/revoke >/dev/null
+if curl --fail --silent \
+	--data-urlencode 'grant_type=refresh_token' \
+	--data-urlencode "refresh_token=${refresh_token}" \
+	--data-urlencode "client_id=${auto_consent_client_id}" \
+	--data-urlencode "client_secret=${auto_consent_client_secret}" \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token >/dev/null 2>&1; then
+	echo 'a revoked refresh token still issued tokens' >&2
+	exit 1
+fi
 curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q 'admin@localhost.test'
 curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin | grep -q 'Private administration'
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \

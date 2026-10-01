@@ -76,6 +76,30 @@ issuer, including discovery, authorization, token, UserInfo, revocation,
 introspection, and front-channel logout endpoints. Relying applications never
 connect to Hydra's private task coordinate directly.
 
+Upstream GitHub and Microsoft Entra ID authorization uses PKCE (S256) in
+addition to the state cookie, and Entra ID's nonce. Cancelling at the upstream
+provider returns the person to the sign-in page with their destination intact.
+An Entra ID identity links to an existing Shauth account by email only when
+Entra ID verified that address and the existing account's address is itself
+verified; otherwise the sign-in is refused rather than merged.
+
+Password sign-in is throttled from the durable audit record: ten failures for
+one username, or fifty from one address, within fifteen minutes refuse further
+password attempts until the earlier failures leave the window. Refusals for
+unknown, disabled, and password-less accounts take the same bcrypt time as a
+wrong password, so response time does not reveal which usernames exist.
+
+Shauth honours the relying party's OIDC `prompt=login` and `max_age`: a
+signed-in person is sent back to sign in, and the login challenge completes
+only with a browser session created after that request. Signing in again in a
+browser replaces its previous Shauth session; signing in as a different
+account also ends the previous account's correlated application sessions.
+Applications that Shauth does not manage show a consent page naming the
+application and each permission in plain words, with Allow and Deny; a denial
+returns `access_denied` to the application, and a grant never exceeds the
+scopes the application requested or applies to a different account than the
+one signed in.
+
 Administrators can invalidate one Shauth browser session or invalidate every
 session for a user. Shauth revokes each correlated Ory Hydra login session by
 `sid` so relying applications receive logout notifications, then deletes any
@@ -119,8 +143,10 @@ without a second registered app on a distinct origin and OIDC client reports a
 red result because global SSO logout cannot truthfully be proven in isolation.
 The Apps and administration pages report `🟢 Passed`, `🔴 Failed`, or
 `🟡 Ongoing` for each direction and let any signed-in user rerun both checks.
-PostgreSQL serializes the global queue and enforces at least 30 seconds between
-check starts.
+PostgreSQL serializes the global queue: at most three checks run at once, no
+application is the target of one running check while it witnesses another, and
+a request for a direction that is already queued or running joins that run
+instead of starting another.
 
 The validation account is a dedicated, non-administrative Shauth identity with
 no password or federated login. A validator bearer token authorizes creation of

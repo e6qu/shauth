@@ -128,7 +128,7 @@ func TestCSRFPostsRejectsOriginWithPath(t *testing.T) {
 }
 
 func TestOAuthFormPolicyAllowsRegisteredApplicationRedirectSchemes(t *testing.T) {
-	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := securityHeaders(&url.URL{Scheme: "https", Host: "auth.example.test"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		allowOIDCFormAction(w)
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -143,7 +143,7 @@ func TestOAuthFormPolicyAllowsRegisteredApplicationRedirectSchemes(t *testing.T)
 }
 
 func TestDefaultFormPolicyRemainsSameOrigin(t *testing.T) {
-	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := securityHeaders(&url.URL{Scheme: "https", Host: "auth.example.test"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -163,7 +163,7 @@ func TestDefaultFormPolicyRemainsSameOrigin(t *testing.T) {
 }
 
 func TestProviderLogoutPolicyAllowsRegisteredClientFrames(t *testing.T) {
-	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := securityHeaders(&url.URL{Scheme: "https", Host: "auth.example.test"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
@@ -244,5 +244,69 @@ func TestLoginPreservesOIDCTransactionForGitHub(t *testing.T) {
 	}
 	if got := response.Header().Get("Content-Security-Policy"); got != oidcContentSecurityPolicy {
 		t.Fatalf("content security policy = %q, want %q", got, oidcContentSecurityPolicy)
+	}
+}
+
+// Relying parties call Hydra's revocation, UserInfo and logout endpoints
+// without a Shauth cookie. Shauth's browser form token must not refuse them.
+func TestCSRFPostsLeavesProviderEndpointsToTheProvider(t *testing.T) {
+	publicURL, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, path := range []string{"/oauth2/token", "/oauth2/revoke", "/oauth2/sessions/logout", "/userinfo"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "https://auth.example.test"+path, nil))
+		if response.Code != http.StatusNoContent {
+			t.Errorf("POST %s status = %d, want %d", path, response.Code, http.StatusNoContent)
+		}
+	}
+}
+
+// The machine namespace is exempt from the form token because it uses bearer
+// tokens. A cookie-authenticated call there must still come from this origin.
+func TestCSRFPostsRefusesCrossOriginCookieCallsToTheMachineNamespace(t *testing.T) {
+	publicURL, err := url.Parse("https://auth.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := csrfPosts(publicURL, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	target := "https://auth.example.test/internal/me/sessions/00000000-0000-4000-8000-000000000000/revoke"
+	for origin, want := range map[string]int{
+		"https://sibling.example.test": http.StatusForbidden,
+		"null":                         http.StatusForbidden,
+		"https://auth.example.test":    http.StatusNoContent,
+	} {
+		request := httptest.NewRequest(http.MethodPost, target, nil)
+		request.Header.Set("Origin", origin)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != want {
+			t.Errorf("Origin %s status = %d, want %d", origin, response.Code, want)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, target, nil)
+	request.Header.Set("Origin", "https://operator-tool.example.test")
+	request.Header.Set("Authorization", "Bearer machine-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("bearer caller status = %d, want the handler to authenticate it", response.Code)
+	}
+}
+
+func TestSecurityHeadersPinHTTPSOnlyForAnHTTPSOrigin(t *testing.T) {
+	for scheme, want := range map[string]string{"https": "max-age=31536000; includeSubDomains", "http": ""} {
+		handler := securityHeaders(&url.URL{Scheme: scheme, Host: "auth.example.test"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, scheme+"://auth.example.test/login", nil))
+		if got := response.Header().Get("Strict-Transport-Security"); got != want {
+			t.Errorf("%s Strict-Transport-Security = %q, want %q", scheme, got, want)
+		}
 	}
 }
