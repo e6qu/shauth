@@ -1129,7 +1129,7 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
   --data-urlencode 'next=/' \
   "${SHAUTH_PUBLIC_URL}"/login >/dev/null
-curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_id}" | grep -q 'Revoked'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_id}" | grep -q '>Ended<'
 
 # Subject-wide invalidation must revoke Hydra's refresh grants as well as each
 # Shauth browser session. A successful refresh here would leave a revoked user
