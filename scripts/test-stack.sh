@@ -37,8 +37,6 @@ export SHAUTH_URL
 ./scripts/test-process-wait.sh
 ./scripts/check-gateway-test-coordinates.sh
 npm ci
-node node_modules/playwright/cli.js install --with-deps chromium
-npm run test:validator
 
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
@@ -46,6 +44,34 @@ random_secret() {
 
 # shellcheck source=./scripts/process-wait.sh
 . "$root/scripts/process-wait.sh"
+
+# run_bounded runs one command in the background and waits for it under a
+# deadline, so a stalled download fails this script with a clear message
+# instead of consuming the CI job's whole time budget.
+run_bounded() {
+	bounded_label=$1
+	bounded_timeout=$2
+	shift 2
+	"$@" &
+	bounded_pid=$!
+	wait_for_process "$bounded_pid" "$bounded_label" "$bounded_timeout"
+}
+
+# Chromium comes from Playwright's CDN. Its system libraries normally come
+# with the host (the GitHub runner image ships them), so the distribution
+# mirror is used only when a real launch proves one is missing: a slow mirror
+# once spent most of the job's budget installing fonts Chromium did not need.
+run_bounded 'Chromium download' 180 node node_modules/playwright/cli.js install chromium
+chromium_launches() {
+	run_bounded 'Chromium launch check' 60 node --input-type=module --eval \
+		'import { chromium } from "playwright"; const browser = await chromium.launch({ headless: true }); const page = await browser.newPage(); await page.setContent("<p>ready</p>"); if (await page.textContent("p") !== "ready") throw new Error("Chromium did not render"); await browser.close();'
+}
+if ! chromium_launches; then
+	echo 'Chromium cannot launch on this host; installing its system dependencies.' >&2
+	run_bounded 'Chromium system dependency installation' 420 node node_modules/playwright/cli.js install-deps chromium
+	chromium_launches
+fi
+npm run test:validator
 
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 export POSTGRES_PASSWORD
