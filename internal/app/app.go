@@ -1042,6 +1042,9 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusBadRequest, "This GitHub sign-in link has expired or was already used. Sign in again.")
 		return
 	}
+	// A failure from here on offers to sign in again towards where the
+	// person was going, such as the application that sent them.
+	r = withSignInRetry(r, transaction.Next)
 	if r.URL.Query().Get("error") != "" {
 		s.recordSignIn(r, identity.AuditSignInFailed, "github", "", "", "GitHub returned "+r.URL.Query().Get("error"))
 		s.upstreamSignInCancelled(w, r, "GitHub", relativeNext(transaction.Next))
@@ -1168,6 +1171,9 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusBadRequest, "This Microsoft Entra ID sign-in link has expired or was already used. Sign in again.")
 		return
 	}
+	// A failure from here on offers to sign in again towards where the
+	// person was going, such as the application that sent them.
+	r = withSignInRetry(r, transaction.Next)
 	if r.URL.Query().Get("error") != "" {
 		s.recordSignIn(r, identity.AuditSignInFailed, "entra", "", "", "Microsoft Entra ID returned "+r.URL.Query().Get("error"))
 		s.upstreamSignInCancelled(w, r, "Microsoft Entra ID", relativeNext(transaction.Next))
@@ -4178,11 +4184,21 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 // failPage answers a browser navigation with a styled, navigable error page
 // instead of unstyled plain text, so a person who hits a failure keeps the
 // header, the theme, and a way back.
+type signInRetryKey struct{}
+
+// withSignInRetry records where a sign-in that fails should start over to.
+func withSignInRetry(r *http.Request, next string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), signInRetryKey{}, relativeNext(next)))
+}
+
 func (s *Server) failPage(w http.ResponseWriter, r *http.Request, status int, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	var page bytes.Buffer
 	heading := errorHeading(status)
 	data := s.view(r, heading, map[string]any{"Status": status, "StatusText": heading, "Message": asSentence(message)})
+	if next, ok := r.Context().Value(signInRetryKey{}).(string); ok && next != "" && next != "/" {
+		data["SignInNext"] = next
+	}
 	if err := s.templates.ExecuteTemplate(&page, "error", data); err != nil {
 		observe.Errorf("render error page: %v", err)
 		http.Error(w, message, status)
