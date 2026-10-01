@@ -72,7 +72,7 @@ trap 'rm -f "$fixture"' EXIT
 	}
 ] + [{id: 999, created_at: "2026-08-01T00:00:00Z", metadata: {container: {tags: []}}}]' >"$fixture"
 
-selected="$(jq -r --argjson keep 20 --argjson inflight_seconds 1200 -f "$root/scripts/select-obsolete-container-versions.jq" "$fixture" | sort -n | paste -sd, -)"
+selected="$(jq -r --argjson keep 20 --argjson inflight_seconds 1200 --argjson retain_seconds 0 -f "$root/scripts/select-obsolete-container-versions.jq" "$fixture" | sort -n | paste -sd, -)"
 if [[ "$selected" != '0,1,2,10,11,12,999' ]]; then
 	echo "retention selector chose unexpected package versions: $selected" >&2
 	exit 1
@@ -91,11 +91,29 @@ jq -n --arg recent "$(date -u -d '1 minute ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null 
 	{id: 3, created_at: $recent, metadata: {container: {tags: ["bbbbbbbbbbbb-arm64"]}}}
 ]' >"$inflight_fixture"
 
-inflight_selected="$(jq -r --argjson keep 20 --argjson inflight_seconds 1200 -f "$root/scripts/select-obsolete-container-versions.jq" "$inflight_fixture" | sort -n | paste -sd, -)"
+inflight_selected="$(jq -r --argjson keep 20 --argjson inflight_seconds 1200 --argjson retain_seconds 0 -f "$root/scripts/select-obsolete-container-versions.jq" "$inflight_fixture" | sort -n | paste -sd, -)"
 if [[ "$inflight_selected" != '1' ]]; then
 	echo "retention selector must reap only the old orphan, chose: $inflight_selected" >&2
 	exit 1
 fi
 echo "in-flight architecture images are retained"
+
+# A release still inside the age floor survives even when more than the
+# newest releases were published after it; an older one does not.
+retention_fixture="$(mktemp)"
+trap 'rm -f "$fixture" "$inflight_fixture" "$retention_fixture"' EXIT
+days_ago() { date -u -d "$1 days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-"$1"d +%Y-%m-%dT%H:%M:%SZ; }
+jq -n --arg old "$(days_ago 100)" --arg recent "$(days_ago 10)" --arg newer "$(days_ago 2)" --arg newest "$(days_ago 1)" '[
+	{id: 1, created_at: $old, metadata: {container: {tags: ["aaaaaaaaaaaa"]}}},
+	{id: 2, created_at: $recent, metadata: {container: {tags: ["bbbbbbbbbbbb"]}}},
+	{id: 3, created_at: $newer, metadata: {container: {tags: ["cccccccccccc"]}}},
+	{id: 4, created_at: $newest, metadata: {container: {tags: ["dddddddddddd"]}}}
+]' >"$retention_fixture"
+retention_selected="$(jq -r --argjson keep 2 --argjson inflight_seconds 1200 --argjson retain_seconds $((90 * 86400)) -f "$root/scripts/select-obsolete-container-versions.jq" "$retention_fixture" | sort -n | paste -sd, -)"
+if [[ "$retention_selected" != '1' ]]; then
+	echo "retention selector must keep releases inside the age floor and reap only older ones, chose: $retention_selected" >&2
+	exit 1
+fi
+echo "releases inside the retention age are kept"
 
 echo 'container publication workflow contract passed'
