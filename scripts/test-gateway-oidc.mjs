@@ -665,6 +665,7 @@ function queryGateway(database, query) {
         ...process.env,
         SHAUTH_VALIDATOR_TOKEN: "unused-compose-interpolation-value",
         SHAUTH_VALIDATION_STATUS_TOKEN: "unused-compose-interpolation-value",
+        SHAUTH_TOKEN_HOOK_TOKEN: "unused-compose-interpolation-value",
       },
     },
   ).trim();
