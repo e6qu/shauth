@@ -329,9 +329,22 @@ async function assertAppSignedInAndGlobalLogout(page, context, providerTrace) {
   await repeatedProviderPage.close();
 }
 
-const browser = await chromium.launch({ headless: true });
-let credentialBoundaryFailure = "";
+// Exactly one result reaches stdout, which the runner parses as a single JSON
+// value. A deadline arrives as SIGTERM; the run reports the stage it reached
+// and its trace instead of dying silently, then releases the browser.
+let reported = false;
+function report(status, failure) {
+  if (reported) return;
+  reported = true;
+  process.stdout.write(JSON.stringify({ status, failure }));
+}
 const flowTrace = [];
+const browser = await chromium.launch({ headless: true });
+process.once("SIGTERM", () => {
+  report("failed", formatFailure(validationStage, "the validation deadline elapsed before this stage finished", flowTrace));
+  browser.close().finally(() => process.exit(1));
+});
+let credentialBoundaryFailure = "";
 try {
   validationStage = `verify ${job.app_slug} fails closed for an anonymous browser`;
   await assertAnonymousValidationFailsClosed(browser);
@@ -389,12 +402,12 @@ try {
   }
   await assertAppSignedInAndGlobalLogout(page, context, providerTrace);
   if (nextBootstrap !== job.bootstrap_urls.length) throw new Error("validation browser bootstrap budget was not consumed exactly once");
-  process.stdout.write(JSON.stringify({ status: "passed", failure: "" }));
+  validationStage = "close the validation browser context";
   await context.close();
+  report("passed", "");
 } catch (error) {
   const detail = credentialBoundaryFailure || (error instanceof Error ? error.message : error);
-  const message = formatFailure(validationStage, detail, flowTrace);
-  process.stdout.write(JSON.stringify({ status: "failed", failure: message }));
+  report("failed", formatFailure(validationStage, detail, flowTrace));
 } finally {
   await browser.close();
 }

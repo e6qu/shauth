@@ -88,8 +88,9 @@ rejected. Any release, endpoint-coordinate, or OpenID Connect registration chang
 through both the Shauth catalog and the app's direct launch URL.
 
 The ARM64 validator is a standalone outbound-only Amazon ECS service, not a
-sidecar and not an authentication proxy. PostgreSQL leases one check globally
-and enforces a 30-second start cooldown. Each check uses a second registered
+sidecar and not an authentication proxy. PostgreSQL leases at most three checks at
+once, never runs one application as a target and a witness at the same time,
+and joins a repeated request to the run already queued or running. Each check uses a second registered
 application on a distinct origin to prove global session revocation; without a
 real witness application the result is red. The validator task has no AWS task
 role, no ingress, and an execution role limited to its dedicated secret. The

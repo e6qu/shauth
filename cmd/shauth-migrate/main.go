@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -27,18 +28,36 @@ func main() {
 		directory = defaultMigrationsDirectory
 	}
 
-	context := context.Background()
-	pool, err := pgxpool.New(context, databaseURL)
+	// A migration that cannot take its locks must fail with a clear error,
+	// not wait forever behind a task that is still serving traffic.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		log.Fatalf("connect PostgreSQL: %v", err)
 	}
 	defer pool.Close()
-	if err := apply(context, pool, directory); err != nil {
+	if err := apply(ctx, pool, directory); err != nil {
 		log.Fatal(err)
 	}
 }
 
+// migrationLockID serializes migrators: two tasks starting together must not
+// both find a migration missing and race to apply it.
+const migrationLockID int64 = 0x5348415554484d47
+
 func apply(ctx context.Context, pool *pgxpool.Pool, directory string) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockID); err != nil {
+		return fmt.Errorf("wait for other migrators: %w", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockID)
+	}()
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
@@ -51,12 +70,12 @@ func apply(ctx context.Context, pool *pgxpool.Pool, directory string) error {
 	}
 	sort.Strings(filenames)
 
-	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS shauth_schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL)`); err != nil {
+	if _, err := conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS shauth_schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL)`); err != nil {
 		return fmt.Errorf("create migration ledger: %w", err)
 	}
 	for _, filename := range filenames {
 		var exists bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shauth_schema_migrations WHERE filename = $1)`, filename).Scan(&exists); err != nil {
+		if err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shauth_schema_migrations WHERE filename = $1)`, filename).Scan(&exists); err != nil {
 			return fmt.Errorf("read migration ledger: %w", err)
 		}
 		if exists {
@@ -66,9 +85,13 @@ func apply(ctx context.Context, pool *pgxpool.Pool, directory string) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", filename, err)
 		}
-		tx, err := pool.Begin(ctx)
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin migration %s: %w", filename, err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '30s'`); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("bound lock wait for migration %s: %w", filename, err)
 		}
 		if _, err := tx.Exec(ctx, string(body)); err != nil {
 			_ = tx.Rollback(ctx)

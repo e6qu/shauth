@@ -105,14 +105,17 @@ func describeOperationFailure(action string, err error) (int, string) {
 	case errors.As(err, &invalid):
 		return http.StatusBadRequest, invalid.Error()
 	case errors.As(err, &dependency):
-		observe.Errorf("%s: %v", action, err)
+		// The caller sees only the safe message; the cause is what an
+		// operator needs to diagnose the dependency.
+		observe.Errorf("%s: %s: %v", action, dependency.message, dependency.cause)
 		return http.StatusBadGateway, dependency.Error()
 	case errors.Is(err, identity.ErrAlreadyExists):
 		return http.StatusConflict, action + " already exists"
 	case errors.Is(err, errHydraClientConflict):
 		return http.StatusConflict, "an OAuth client with that identifier already exists"
 	case errors.Is(err, errOIDCClientInUse), errors.Is(err, errSelfDisable),
-		errors.Is(err, identity.ErrValidationUserProtected), errors.Is(err, identity.ErrActiveSessionNotFound):
+		errors.Is(err, identity.ErrValidationUserProtected), errors.Is(err, identity.ErrActiveSessionNotFound),
+		errors.Is(err, identity.ErrUserInactive):
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, identity.ErrUserNotFound), errors.Is(err, identity.ErrSessionNotFound),
 		errors.Is(err, identity.ErrInvitationNotRevocable), errors.Is(err, identity.ErrManagedAppNotFound),
@@ -160,13 +163,17 @@ func (s *Server) disableUser(ctx context.Context, userID string, requester actor
 	if err != nil {
 		return identity.User{}, err
 	}
-	for _, hydraSessionID := range hydraSessionIDs {
-		if err := s.revokeHydraLoginSession(ctx, hydraSessionID); err != nil {
-			return identity.User{}, dependencyFailure("the account was disabled and its sessions ended, but OAuth session revocation did not complete", err)
-		}
+	revokeErr := s.revokeOtherHydraSessions(ctx, hydraSessionIDs)
+	if revokeErr == nil {
+		revokeErr = s.revokeHydraSubjectSessions(ctx, userID)
 	}
-	if err := s.revokeHydraSubjectSessions(ctx, userID); err != nil {
-		return identity.User{}, dependencyFailure("the account was disabled and its sessions ended, but OAuth session revocation did not complete", err)
+	if revokeErr != nil {
+		// The account is disabled whatever the provider answered, so the
+		// audit record says so, and that provider revocation is unfinished.
+		s.record(ctx, requester, identity.AuditAccountDisabled, userID, map[string]any{
+			"revoked_provider_sessions": 0, "oauth_revocation": "failed",
+		})
+		return identity.User{}, dependencyFailure("the account was disabled and its sessions ended, but OAuth session revocation did not complete", revokeErr)
 	}
 	user, err := s.store.UserByID(ctx, userID)
 	if err != nil {
@@ -276,10 +283,13 @@ func (s *Server) revokeSession(ctx context.Context, sessionID string, requester 
 	if err != nil {
 		return revokeSessionResult{}, fmt.Errorf("load OAuth session correlation: %w", err)
 	}
-	for _, hydraSessionID := range hydraSessionIDs {
-		if err := s.revokeHydraLoginSession(ctx, hydraSessionID); err != nil {
-			return revokeSessionResult{}, dependencyFailure("the session ended, but OAuth session revocation did not complete", err)
+	if err := s.revokeOtherHydraSessions(ctx, hydraSessionIDs); err != nil {
+		if localErr == nil {
+			s.record(ctx, requester, identity.AuditSessionRevoked, userID, map[string]any{
+				"session_id": sessionID, "revoked_provider_sessions": 0, "oauth_revocation": "failed",
+			})
 		}
+		return revokeSessionResult{}, dependencyFailure("the session ended, but OAuth session revocation did not complete", err)
 	}
 	if localErr != nil {
 		return revokeSessionResult{}, localErr
@@ -300,7 +310,7 @@ func (s *Server) revokeUserSessions(ctx context.Context, userID, email string, r
 		}
 		resolved, err := s.store.UserIDByEmail(ctx, email)
 		if err != nil {
-			return "", identity.ErrUserNotFound
+			return "", err
 		}
 		userID = resolved
 	}
@@ -311,6 +321,7 @@ func (s *Server) revokeUserSessions(ctx context.Context, userID, email string, r
 		return "", err
 	}
 	if err := s.revokeHydraSessions(ctx, userID); err != nil {
+		s.record(ctx, requester, identity.AuditAccountSessionsEnded, userID, map[string]any{"addressed_by_email": email != "", "oauth_revocation": "failed"})
 		return "", dependencyFailure("the sessions ended, but OAuth session revocation did not complete", err)
 	}
 	s.record(ctx, requester, identity.AuditAccountSessionsEnded, userID, map[string]any{"addressed_by_email": email != ""})

@@ -200,3 +200,39 @@ func TestTrafficPublishesTheDistributionItsPercentileCameFrom(t *testing.T) {
 		t.Fatalf("the three-second response is not in its bucket: %v", record.LatencyBuckets)
 	}
 }
+
+// With ten requests, the 95th percentile is the slowest one: rounding the
+// rank down would report the fast bucket and hide the outlier.
+func TestPercentileRoundsTheRankUp(t *testing.T) {
+	buckets := make([]int64, len(latencyBoundsMS)+1)
+	buckets[0] = 9 // nine requests within 5 ms
+	buckets[7] = 1 // one within 1000 ms
+	if got := percentileMS(buckets, 10, 95, 900); got != 1000 && got != 900 {
+		t.Fatalf("p95 of nine fast requests and one slow one = %d ms, want the slow bucket", got)
+	}
+}
+
+// A handler that panics is a server failure, not a success.
+func TestPanickingHandlerIsCountedAsAServerError(t *testing.T) {
+	recorder := newTraffic()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /explode", func(http.ResponseWriter, *http.Request) { panic("boom") })
+	handler := recorder.observe(mux, mux)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the panic was swallowed instead of reaching the server")
+			}
+		}()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/explode", nil))
+	}()
+	for _, route := range recorder.report().Routes {
+		if route.Method == http.MethodGet && route.Pattern == "/explode" {
+			if route.ByStatusClass["5xx"] != 1 || route.ByStatusClass["2xx"] != 0 {
+				t.Fatalf("a panicking request was counted as %v", route.ByStatusClass)
+			}
+			return
+		}
+	}
+	t.Fatal("the panicking request was not counted")
+}

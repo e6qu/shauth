@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEnsureRedirectBodyAddsBodyForUnknownLengthRedirect(t *testing.T) {
@@ -64,5 +65,22 @@ func TestRedirectTargetExcludesOAuthQuery(t *testing.T) {
 func TestRedirectTargetRejectsRelativeLocation(t *testing.T) {
 	if got, want := redirectTarget("/callback"), "invalid"; got != want {
 		t.Fatalf("redirect target = %q, want %q", got, want)
+	}
+}
+
+// A dependency failure is logged, and the log is readable by administrators
+// and the logs API, so it must not repeat the challenge in the request URL.
+func TestProviderRequestFailuresOmitTheQueryString(t *testing.T) {
+	server := &Server{httpClient: &http.Client{Timeout: time.Second}}
+	request, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:1/admin/oauth2/auth/requests/logout?logout_challenge=secret-challenge", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = server.doProvider(request)
+	if err == nil {
+		t.Fatal("a request to a closed port succeeded")
+	}
+	if strings.Contains(err.Error(), "secret-challenge") || !strings.Contains(err.Error(), "/admin/oauth2/auth/requests/logout") {
+		t.Fatalf("provider failure = %q, want the endpoint without its query", err)
 	}
 }

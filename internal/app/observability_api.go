@@ -246,7 +246,15 @@ func (s *Server) logoutGrantsAPI(w http.ResponseWriter, r *http.Request) {
 		writeOperationFailure(w, "list logout grants", err)
 		return
 	}
-	onlyOutstanding := r.URL.Query().Get("state") != "all"
+	var onlyOutstanding bool
+	switch r.URL.Query().Get("state") {
+	case "", "outstanding":
+		onlyOutstanding = true
+	case "all":
+	default:
+		writeOperationFailure(w, "list logout grants", identity.Invalid("state must be outstanding or all"))
+		return
+	}
 	grants, total, err := s.store.ListLogoutGrants(r.Context(), onlyOutstanding, page)
 	if err != nil {
 		writeOperationFailure(w, "list logout grants", err)
@@ -256,8 +264,8 @@ func (s *Server) logoutGrantsAPI(w http.ResponseWriter, r *http.Request) {
 	for _, grant := range grants {
 		records = append(records, logoutGrantRecord{
 			ID: grant.ID, SubjectUserID: grant.SubjectID, ManagedClientID: grant.ManagedClientID,
-			CreatedAt: grant.CreatedAt.UTC(), ConsumedAt: grant.ConsumedAt, CompletedAt: grant.CompletedAt,
-			RetryAfter: grant.CleanupAfter, Attempts: grant.CleanupAttempts, LastError: grant.LastError,
+			CreatedAt: grant.CreatedAt.UTC(), ConsumedAt: utcTime(grant.ConsumedAt), CompletedAt: utcTime(grant.CompletedAt),
+			RetryAfter: utcTime(grant.CleanupAfter), Attempts: grant.CleanupAttempts, LastError: grant.LastError,
 		})
 	}
 	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
@@ -277,24 +285,16 @@ func (s *Server) appAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireApplicationReadToken(w, r) {
 		return
 	}
-	slug := r.PathValue("slug")
-	views, err := s.appViews(r.Context())
+	view, err := s.appViewBySlug(r.Context(), r.PathValue("slug"))
 	if err != nil {
 		writeOperationFailure(w, "read application", err)
 		return
 	}
-	for _, view := range views {
-		if view.Slug != slug {
-			continue
-		}
-		writeAdminAPIJSON(w, http.StatusOK, map[string]any{
-			"schema_version": "shauth.app/v1",
-			"observed_at":    time.Now().UTC(),
-			"app":            newAppRecord(view),
-		})
-		return
-	}
-	writeAdminAPIError(w, http.StatusNotFound, "managed app not found")
+	writeAdminAPIJSON(w, http.StatusOK, map[string]any{
+		"schema_version": "shauth.app/v1",
+		"observed_at":    time.Now().UTC(),
+		"app":            newAppRecord(view),
+	})
 }
 
 // mySessionsAPI lets a signed-in person see their own sessions. Until now
@@ -306,7 +306,12 @@ func (s *Server) mySessionsAPI(w http.ResponseWriter, r *http.Request) {
 		writeAdminAPIError(w, http.StatusUnauthorized, "sign-in required")
 		return
 	}
-	sessions, err := s.store.ListSessions(r.Context(), user.ID)
+	page, err := requestedPage(r)
+	if err != nil {
+		writeOperationFailure(w, "list your sessions", err)
+		return
+	}
+	sessions, total, err := s.store.ListSessions(r.Context(), user.ID, page)
 	if err != nil {
 		writeOperationFailure(w, "list your sessions", err)
 		return
@@ -321,6 +326,7 @@ func (s *Server) mySessionsAPI(w http.ResponseWriter, r *http.Request) {
 		"observed_at":    time.Now().UTC(),
 		"user":           newUserRecord(user),
 		"sessions":       records,
+		"page":           pageEnvelope(page, len(records), total),
 	})
 }
 
@@ -365,7 +371,11 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login?next=/account", http.StatusSeeOther)
 		return
 	}
-	sessions, err := s.store.ListSessions(r.Context(), user.ID)
+	page, err := requestedPage(r)
+	if err != nil {
+		page = identity.Page{}
+	}
+	sessions, total, err := s.store.ListSessions(r.Context(), user.ID, page)
 	if err != nil {
 		s.failPage(w, r, http.StatusInternalServerError, "Your sessions could not be loaded.")
 		return
@@ -381,6 +391,7 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "account", s.view(r, "Your account", map[string]any{
 		"SignedIn": true, "IsAdmin": user.Role == identity.RoleAdmin, "Account": newUserRecord(user),
 		"Sessions": records, "Done": noticeDone(r), "Error": noticeError(r),
+		"Page": browserPage(r, page, len(records), total),
 	}))
 }
 

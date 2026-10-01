@@ -735,11 +735,25 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	correlation, grant, err := s.store.CreateLogoutCorrelationGrant(r.Context(), user.ID, session.ID, "", "", time.Now())
-	if err != nil {
-		localErr := s.store.RevokeSession(r.Context(), session.ID, time.Now())
+	if errors.Is(err, identity.ErrLogoutSessionInactive) {
+		// A repeated submission: the first request is already signing this
+		// browser out, so this one shows the same outcome.
 		s.expireCookie(w, browserSessionCookie)
-		observe.Errorf("logout correlation creation failed after exact local revocation: local=%v correlation=%v", localErr, err)
-		s.failPage(w, r, http.StatusBadGateway, "browser session ended but connected application logout could not start")
+		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
+		return
+	}
+	if err != nil {
+		// Without a correlation grant the connected applications cannot be
+		// told which sessions ended, so the account's sessions all end here
+		// instead: failing closed, not leaving them alive.
+		s.expireCookie(w, browserSessionCookie)
+		_, revokeErr := s.revokeUserSessions(r.Context(), user.ID, "", browserActor(r, user, session))
+		observe.Errorf("logout correlation creation failed; ended every session for the account instead: correlation=%v revoke=%v", err, revokeErr)
+		if revokeErr != nil {
+			s.failPage(w, r, http.StatusBadGateway, "Your Shauth session ended, but signing out of connected applications did not finish. Sign out again from each application, or ask an administrator to end your sessions.")
+			return
+		}
+		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
 		return
 	}
 	s.expireCookie(w, browserSessionCookie)
@@ -966,25 +980,32 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := s.entraOAuth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(transaction.Verifier))
 	if err != nil {
+		observe.Errorf("exchange Microsoft Entra ID authorization code: %v", err)
+		s.recordSignIn(r, identity.AuditSignInFailed, "entra", "", "", "authorization code exchange failed")
 		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID authorization failed")
 		return
 	}
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
+		s.recordSignIn(r, identity.AuditSignInFailed, "entra", "", "", "token response omitted the ID token")
 		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID authorization omitted the ID token")
 		return
 	}
 	idToken, err := s.entraVerify.Verify(r.Context(), rawIDToken)
 	if err != nil {
+		observe.Warnf("verify Microsoft Entra ID token: %v", err)
+		s.recordSignIn(r, identity.AuditSignInFailed, "entra", "", "", "ID token verification failed")
 		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID token verification failed")
 		return
 	}
 	var claims entraClaims
 	if err := idToken.Claims(&claims); err != nil {
+		s.recordSignIn(r, identity.AuditSignInFailed, "entra", "", "", "ID token claims could not be read")
 		s.failPage(w, r, http.StatusBadGateway, "Microsoft Entra ID identity claims were invalid")
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(transaction.Nonce)) != 1 || !strings.EqualFold(claims.TenantID, s.config.EntraTenantID) || claims.ObjectID == "" || claims.Subject == "" {
+		s.recordSignIn(r, identity.AuditSignInFailed, "entra", claims.PreferredUsername, "", "nonce, tenant or identity claims did not match")
 		s.failPage(w, r, http.StatusForbidden, "Microsoft Entra ID identity did not match this Shauth tenant")
 		return
 	}
@@ -1318,7 +1339,7 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 	preservedHydraSessions, err := preservedPublicLogoutSessions(request.SessionID, grant.BrowserHydraSessionIDs)
 	if err != nil {
 		s.scheduleLogoutRecovery(r.Context(), grant, err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		s.rejectMismatchedLogout(w, r, challenge, err)
 		return
 	}
 	s.completeLogout(w, r, grant, preservedHydraSessions, challenge, correlationCookie.Value)
@@ -1350,7 +1371,7 @@ func (s *Server) hydraLogoutWithoutBrowserCookie(w http.ResponseWriter, r *http.
 	preservedHydraSessions, err := preservedPublicLogoutSessions(request.SessionID, createdGrant.BrowserHydraSessionIDs)
 	if err != nil {
 		s.scheduleLogoutRecovery(r.Context(), createdGrant, err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		s.rejectMismatchedLogout(w, r, challenge, err)
 		return
 	}
 	grant, err := s.store.ConsumeLogoutCorrelationGrant(r.Context(), raw, request.Subject, time.Now())
@@ -1364,6 +1385,18 @@ func (s *Server) hydraLogoutWithoutBrowserCookie(w http.ResponseWriter, r *http.
 		return
 	}
 	s.completeLogout(w, r, grant, preservedHydraSessions, challenge, raw)
+}
+
+// rejectMismatchedLogout ends a logout request that names a different
+// provider session than this browser's. The correlated sessions are already
+// scheduled for revocation; Hydra's request is refused so it does not wait
+// on an answer, and the person sees a navigable page.
+func (s *Server) rejectMismatchedLogout(w http.ResponseWriter, r *http.Request, challenge string, cause error) {
+	observe.Warnf("refuse mismatched OAuth logout: %v", cause)
+	if err := s.hydraRejectLogout(r.Context(), challenge); err != nil {
+		observe.Errorf("reject mismatched OAuth logout: %v", err)
+	}
+	s.failPage(w, r, http.StatusBadRequest, "This sign-out request belongs to a different browser session. Your sessions here are being ended; sign out again from the application if it still shows you as signed in.")
 }
 
 func preservedPublicLogoutSessions(providerSessionID string, browserSessionIDs []string) ([]string, error) {
@@ -1590,26 +1623,61 @@ func (s *Server) appViews(ctx context.Context) ([]managedAppView, error) {
 	if err != nil {
 		return nil, err
 	}
-	views := make([]managedAppView, 0, len(apps))
+	return s.viewsWithStatus(ctx, apps, validations), nil
+}
+
+// appViewBySlug describes one application, probing only its own health
+// endpoint.
+func (s *Server) appViewBySlug(ctx context.Context, slug string) (managedAppView, error) {
+	apps, err := s.store.ListManagedApps(ctx)
+	if err != nil {
+		return managedAppView{}, err
+	}
 	for _, app := range apps {
-		view := newManagedAppView(app)
-		if status, err := s.managedApps.Status(ctx, app); err != nil {
-			view.StatusError = err.Error()
-		} else {
-			view.Healthy, view.StatusCode = status.Healthy, status.StatusCode
+		if app.Slug != slug {
+			continue
 		}
+		runs, err := s.store.LatestAppValidationRunsForApp(ctx, app.ID)
+		if err != nil {
+			return managedAppView{}, err
+		}
+		return s.viewsWithStatus(ctx, []identity.ManagedApp{app}, map[string]map[string]identity.AppValidationRun{app.ID: runs})[0], nil
+	}
+	return managedAppView{}, identity.ErrManagedAppNotFound
+}
+
+// viewsWithStatus probes each application's health endpoint concurrently,
+// a few at a time: probed one after another, a handful of unreachable
+// applications would outlast the server's response deadline.
+func (s *Server) viewsWithStatus(ctx context.Context, apps []identity.ManagedApp, validations map[string]map[string]identity.AppValidationRun) []managedAppView {
+	views := make([]managedAppView, len(apps))
+	limit := make(chan struct{}, 8)
+	var probes sync.WaitGroup
+	for index, app := range apps {
+		views[index] = newManagedAppView(app)
+		probes.Add(1)
+		limit <- struct{}{}
+		go func(view *managedAppView, app identity.ManagedApp) {
+			defer probes.Done()
+			defer func() { <-limit }()
+			if status, err := s.managedApps.Status(ctx, app); err != nil {
+				view.StatusError = err.Error()
+			} else {
+				view.Healthy, view.StatusCode = status.Healthy, status.StatusCode
+			}
+		}(&views[index], app)
 		if appResults := validations[app.ID]; appResults != nil {
 			if run, ok := appResults[identity.ValidationFromShauth]; ok {
-				view.FromShauth = newAppValidationRunView(run)
+				views[index].FromShauth = newAppValidationRunView(run)
 			}
 			if run, ok := appResults[identity.ValidationFromApp]; ok {
-				view.FromApp = newAppValidationRunView(run)
+				views[index].FromApp = newAppValidationRunView(run)
 			}
 		}
-		view.NeedsPoll = validationNeedsPoll(view.FromShauth) || validationNeedsPoll(view.FromApp)
-		views = append(views, view)
+		views[index].NeedsPoll = validationNeedsPoll(views[index].FromShauth) || validationNeedsPoll(views[index].FromApp)
 	}
-	return views, nil
+	probes.Wait()
+	return views
 }
 
 func validationNeedsPoll(run *appValidationRunView) bool {
@@ -1649,8 +1717,15 @@ func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) appValidationStatus(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := s.current(r); err != nil {
-		s.failPage(w, r, http.StatusUnauthorized, "sign-in required")
+	// The page polls this every few seconds on its own. Polling must not
+	// count as the person being active, or an unattended tab would keep the
+	// session alive forever; once the session has ended the page is sent to
+	// sign in instead of polling a refusal it never shows.
+	if _, _, err := s.peekCurrent(r); err != nil {
+		if r.Header.Get("HX-Request") == "true" {
+			w.Header().Set("HX-Redirect", "/login?next="+url.QueryEscape("/apps"))
+		}
+		s.failPage(w, r, http.StatusUnauthorized, "Your session has ended. Sign in again to continue.")
 		return
 	}
 	app, err := s.store.ManagedApp(r.Context(), r.PathValue("id"))
@@ -1917,7 +1992,7 @@ func newAppRecord(view managedAppView) appRecord {
 		ReleaseRevision: view.ReleaseRevision, LaunchURL: view.LaunchURL,
 		HealthURL: view.HealthURL, MonitoringURL: view.MonitoringURL,
 		ValidationURL: view.ValidationURL, SignedOutURL: view.SignedOutURL,
-		OIDCClientID: view.OIDCClientID, CreatedAt: view.CreatedAt,
+		OIDCClientID: view.OIDCClientID, CreatedAt: view.CreatedAt.UTC(),
 		Health: appHealthRecord{Healthy: view.Healthy, StatusCode: view.StatusCode, Error: view.StatusError},
 	}
 	if view.FromShauth != nil {
@@ -2124,6 +2199,9 @@ func (s *Server) validatorCreateBrowserBootstraps(w http.ResponseWriter, r *http
 		writeAdminAPIError(w, http.StatusInternalServerError, "could not create browser bootstraps")
 		return
 	}
+	// These links sign a browser in; who minted them, and for which run, is
+	// part of the sign-in record.
+	s.record(r.Context(), tokenActor(r), identity.AuditValidationBootstrapsIssued, "", map[string]any{"run_id": request.RunID, "count": len(tokens)})
 	urls := make([]string, 0, len(tokens))
 	for _, token := range tokens {
 		coordinate := *s.config.PublicURL
@@ -2154,16 +2232,19 @@ func (s *Server) validatorBootstrapConsume(w http.ResponseWriter, r *http.Reques
 	}
 	user, next, err := s.store.ConsumeValidationBrowserBootstrap(r.Context(), r.Form.Get("token"), time.Now())
 	if err != nil {
+		s.recordSignIn(r, identity.AuditSignInFailed, "validator_bootstrap", "", "", "bootstrap link unavailable")
 		s.failPage(w, r, http.StatusGone, "validation browser bootstrap is unavailable")
 		return
 	}
 	if !strictRelativeNext(next) {
+		s.recordSignIn(r, identity.AuditSignInFailed, "validator_bootstrap", user.Username, user.ID, "bootstrap destination is not local")
 		s.failPage(w, r, http.StatusGone, "validation browser bootstrap is unavailable")
 		return
 	}
 	if !s.startSession(w, r, user) {
 		return
 	}
+	s.recordSignIn(r, identity.AuditSignInSucceeded, "validator_bootstrap", user.Username, user.ID, "")
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
@@ -2291,7 +2372,7 @@ func (s *Server) deleteHydraClient(ctx context.Context, clientID string) error {
 	if err != nil {
 		return err
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return err
 	}
@@ -2413,7 +2494,7 @@ func (s *Server) applyHydraSessionPolicy(ctx context.Context, policy identity.Se
 			return err
 		}
 		update.Header.Set("Content-Type", "application/json")
-		updated, err := s.httpClient.Do(update)
+		updated, err := s.doProvider(update)
 		if err != nil {
 			return err
 		}
@@ -2522,7 +2603,7 @@ func (s *Server) createHydraClient(ctx context.Context, input oidcClientInput) e
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return err
 	}
@@ -2630,7 +2711,7 @@ func (s *Server) updateHydraClient(ctx context.Context, input oidcClientInput) e
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return err
 	}
@@ -3099,7 +3180,11 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusNotFound, "That account does not exist.")
 		return
 	}
-	sessions, err := s.store.ListSessions(r.Context(), userID)
+	page, err := requestedPage(r)
+	if err != nil {
+		page = identity.Page{}
+	}
+	sessions, total, err := s.store.ListSessions(r.Context(), userID, page)
 	if err != nil {
 		observe.Errorf("list sessions for %s: %v", userID, err)
 		s.failPage(w, r, http.StatusInternalServerError, "The sessions for this account could not be loaded.")
@@ -3112,6 +3197,7 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "sessions", s.view(r, user.Username+" · sessions", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Sessions": records, "UserID": userID,
 		"Account": newUserRecord(user), "Error": noticeError(r), "Done": noticeDone(r),
+		"Page": browserPage(r, page, len(records), total),
 	}))
 }
 func (s *Server) adminRevokeSessions(w http.ResponseWriter, r *http.Request) {
@@ -3143,8 +3229,23 @@ func (s *Server) sessionResetAPI(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w, "session reset authentication failed")
 		return
 	}
+	// The account is named in the request body (JSON or a form), which keeps
+	// an email address out of URLs and therefore out of access logs. The
+	// query string is still read for existing callers.
+	var target struct {
+		UserID string `json:"user_id"`
+		Email  string `json:"email"`
+	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&target); err != nil {
+			writeOperationFailure(w, "reset account sessions", identity.Invalid("the request body must be a JSON object with user_id or email"))
+			return
+		}
+	} else {
+		target.UserID, target.Email = r.FormValue("user_id"), r.FormValue("email")
+	}
 	userID, err := s.revokeUserSessions(r.Context(),
-		strings.TrimSpace(r.URL.Query().Get("user_id")), strings.TrimSpace(r.URL.Query().Get("email")), tokenActor(r))
+		strings.TrimSpace(target.UserID), strings.TrimSpace(target.Email), tokenActor(r))
 	if err != nil {
 		writeOperationFailure(w, "reset account sessions", err)
 		return
@@ -3191,7 +3292,7 @@ func (s *Server) revokeHydraLoginSession(ctx context.Context, sessionID string) 
 	if err != nil {
 		return err
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return err
 	}
@@ -3208,10 +3309,11 @@ func (s *Server) revokeHydraSessions(ctx context.Context, subject string) error 
 	if err != nil {
 		return err
 	}
-	for _, sessionID := range sessionIDs {
-		if err := s.revokeHydraLoginSession(ctx, sessionID); err != nil {
-			return err
-		}
+	// Each session is revoked by sid, because only that delivers back-channel
+	// logout to the applications; a long-lived account can have many, so
+	// they are revoked through the same bounded pool as browser logout.
+	if err := s.revokeOtherHydraSessions(ctx, sessionIDs); err != nil {
+		return err
 	}
 	return s.revokeHydraSubjectSessions(ctx, subject)
 }
@@ -3229,7 +3331,7 @@ func (s *Server) revokeHydraSubjectSessions(ctx context.Context, subject string)
 		if err != nil {
 			return err
 		}
-		response, err := s.httpClient.Do(request)
+		response, err := s.doProvider(request)
 		if err != nil {
 			return err
 		}
@@ -3265,7 +3367,7 @@ func (s *Server) hydraConsentRequest(ctx context.Context, challenge string) (hyd
 	if err != nil {
 		return hydraConsentRequest{}, err
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return hydraConsentRequest{}, err
 	}
@@ -3372,6 +3474,35 @@ func (s *Server) githubRole(ctx context.Context, accessToken string, profile git
 	}
 	return role, allowed, nil
 }
+
+// doProvider sends a request to Ory Hydra or another dependency. A transport
+// failure names the endpoint without its query string: those carry login,
+// consent and logout challenges, and failures are written to the service
+// log, which administrators and the logs API can read.
+func (s *Server) doProvider(request *http.Request) (*http.Response, error) {
+	response, err := s.httpClient.Do(request)
+	var failure *url.Error
+	if errors.As(err, &failure) {
+		if target, parseErr := url.Parse(failure.URL); parseErr == nil {
+			target.RawQuery = ""
+			target.Fragment = ""
+			failure.URL = target.String()
+		} else {
+			failure.URL = "(unparseable URL)"
+		}
+	}
+	return response, err
+}
+
+// peekCurrent identifies the signed-in person without recording activity.
+func (s *Server) peekCurrent(r *http.Request) (identity.User, identity.Session, error) {
+	cookie, err := r.Cookie(browserSessionCookie)
+	if err != nil {
+		return identity.User{}, identity.Session{}, err
+	}
+	return s.store.PeekCurrentUser(r.Context(), cookie.Value, time.Now())
+}
+
 func (s *Server) current(r *http.Request) (identity.User, identity.Session, error) {
 	cookie, err := r.Cookie(browserSessionCookie)
 	if err != nil {
@@ -3745,7 +3876,7 @@ func (s *Server) hydraAccept(ctx context.Context, path, challenge string, payloa
 		return "", err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return "", err
 	}
@@ -3828,7 +3959,7 @@ func (s *Server) hydraLoginRequest(ctx context.Context, challenge string) (hydra
 	if err != nil {
 		return hydraLoginRequest{}, err
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return hydraLoginRequest{}, err
 	}
@@ -3858,7 +3989,7 @@ func (s *Server) hydraLogoutRequest(ctx context.Context, challenge string) (hydr
 	if err != nil {
 		return hydraLogoutRequest{}, err
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return hydraLogoutRequest{}, err
 	}
@@ -3888,7 +4019,7 @@ func (s *Server) hydraAcceptLogout(ctx context.Context, challenge string) (strin
 	if err != nil {
 		return "", err
 	}
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return "", err
 	}
@@ -3928,7 +4059,7 @@ func (s *Server) hydraRejectLogout(ctx context.Context, challenge string) error 
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient.Do(request)
+	response, err := s.doProvider(request)
 	if err != nil {
 		return err
 	}

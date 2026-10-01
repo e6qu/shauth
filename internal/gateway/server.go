@@ -390,8 +390,12 @@ func (server *Server) logout(response http.ResponseWriter, request *http.Request
 	}
 	session, browserToken, err := server.currentSession(request)
 	if err != nil {
+		// This application holds no session to end, usually because a
+		// logout elsewhere already revoked it. Without an ID token the
+		// provider refuses a return address, so the person is shown this
+		// application's own signed-out page rather than a provider error.
 		server.clearCookie(response, server.sessionCookieName())
-		http.Redirect(response, request, server.endSessionURL(""), http.StatusSeeOther)
+		http.Redirect(response, request, "/auth/signed-out", http.StatusSeeOther)
 		return
 	}
 	if err := server.store.RevokeToken(request.Context(), browserToken, server.now()); err != nil {
@@ -406,10 +410,12 @@ func (server *Server) endSessionURL(idToken string) string {
 	target, _ := url.Parse(server.endSessionEndpoint)
 	query := target.Query()
 	query.Set("client_id", server.config.ClientID)
+	// OpenID Connect RP-initiated logout accepts a return address only with
+	// the ID token that identifies the session it ends.
 	if idToken != "" {
 		query.Set("id_token_hint", idToken)
+		query.Set("post_logout_redirect_uri", server.config.PostLogoutURL.String())
 	}
-	query.Set("post_logout_redirect_uri", server.config.PostLogoutURL.String())
 	target.RawQuery = query.Encode()
 	return target.String()
 }
@@ -448,7 +454,14 @@ func (server *Server) backchannelLogout(response http.ResponseWriter, request *h
 		return
 	}
 	if err := server.store.RevokeProviderSession(request.Context(), claims.ProviderSessionID, claims.TokenID, time.Unix(claims.ExpiresAt, 0), server.now()); err != nil {
-		http.Error(response, "Logout token was rejected", http.StatusBadRequest)
+		// A replayed token is the provider's error; failing to record a
+		// valid one is ours, and the provider should see a server error.
+		if errors.Is(err, ErrLogoutTokenReplayed) {
+			http.Error(response, "Logout token was rejected", http.StatusBadRequest)
+			return
+		}
+		observe.Errorf("OIDC gateway could not record back-channel logout: %v", err)
+		http.Error(response, "Could not record logout", http.StatusInternalServerError)
 		return
 	}
 	response.WriteHeader(http.StatusOK)

@@ -253,8 +253,13 @@ func (s *Store) UpdateSessionPolicy(ctx context.Context, policy SessionPolicy) (
 	if err := policy.Validate(); err != nil {
 		return time.Time{}, err
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("begin session policy update: %w", err)
+	}
+	defer tx.Rollback(ctx)
 	var updatedAt time.Time
-	err := s.pool.QueryRow(ctx, `UPDATE session_policy SET browser_absolute_lifetime_seconds=$1,browser_idle_timeout_seconds=$2,oidc_session_lifetime_seconds=$3,access_token_lifetime_seconds=$4,id_token_lifetime_seconds=$5,refresh_token_lifetime_seconds=$6,updated_at=now() WHERE singleton=TRUE RETURNING updated_at`,
+	err = tx.QueryRow(ctx, `UPDATE session_policy SET browser_absolute_lifetime_seconds=$1,browser_idle_timeout_seconds=$2,oidc_session_lifetime_seconds=$3,access_token_lifetime_seconds=$4,id_token_lifetime_seconds=$5,refresh_token_lifetime_seconds=$6,updated_at=now() WHERE singleton=TRUE RETURNING updated_at`,
 		int64(policy.BrowserAbsoluteLifetime/time.Second), int64(policy.BrowserIdleTimeout/time.Second), int64(policy.OIDCSessionLifetime/time.Second), int64(policy.AccessTokenLifetime/time.Second), int64(policy.IDTokenLifetime/time.Second), int64(policy.RefreshTokenLifetime/time.Second)).
 		Scan(&updatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -262,6 +267,16 @@ func (s *Store) UpdateSessionPolicy(ctx context.Context, policy SessionPolicy) (
 	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("update session policy: %w", err)
+	}
+	// A shorter absolute lifetime applies to sessions that already exist:
+	// an operator who shortens it during an incident must not leave month-old
+	// sessions valid under the old limit. A longer one never extends them.
+	if _, err := tx.Exec(ctx, `UPDATE sessions SET expires_at=created_at+make_interval(secs => $1)
+		WHERE revoked_at IS NULL AND expires_at>created_at+make_interval(secs => $1)`, int64(policy.BrowserAbsoluteLifetime/time.Second)); err != nil {
+		return time.Time{}, fmt.Errorf("apply the absolute lifetime to existing sessions: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return time.Time{}, fmt.Errorf("commit session policy update: %w", err)
 	}
 	return updatedAt.UTC(), nil
 }
@@ -1724,6 +1739,18 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, rem
 }
 
 func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (User, Session, error) {
+	return s.currentUser(ctx, raw, now, true)
+}
+
+// PeekCurrentUser authenticates a browser session without recording
+// activity. Background requests a page makes on its own, such as status
+// polling, must not keep an unattended session from reaching its idle
+// timeout.
+func (s *Store) PeekCurrentUser(ctx context.Context, raw string, now time.Time) (User, Session, error) {
+	return s.currentUser(ctx, raw, now, false)
+}
+
+func (s *Store) currentUser(ctx context.Context, raw string, now time.Time, touch bool) (User, Session, error) {
 	policy, err := s.SessionPolicy(ctx)
 	if err != nil {
 		return User{}, Session{}, err
@@ -1736,6 +1763,9 @@ func (s *Store) CurrentUser(ctx context.Context, raw string, now time.Time) (Use
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &session.ID, &session.UserID, &session.CreatedAt, &session.LastSeen, &session.ExpiresAt, &session.RevokedAt, &session.UserAgent, &session.RemoteIP)
 	if err != nil {
 		return User{}, Session{}, fmt.Errorf("read active session: %w", err)
+	}
+	if !touch {
+		return user, session, nil
 	}
 	_, err = s.pool.Exec(ctx, `UPDATE sessions SET last_seen_at=$2 WHERE id=$1::uuid`, session.ID, now.UTC())
 	if err != nil {
@@ -1804,6 +1834,15 @@ func invalidInput(format string, args ...any) error {
 // lets code outside this package raise the same rejection the store raises,
 // so every transport classifies it identically.
 func Invalid(format string, args ...any) error { return invalidInput(format, args...) }
+
+// ErrUserInactive reports an operation that needs an enabled account but
+// found it disabled or absent.
+var ErrUserInactive = errors.New("the account is disabled or does not exist")
+
+// ErrLogoutSessionInactive reports that the browser session asking to sign
+// out had already ended, typically because the same sign-out was submitted
+// twice and the first request finished it.
+var ErrLogoutSessionInactive = errors.New("logout browser session is not active")
 
 // ErrAlreadyExists reports that a uniqueness constraint rejected the record.
 var ErrAlreadyExists = errors.New("record already exists")
@@ -1953,27 +1992,35 @@ func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
 	user.FederatedIdentity = federatedIdentityLabel(user.IdentitySource, user.GitHubLogin)
 	return user, nil
 }
-func (s *Store) ListSessions(ctx context.Context, userID string) ([]Session, error) {
+
+// ListSessions reports one bounded page of an account's sessions, newest
+// first, with the total so a caller can page through a long history.
+func (s *Store) ListSessions(ctx context.Context, userID string, page Page) ([]Session, int, error) {
 	policy, err := s.SessionPolicy(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address FROM sessions WHERE user_id=$1::uuid ORDER BY created_at DESC`, userID)
+	page = page.normalized()
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE user_id=$1::uuid`, userID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count sessions: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address FROM sessions WHERE user_id=$1::uuid ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, userID, page.Limit, page.Offset)
 	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
+		return nil, 0, fmt.Errorf("list sessions: %w", err)
 	}
 	defer rows.Close()
 	var sessions []Session
 	for rows.Next() {
 		var v Session
 		if err := rows.Scan(&v.ID, &v.UserID, &v.CreatedAt, &v.LastSeen, &v.ExpiresAt, &v.RevokedAt, &v.UserAgent, &v.RemoteIP); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		now := time.Now().UTC()
 		v.Active = v.RevokedAt == nil && v.ExpiresAt.After(now) && v.LastSeen.After(now.Add(-policy.BrowserIdleTimeout))
 		sessions = append(sessions, v)
 	}
-	return sessions, rows.Err()
+	return sessions, total, rows.Err()
 }
 
 // SessionFilter narrows a listing of sessions across every account.
@@ -2199,7 +2246,7 @@ func (s *Store) CreateLogoutCorrelationGrant(ctx context.Context, subjectID, bro
 		return "", LogoutCorrelationGrant{}, fmt.Errorf("list active browser sessions: %w", err)
 	}
 	if !providerOnly && (len(activeBrowserIDs) == 0 || !slices.Contains(activeBrowserIDs, browserSessionID)) {
-		return "", LogoutCorrelationGrant{}, fmt.Errorf("logout browser session is not active")
+		return "", LogoutCorrelationGrant{}, ErrLogoutSessionInactive
 	}
 	browserIDs, activeIDs := []string{}, []string{}
 	if providerOnly {
@@ -2249,6 +2296,9 @@ func (s *Store) CreateLogoutCorrelationGrant(ctx context.Context, subjectID, bro
 func lockActiveUser(ctx context.Context, tx pgx.Tx, userID string) error {
 	var locked string
 	if err := tx.QueryRow(ctx, `SELECT id::text FROM users WHERE id=$1::uuid AND disabled_at IS NULL FOR UPDATE`, userID).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUserInactive
+		}
 		return fmt.Errorf("lock active user: %w", err)
 	}
 	return nil
@@ -2570,7 +2620,11 @@ func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 // identifier. Matching is case-insensitive.
 func (s *Store) UserIDByEmail(ctx context.Context, email string) (string, error) {
 	var userID string
-	err := s.pool.QueryRow(ctx, `SELECT id::text FROM users WHERE lower(email)=lower($1)`, email).Scan(&userID)
+	// Addresses are stored lowercase, so the unique index answers this.
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM users WHERE email=lower(btrim($1))`, email).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUserNotFound
+	}
 	if err != nil {
 		return "", fmt.Errorf("read user by email: %w", err)
 	}

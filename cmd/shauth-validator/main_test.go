@@ -3,8 +3,12 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -160,5 +164,30 @@ func TestFailureTruncationKeepsValidUTF8(t *testing.T) {
 	}
 	if got := truncateUTF8("ok\xffbad", 1000); !utf8.ValidString(got) {
 		t.Fatalf("invalid bytes survived: %q", got)
+	}
+}
+
+// Node and Chromium print warnings on stderr. Only stdout carries the
+// result, so a warning must not turn a passing run into an undecodable one,
+// and a failing run keeps the stderr tail as context.
+func TestBrowserRunReadsTheResultFromStdoutOnly(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Fatalf("node is required to run the browser runner: %v", err)
+	}
+	directory := t.TempDir()
+	passing := filepath.Join(directory, "passing.mjs")
+	if err := os.WriteFile(passing, []byte(`process.stderr.write("(node:1) ExperimentalWarning: noisy\n"); process.stdout.write(JSON.stringify({status:"passed",failure:""}));`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if outcome := run(context.Background(), passing, job{}); outcome.Status != "passed" {
+		t.Fatalf("a passing run with stderr warnings = %#v", outcome)
+	}
+	crashing := filepath.Join(directory, "crashing.mjs")
+	if err := os.WriteFile(crashing, []byte(`process.stderr.write("chromium exploded\n"); process.exit(3);`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcome := run(context.Background(), crashing, job{})
+	if outcome.Status != "failed" || !strings.Contains(outcome.Failure, "exit status 3") || !strings.Contains(outcome.Failure, "chromium exploded") {
+		t.Fatalf("a crashing run = %#v, want its exit status and stderr tail", outcome)
 	}
 }

@@ -10,7 +10,11 @@ work=$(mktemp -d)
 cleanup() {
 	rm -rf "$work"
 }
-trap cleanup EXIT INT TERM
+# A signal ends the script after cleanup; returning from the trap would
+# resume the run with the stack already torn down.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 sleep 60 &
 child_pid=$!

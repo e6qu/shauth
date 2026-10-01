@@ -19,9 +19,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -74,21 +76,26 @@ func main() {
 	token := required("SHAUTH_VALIDATOR_TOKEN")
 	script := required("SHAUTH_VALIDATOR_SCRIPT")
 	client := &http.Client{Timeout: 30 * time.Second}
+	// A stop request (a redeploy, or the acceptance stack's TERM) ends the
+	// browser run and still records its outcome, instead of leaving the run
+	// "running" until its lease expires.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	consecutiveClaimFailures := 0
-	for {
-		claimed, err := claim(context.Background(), client, baseURL, token)
+	for ctx.Err() == nil {
+		claimed, err := claim(ctx, client, baseURL, token)
 		if err != nil {
 			consecutiveClaimFailures++
 			observe.Errorf("claim validation: %v", err)
 			if consecutiveClaimFailures >= 12 {
 				log.Fatalf("Shauth validation queue remained unavailable after %d attempts", consecutiveClaimFailures)
 			}
-			time.Sleep(5 * time.Second)
+			sleepUnlessStopped(ctx, 5*time.Second)
 			continue
 		}
 		consecutiveClaimFailures = 0
 		if claimed == nil {
-			time.Sleep(5 * time.Second)
+			sleepUnlessStopped(ctx, 5*time.Second)
 			continue
 		}
 		if err := validateJob(baseURL, *claimed); err != nil {
@@ -117,11 +124,49 @@ func main() {
 			continue
 		}
 		claimed.BootstrapURLs = bootstrapURLs
-		outcome := run(context.Background(), script, *claimed)
-		if err := complete(context.Background(), client, baseURL, token, claimed.ID, outcome); err != nil {
+		outcome := run(ctx, script, *claimed)
+		if ctx.Err() != nil && outcome.Status != "passed" {
+			outcome.Failure = sanitizeJobFailure("the validator was stopped during this run: "+outcome.Failure, *claimed)
+		}
+		// The outcome is recorded even while stopping, with its own short
+		// deadline, and a transient failure to report it is retried.
+		reportContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := completeWithRetry(reportContext, client, baseURL, token, claimed.ID, outcome); err != nil {
 			observe.Errorf("complete validation %s: %v", claimed.ID, err)
 		}
+		cancel()
 	}
+	observe.Infof("validator stopped")
+}
+
+func sleepUnlessStopped(ctx context.Context, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+// completeWithRetry reports an outcome, retrying network failures and server
+// errors a bounded number of times. A refusal (4xx) is final: the run is no
+// longer this worker's to report.
+func completeWithRetry(ctx context.Context, client *http.Client, baseURL, token, runID string, outcome result) error {
+	var err error
+	for attempt, delay := 1, time.Second; attempt <= 5; attempt, delay = attempt+1, delay*2 {
+		var status int
+		status, err = completeOnce(ctx, client, baseURL, token, runID, outcome)
+		if err == nil || (status >= 400 && status < 500) {
+			return err
+		}
+		observe.Warnf("report validation %s (attempt %d of 5): %v", runID, attempt, err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w; stopped retrying: %v", err, ctx.Err())
+		case <-time.After(delay):
+		}
+	}
+	return err
 }
 
 func createBrowserBootstraps(ctx context.Context, client *http.Client, baseURL, token, runID string, nextPaths []string) ([]string, error) {
@@ -207,6 +252,11 @@ func run(ctx context.Context, script string, claimed job) result {
 	runContext, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
 	command := exec.CommandContext(runContext, "node", script)
+	// At the deadline the browser run is asked to stop, so it can report the
+	// stage it reached and close Chromium, and is killed if it has not
+	// exited shortly after.
+	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }
+	command.WaitDelay = 15 * time.Second
 	command.Stdin = bytes.NewReader(payload)
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -216,17 +266,26 @@ func run(ctx context.Context, script string, claimed job) result {
 		"SHAUTH_VALIDATION_USERNAME=" + os.Getenv("SHAUTH_VALIDATION_USERNAME"),
 		"SHAUTH_VALIDATION_EMAIL=" + os.Getenv("SHAUTH_VALIDATION_EMAIL"),
 	}
-	output, err := command.CombinedOutput()
-	if err != nil {
-		failure := sanitizeJobFailure(string(output), claimed)
-		if failure == "" {
-			failure = sanitizeJobFailure(err.Error(), claimed)
-		}
-		return result{Status: "failed", Failure: failure}
-	}
+	// Only stdout carries the result. Warnings Node or Chromium print on
+	// stderr must not turn a passing run into an undecodable one; they are
+	// kept as context for a failure.
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	runErr := command.Run()
 	var outcome result
-	if err := decodeSingleJSON(bytes.NewReader(output), &outcome); err != nil {
-		return result{Status: "failed", Failure: sanitizeJobFailure("decode browser result: "+err.Error()+": "+string(output), claimed)}
+	if err := decodeSingleJSON(bytes.NewReader(stdout.Bytes()), &outcome); err != nil {
+		detail := "decode browser result: " + err.Error()
+		if runErr != nil {
+			detail = "browser run " + runErr.Error()
+		}
+		if tail := lastBytes(stderr.String(), 600); tail != "" {
+			detail += ": " + tail
+		}
+		return result{Status: "failed", Failure: sanitizeJobFailure(detail, claimed)}
+	}
+	if runErr != nil && outcome.Status == "passed" {
+		return result{Status: "failed", Failure: sanitizeJobFailure("browser run reported success but exited with "+runErr.Error(), claimed)}
 	}
 	if outcome.Status != "passed" && outcome.Status != "failed" {
 		return result{Status: "failed", Failure: "browser returned an invalid status"}
@@ -417,26 +476,44 @@ func validServiceURL(value *url.URL) bool {
 }
 
 func complete(ctx context.Context, client *http.Client, baseURL, token, runID string, outcome result) error {
+	_, err := completeOnce(ctx, client, baseURL, token, runID, outcome)
+	return err
+}
+
+func completeOnce(ctx context.Context, client *http.Client, baseURL, token, runID string, outcome result) (int, error) {
 	payload, err := json.Marshal(outcome)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/internal/validator/jobs/"+runID+"/complete", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("complete returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+		return response.StatusCode, fmt.Errorf("complete returned %s: %s", response.Status, strings.TrimSpace(string(body)))
 	}
-	return nil
+	return response.StatusCode, nil
+}
+
+// lastBytes keeps the end of a diagnostic stream, where the cause usually is.
+func lastBytes(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= limit {
+		return value
+	}
+	cut := len(value) - limit
+	for cut < len(value) && !utf8.RuneStart(value[cut]) {
+		cut++
+	}
+	return value[cut:]
 }
 
 // truncateUTF8 bounds value to limit bytes without splitting a character, so

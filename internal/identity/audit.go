@@ -38,6 +38,9 @@ const (
 	AuditValidationEnqueued   = "app_validation.enqueued"
 	AuditLogoutCompleted      = "logout.completed"
 	AuditLogoutFailed         = "logout.failed"
+	// AuditValidationBootstrapsIssued records single-use browser sign-in
+	// links minted for a validation run's dedicated identity.
+	AuditValidationBootstrapsIssued = "app_validation.browser_bootstraps_issued"
 )
 
 // AuditEvent is one durable record of a security-relevant action. It answers

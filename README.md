@@ -333,7 +333,9 @@ and answer with a versioned receipt:
 - `POST /internal/sessions/{id}/revoke` — end one browser session and its
   correlated Ory Hydra login sessions (`shauth.session-revoke/v1`);
   `POST /internal/sessions/reset` remains the whole-user reset behind its own
-  `SHAUTH_SESSION_RESET_TOKEN`.
+  `SHAUTH_SESSION_RESET_TOKEN`. Name the account with `user_id` or `email` in
+  a JSON or form body rather than the query string, so an address does not
+  reach access logs.
 - `PUT /internal/session-policy` — replace the session policy using the same
   fields as `shauth.session-policy/v1`; lifetimes are applied to every OAuth
   client and rolled back together on failure.
@@ -561,6 +563,44 @@ Each gateway deployment uses its relying party's distinct PostgreSQL database,
 not Shauth's identity database. `/shauth-gateway` applies its embedded,
 gateway-only session and replay-protection migrations before accepting traffic;
 startup fails if the dedicated database is unavailable or cannot be migrated.
+
+## Configuration
+
+Shauth reads its configuration from the environment at start and refuses to
+start when a value is missing, malformed, or inconsistent. Credentials come
+from runtime secret injection; none has a default.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `SHAUTH_PUBLIC_URL` | yes | Public issuer origin. Must be HTTPS unless `SHAUTH_ALLOW_INSECURE_COOKIES=true` and the host is loopback. |
+| `SHAUTH_LISTEN_ADDRESS` | no | Listen address, default `:8080`. The container healthcheck follows it. |
+| `SHAUTH_ALLOW_INSECURE_COOKIES` | no | `true` drops the `Secure` cookie flag; permitted only for a loopback development URL. |
+| `DATABASE_URL` | yes | Shauth's PostgreSQL database. |
+| `HYDRA_ADMIN_URL` | yes | Ory Hydra admin API, reachable only from Shauth. |
+| `HYDRA_PUBLIC_INTERNAL_URL` | yes | Ory Hydra public API as Shauth reaches it internally; it is published at `SHAUTH_PUBLIC_URL`. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | yes | The GitHub OAuth application whose sole callback is `/oauth/github/callback`. |
+| `GITHUB_DEVELOPER_TEAM`, `GITHUB_ADMIN_TEAM` | no | `org/team` access rules created once on first start; edit them in the interface afterwards. |
+| `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` | together | Enable Microsoft Entra ID for one specific tenant. |
+| `SHAUTH_SES_REGION`, `SHAUTH_INVITATION_EMAIL_FROM` | yes | Amazon SES region and verified sender for invitations. |
+| `SHAUTH_BOOTSTRAP_ADMIN_EMAIL`, `SHAUTH_BOOTSTRAP_ADMIN_PASSWORD` | together | Break-glass administrator; the password is 14 to 72 bytes. A disabled bootstrap administrator stays disabled. |
+| `SHAUTH_BOOTSTRAP_APPS_JSON` | no | Applications and OIDC clients reconciled at start. |
+| `SHAUTH_MONITORING_SOURCES_JSON` | no | Infrastructure observation sources (see below). |
+| `SHAUTH_VALIDATION_USERNAME`, `SHAUTH_VALIDATION_EMAIL`, `SHAUTH_VALIDATOR_TOKEN` | together | Browser validation identities and the validator's queue credential. |
+| `SHAUTH_VALIDATION_STATUS_TOKEN` | no | Read-only validation status and enqueue API. |
+| `SHAUTH_ADMIN_API_READ_TOKEN`, `SHAUTH_ADMIN_API_WRITE_TOKEN` | no | Administration API; at least 32 characters and distinct. |
+| `SHAUTH_SESSION_RESET_TOKEN` | no | Whole-account session reset endpoint. |
+
+`shauth-migrate` reads `DATABASE_URL` and `SHAUTH_MIGRATIONS_DIR` (default
+`/migrations`). It serializes concurrent migrators with an advisory lock, waits
+at most 30 seconds for any table lock, and gives up after ten minutes.
+
+The relying-party gateway reads `OIDC_GATEWAY_ISSUER`,
+`OIDC_GATEWAY_PUBLIC_URL`, `OIDC_GATEWAY_UPSTREAM_URL`,
+`OIDC_GATEWAY_POST_LOGOUT_URL`, `OIDC_GATEWAY_CLIENT_ID`,
+`OIDC_GATEWAY_CLIENT_SECRET`, `OIDC_GATEWAY_COOKIE_SECRET`, `DATABASE_URL`,
+and optionally `OIDC_GATEWAY_LISTEN_ADDRESS`, `OIDC_GATEWAY_SESSION_MAX_AGE`
+(5m to 720h), `OIDC_GATEWAY_ALLOW_INSECURE_COOKIE` (loopback only), and
+`APPLICATION_RELEASE_REVISION`.
 
 ## Deployment model
 

@@ -439,7 +439,7 @@ data "aws_iam_policy_document" "secrets" {
 # connector instead of failing the plan.
 data "aws_iam_policy_document" "task" {
   statement {
-    actions   = ["ses:SendEmail", "ses:SendRawEmail"]
+    actions   = ["ses:SendEmail", "ses:SendRawEmail", "ses:GetEmailIdentity"]
     resources = [aws_ses_domain_identity.invitations.arn]
   }
 }

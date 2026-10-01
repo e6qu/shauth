@@ -71,3 +71,10 @@ jobs:
           test "$(docker image inspect shauth-validator:pr --format '{{.Config.User}}')" = node
           docker run --rm --entrypoint node shauth-validator:pr --input-type=module --eval \
             'import { chromium } from "playwright"; const browser = await chromium.launch({headless:true}); await browser.close();'
+      - name: Verify the validator's module graph resolves in the image
+        # validate.mjs runs a browser flow when imported, so its local
+        # modules are loaded individually; a module missing from the image
+        # fails here instead of failing every claimed job.
+        run: |
+          docker run --rm --entrypoint node --workdir /opt/shauth-validator shauth-validator:pr --input-type=module --eval \
+            'import fs from "node:fs"; const source = fs.readFileSync("validate.mjs", "utf8"); const local = [...source.matchAll(/from "(\.\/[^"]+)"/g)].map((match) => match[1]); if (local.length === 0) throw new Error("validate.mjs imports no local modules"); for (const module of local) await import(new URL(module, "file:///opt/shauth-validator/").href); console.log(`resolved ${local.join(", ")}`);'
