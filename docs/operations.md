@@ -147,9 +147,14 @@ Hydra's admin API and its own public listener must not be reachable from
 outside. Every `/internal/` endpoint requires its credential, but should still
 not be exposed beyond what clients need.
 
-Run the validator as its own outbound-only service, with only
-`SHAUTH_URL` and `SHAUTH_VALIDATOR_TOKEN`. It needs no inbound access and no
-other credentials.
+Run the validator as its own outbound-only service. It needs no inbound access
+and only these variables:
+
+| Variable | Meaning |
+|---|---|
+| `SHAUTH_URL` | Shauth's public URL. |
+| `SHAUTH_VALIDATOR_TOKEN` | The same value as Shauth's. |
+| `SHAUTH_VALIDATOR_SCRIPT` | The browser script. The image sets it. |
 
 [`terraform/`](../terraform/README.md) is one complete deployment, on Amazon
 ECS.
