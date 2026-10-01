@@ -16,7 +16,7 @@ if grep -En 'http://localhost:8080' scripts/test-stack.sh scripts/test-*.mjs; th
 	echo 'acceptance tests contained a hardcoded Shauth origin instead of SHAUTH_URL' >&2
 	exit 1
 fi
-grep -Fq "\"\${SHAUTH_HOST_PORT:-8080}:8080\"" compose.yaml
+grep -Fq "\"127.0.0.1:\${SHAUTH_HOST_PORT:-8080}:8080\"" compose.yaml
 grep -Fq "SHAUTH_URL=\$SHAUTH_PUBLIC_URL" scripts/test-stack.sh
 
 for coordinate in \
