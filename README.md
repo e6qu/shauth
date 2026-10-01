@@ -51,6 +51,13 @@ Shauth. Ory Hydra sends signed back-channel logout tokens and, when configured,
 front-channel logout requests to every client session correlated by `sid`.
 Relying applications validate those notifications and idempotently revoke the
 correlated local sessions.
+An application whose own session has already ended (it reached its lifetime,
+say, while the Shauth session lives on) has no ID token to send, so it hands
+the sign-out to Shauth's `/logout?client_id=<its client>` instead. Shauth asks
+for confirmation, ends its own session and every application's, and returns
+to that application's registered signed-out page; if nobody is signed in to
+Shauth it returns there at once. Only a registered application's client
+selects a destination.
 The Shauth container includes Ory Hydra v26.2.0 with the repository's two
 audited provider patches (`third_party/hydra-v26.2.0/`): one adds the
 Back-Channel Logout 1.0 Errata 1 `exp` claim with a two-minute lifetime, and
@@ -650,7 +657,13 @@ forwards every request to Shauth, which serves Ory Hydra's public OAuth and
 OpenID Connect endpoints from its own origin. Hydra's administration API and
 its own listener are never published, and every `/internal/` endpoint requires
 its bearer credential. PostgreSQL is the durable source of truth.
-All services remain always-on.
+All services remain always-on. A deployment whose tasks never become healthy
+is rolled back to the previous task definition.
+
+The module names no organization: `github_admin_team` and
+`github_developer_team` are required `organization/team-slug` inputs. Logs go
+to `/shauth/<name>` unless `log_group_name` is set; a deployment that already
+has a log group sets it to that name, because renaming a log group replaces it.
 
 Runtime secret requirements: the Hydra system secret must remain stable across
 restarts. Terraform creates it and the bootstrap-admin password with a
