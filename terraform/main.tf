@@ -590,8 +590,6 @@ resource "aws_ecs_task_definition" "validator" {
     linuxParameters = local.validator_linux_parameters
     environment = [
       { name = "SHAUTH_URL", value = local.public_url },
-      { name = "SHAUTH_VALIDATION_USERNAME", value = "shauth-validator" },
-      { name = "SHAUTH_VALIDATION_EMAIL", value = "shauth-validator@${local.invitation_email_domain}" },
       { name = "SHAUTH_VALIDATOR_CONFIG_VERSION", value = aws_secretsmanager_secret_version.validator.version_id },
     ]
     secrets = [
