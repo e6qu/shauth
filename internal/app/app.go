@@ -849,24 +849,62 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 	s.recordSignIn(r, identity.AuditSignInSucceeded, "password", user.Username, user.ID, "")
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
+
+// logoutApplication names the connected application a sign-out started from,
+// when it passed its OpenID Connect client identifier, and where the person
+// returns afterwards: that application's registered signed-out page, or
+// Shauth's own. An identifier that names no catalog app is ignored; it only
+// ever chooses between registered destinations.
+func (s *Server) logoutApplication(r *http.Request) (identity.ManagedApp, string) {
+	clientID := strings.TrimSpace(r.FormValue("client_id"))
+	if clientID == "" || !oidcClientIDPattern.MatchString(clientID) {
+		return identity.ManagedApp{}, "/signed-out"
+	}
+	app, err := s.store.ManagedAppByClientID(r.Context(), clientID)
+	if err != nil {
+		if !errors.Is(err, identity.ErrManagedAppNotFound) {
+			observe.Errorf("resolve signing-out application %s: %v", clientID, err)
+		}
+		return identity.ManagedApp{}, "/signed-out"
+	}
+	return app, app.SignedOutURL
+}
+
+// logoutConfirm asks before ending every session. An application whose own
+// session has already ended sends the person here with its client_id, so a
+// sign-out from that application still ends the Shauth session and every
+// other application's, then returns to its signed-out page.
 func (s *Server) logoutConfirm(w http.ResponseWriter, r *http.Request) {
 	user, _, err := s.current(r)
-	s.render(w, "logout", s.view(r, "Sign out", map[string]any{"SignedIn": err == nil, "User": newUserRecord(user), "IsAdmin": err == nil && user.Role == identity.RoleAdmin}))
+	app, destination := s.logoutApplication(r)
+	if err != nil && app.OIDCClientID != "" {
+		http.Redirect(w, r, destination, http.StatusSeeOther)
+		return
+	}
+	if app.OIDCClientID != "" {
+		// The sign-out form's redirects end on the application's origin,
+		// and browsers apply form-action to every redirect a form starts.
+		if target, parseErr := url.Parse(destination); parseErr == nil && target.Scheme != "" && target.Host != "" {
+			w.Header().Set("Content-Security-Policy", strings.Replace(baseContentSecurityPolicy, "form-action 'self'", "form-action 'self' "+target.Scheme+"://"+target.Host, 1))
+		}
+	}
+	s.render(w, "logout", s.view(r, "Sign out", map[string]any{"SignedIn": err == nil, "User": newUserRecord(user), "IsAdmin": err == nil && user.Role == identity.RoleAdmin, "App": app}))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	app, destination := s.logoutApplication(r)
 	user, session, err := s.current(r)
 	if err != nil {
 		s.expireCookie(w, browserSessionCookie)
-		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
-	correlation, grant, err := s.store.CreateLogoutCorrelationGrant(r.Context(), user.ID, session.ID, "", "", time.Now())
+	correlation, grant, err := s.store.CreateLogoutCorrelationGrant(r.Context(), user.ID, session.ID, "", app.OIDCClientID, time.Now())
 	if errors.Is(err, identity.ErrLogoutSessionInactive) {
 		// A repeated submission: the first request is already signing this
 		// browser out, so this one shows the same outcome.
 		s.expireCookie(w, browserSessionCookie)
-		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
 	if err != nil {
@@ -880,12 +918,12 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 			s.failPage(w, r, http.StatusBadGateway, "Your Shauth session ended, but signing out of connected applications did not finish. Sign out again from each application, or ask an administrator to end your sessions.")
 			return
 		}
-		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
 	s.expireCookie(w, browserSessionCookie)
 	if correlation == "" {
-		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
 	if len(grant.BrowserHydraSessionIDs) == 0 {
@@ -894,7 +932,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 			s.failPage(w, r, http.StatusBadGateway, "local sessions ended but connected application logout did not complete")
 			return
 		}
-		http.Redirect(w, r, "/signed-out", http.StatusSeeOther)
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 		return
 	}
 	s.setCookie(w, &http.Cookie{Name: logoutCorrelationCookie, Value: correlation, Path: logoutCorrelationPath, HttpOnly: true, Secure: !s.config.AllowInsecureCookies, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(identity.LogoutCorrelationLifetime), MaxAge: int(identity.LogoutCorrelationLifetime / time.Second)})

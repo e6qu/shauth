@@ -722,6 +722,20 @@ func (s *Store) IsManagedOIDCClient(ctx context.Context, clientID string) (bool,
 	return managed, nil
 }
 
+// ManagedAppByClientID returns the catalog app registered for an OpenID
+// Connect client, or ErrManagedAppNotFound.
+func (s *Store) ManagedAppByClientID(ctx context.Context, clientID string) (ManagedApp, error) {
+	var app ManagedApp
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text,slug,name,launch_url,oidc_client_id,signed_out_url FROM managed_apps WHERE oidc_client_id=$1`, strings.TrimSpace(clientID)).Scan(&app.ID, &app.Slug, &app.Name, &app.LaunchURL, &app.OIDCClientID, &app.SignedOutURL)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ManagedApp{}, ErrManagedAppNotFound
+	}
+	if err != nil {
+		return ManagedApp{}, fmt.Errorf("get managed app by OpenID Connect client: %w", err)
+	}
+	return app, nil
+}
+
 func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 	var app ManagedApp
 	err := s.db(ctx).QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
@@ -731,17 +745,17 @@ func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 	return app, nil
 }
 
-// DeleteManagedApp removes one catalog entry addressed by identifier or slug
-// and queues fresh validations for the remaining apps, because removing a
-// relying party changes the witness ring every other check depends on.
 // ErrManagedAppDeploymentOwned reports an attempt to remove an app that the
 // deployment's bootstrap configuration declares. Removing only its catalog
 // row would leave its OAuth client behind, and every replica would then
 // refuse to start; it is removed from that configuration instead.
 var ErrManagedAppDeploymentOwned = errors.New("this app is declared by the deployment's bootstrap configuration; remove it there")
 
-// DeleteManagedApp removes an app from the catalog unless its slug is one the
-// deployment declares, and returns the removed app's slug.
+// DeleteManagedApp removes one catalog entry addressed by identifier or slug,
+// unless its slug is one the deployment declares, and queues fresh
+// validations for the remaining apps, because removing a relying party
+// changes the witness ring every other check depends on. It returns the
+// removed app's slug.
 func (s *Store) DeleteManagedApp(ctx context.Context, ref ManagedAppRef, deploymentOwnedSlugs []string) (string, error) {
 	if ref.All() {
 		return "", invalidInput("a managed app identifier or slug is required")

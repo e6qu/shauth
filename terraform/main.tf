@@ -57,6 +57,10 @@ locals {
     var.hydra_database_url_secret_arn,
   ], local.entra_enabled ? [var.entra_oauth_secret_arn] : [])
 
+  # Chromium leaves helper processes behind when a validation run is stopped;
+  # an init process reaps them so they cannot accumulate across runs.
+  validator_linux_parameters = { initProcessEnabled = true }
+
   # Ory Hydra's settings. Compose sets the same values for the local stack.
   # Every token Hydra issues, including each refresh, is first confirmed by
   # Shauth's token hook in the same task.
@@ -580,9 +584,10 @@ resource "aws_ecs_task_definition" "validator" {
     operating_system_family = "LINUX"
   }
   container_definitions = jsonencode([{
-    name      = "shauth-validator"
-    image     = var.validator_container_image
-    essential = true
+    name            = "shauth-validator"
+    image           = var.validator_container_image
+    essential       = true
+    linuxParameters = local.validator_linux_parameters
     environment = [
       { name = "SHAUTH_URL", value = local.public_url },
       { name = "SHAUTH_VALIDATION_USERNAME", value = "shauth-validator" },

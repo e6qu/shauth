@@ -255,7 +255,11 @@ func run(ctx context.Context, script string, claimed job) result {
 	// At the deadline the browser run is asked to stop, so it can report the
 	// stage it reached and close Chromium, and is killed if it has not
 	// exited shortly after.
-	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }
+	// Node starts Chromium and its helpers; they share a process group with
+	// it so a stop reaches all of them, and whatever is left when the run
+	// ends is killed rather than left behind for every later run to pile on.
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGTERM) }
 	command.WaitDelay = 15 * time.Second
 	command.Stdin = bytes.NewReader(payload)
 	command.Env = []string{
@@ -269,11 +273,20 @@ func run(ctx context.Context, script string, claimed job) result {
 	// Only stdout carries the result. Warnings Node or Chromium print on
 	// stderr must not turn a passing run into an undecodable one; they are
 	// kept as context for a failure.
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	// Both are bounded: a broken run that floods its output must not
+	// exhaust the worker's memory before its deadline.
+	stdout := &headBuffer{limit: maximumResultBytes}
+	stderr := &tailBuffer{limit: retainedDiagnosticBytes}
+	command.Stdout = stdout
+	command.Stderr = stderr
 	runErr := command.Run()
+	if command.Process != nil {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
 	var outcome result
+	if stdout.overflowed {
+		return result{Status: "failed", Failure: sanitizeJobFailure(fmt.Sprintf("browser result exceeded %d bytes", maximumResultBytes), claimed)}
+	}
 	if err := decodeSingleJSON(bytes.NewReader(stdout.Bytes()), &outcome); err != nil {
 		detail := "decode browser result: " + err.Error()
 		if runErr != nil {
@@ -293,6 +306,47 @@ func run(ctx context.Context, script string, claimed job) result {
 	outcome.Failure = sanitizeJobFailure(outcome.Failure, claimed)
 	return outcome
 }
+
+// maximumResultBytes bounds the browser run's result document;
+// retainedDiagnosticBytes is how much of its diagnostic output is kept.
+const (
+	maximumResultBytes      = 64 * 1024
+	retainedDiagnosticBytes = 8 * 1024
+)
+
+// headBuffer keeps the first limit bytes written and notes anything beyond.
+type headBuffer struct {
+	bytes.Buffer
+	limit      int
+	overflowed bool
+}
+
+func (buffer *headBuffer) Write(data []byte) (int, error) {
+	if room := buffer.limit - buffer.Len(); room < len(data) {
+		buffer.overflowed = true
+		if room > 0 {
+			buffer.Buffer.Write(data[:room])
+		}
+		return len(data), nil
+	}
+	return buffer.Buffer.Write(data)
+}
+
+// tailBuffer keeps the last limit bytes written, where a failure's cause is.
+type tailBuffer struct {
+	data  []byte
+	limit int
+}
+
+func (buffer *tailBuffer) Write(data []byte) (int, error) {
+	buffer.data = append(buffer.data, data...)
+	if excess := len(buffer.data) - buffer.limit; excess > 0 {
+		buffer.data = append(buffer.data[:0], buffer.data[excess:]...)
+	}
+	return len(data), nil
+}
+
+func (buffer *tailBuffer) String() string { return string(buffer.data) }
 
 func sanitizeFailure(value, username string) string {
 	secrets := []string{

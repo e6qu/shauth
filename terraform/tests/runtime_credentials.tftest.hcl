@@ -210,3 +210,17 @@ run "github_teams_are_required_coordinates" {
 
   expect_failures = [var.github_admin_team]
 }
+
+# The validator runs Chromium, whose orphaned helpers must be reaped.
+run "validator_runs_under_an_init_process" {
+  command = plan
+
+  plan_options {
+    refresh = false
+  }
+
+  assert {
+    condition     = local.validator_linux_parameters.initProcessEnabled
+    error_message = "The validator container must run under an init process."
+  }
+}
