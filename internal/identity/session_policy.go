@@ -40,7 +40,7 @@ func (policy SessionPolicy) Validate() error {
 		return invalidInput("browser idle timeout must be between 5 minutes and the absolute lifetime")
 	}
 	if policy.OIDCSessionLifetime < 5*time.Minute || policy.OIDCSessionLifetime > policy.BrowserAbsoluteLifetime {
-		return invalidInput("OpenID Connect SSO lifetime must be between 5 minutes and the browser absolute lifetime")
+		return invalidInput("OIDC SSO lifetime must be between 5 minutes and the browser absolute lifetime")
 	}
 	if policy.AccessTokenLifetime < 5*time.Minute || policy.AccessTokenLifetime > 24*time.Hour {
 		return invalidInput("access token lifetime must be between 5 minutes and 24 hours")

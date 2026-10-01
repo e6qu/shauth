@@ -63,7 +63,7 @@ func (s *Store) Metrics(ctx context.Context, now time.Time) (Metrics, error) {
 		Validations: ValidationMetrics{ByStatus: map[string]int{}},
 	}
 
-	if err := s.pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE disabled_at IS NOT NULL) FROM users`).
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE disabled_at IS NOT NULL) FROM users`).
 		Scan(&metrics.Users.Total, &metrics.Users.Disabled); err != nil {
 		return Metrics{}, fmt.Errorf("count users: %w", err)
 	}
@@ -74,7 +74,7 @@ func (s *Store) Metrics(ctx context.Context, now time.Time) (Metrics, error) {
 		return Metrics{}, err
 	}
 
-	if err := s.pool.QueryRow(ctx, `SELECT
+	if err := s.db(ctx).QueryRow(ctx, `SELECT
 		count(*),
 		count(*) FILTER (WHERE revoked_at IS NULL AND expires_at>$1 AND last_seen_at>$2),
 		count(*) FILTER (WHERE revoked_at IS NOT NULL)
@@ -91,7 +91,7 @@ func (s *Store) Metrics(ctx context.Context, now time.Time) (Metrics, error) {
 		return Metrics{}, err
 	}
 
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM managed_apps`).Scan(&metrics.Apps.Total); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM managed_apps`).Scan(&metrics.Apps.Total); err != nil {
 		return Metrics{}, fmt.Errorf("count managed apps: %w", err)
 	}
 
@@ -102,12 +102,12 @@ func (s *Store) Metrics(ctx context.Context, now time.Time) (Metrics, error) {
 	metrics.Validations.Running = metrics.Validations.ByStatus[ValidationRunning]
 	// A queue that stops draining is the failure an operator needs to see, so
 	// the age of the oldest waiting run is reported alongside its depth.
-	if err := s.pool.QueryRow(ctx, `SELECT EXTRACT(EPOCH FROM (now() - min(requested_at))) FROM app_validation_runs WHERE status=$1`, ValidationQueued).
+	if err := s.db(ctx).QueryRow(ctx, `SELECT EXTRACT(EPOCH FROM (now() - min(requested_at))) FROM app_validation_runs WHERE status=$1`, ValidationQueued).
 		Scan(&metrics.Validations.OldestQueuedSeconds); err != nil {
 		return Metrics{}, fmt.Errorf("measure validation queue age: %w", err)
 	}
 
-	if err := s.pool.QueryRow(ctx, `SELECT
+	if err := s.db(ctx).QueryRow(ctx, `SELECT
 		count(*) FILTER (WHERE completed_at IS NULL),
 		count(*) FILTER (WHERE completed_at IS NULL AND cleanup_attempts>0)
 		FROM logout_correlation_grants`).
@@ -118,7 +118,7 @@ func (s *Store) Metrics(ctx context.Context, now time.Time) (Metrics, error) {
 }
 
 func (s *Store) countInto(ctx context.Context, query string, target map[string]int) error {
-	rows, err := s.pool.Query(ctx, query)
+	rows, err := s.db(ctx).Query(ctx, query)
 	if err != nil {
 		return fmt.Errorf("aggregate counts: %w", err)
 	}

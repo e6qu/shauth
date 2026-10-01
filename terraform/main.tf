@@ -6,7 +6,7 @@ locals {
   # without a provider lookup.
   aws_partition             = split(":", var.ecs_cluster_arn)[1]
   aws_account_id            = split(":", var.ecs_cluster_arn)[4]
-  log_group_name            = "/e6qu/${var.name}"
+  log_group_name            = coalesce(var.log_group_name, "/shauth/${var.name}")
   entra_enabled             = var.entra_tenant_id != null && var.entra_client_id != null && var.entra_oauth_secret_arn != null
   owns_api_gateway_vpc_link = var.create_api_gateway_vpc_link
   api_gateway_vpc_link_id = (
@@ -56,6 +56,10 @@ locals {
     var.database_url_secret_arn,
     var.hydra_database_url_secret_arn,
   ], local.entra_enabled ? [var.entra_oauth_secret_arn] : [])
+
+  # Chromium leaves helper processes behind when a validation run is stopped;
+  # an init process reaps them so they cannot accumulate across runs.
+  validator_linux_parameters = { initProcessEnabled = true }
 
   # Ory Hydra's settings. Compose sets the same values for the local stack.
   # Every token Hydra issues, including each refresh, is first confirmed by
@@ -116,6 +120,9 @@ resource "aws_cloudwatch_log_group" "this" {
   retention_in_days = 30
   kms_key_id        = aws_kms_key.data.arn
   tags              = local.tags
+  # CloudWatch Logs checks that it may use the key when the group is
+  # created, so the key policy admitting it must exist first.
+  depends_on = [aws_kms_key_policy.data]
 }
 
 resource "aws_kms_key" "data" {
@@ -415,7 +422,7 @@ resource "aws_iam_role" "execution" {
 }
 resource "aws_iam_role_policy_attachment" "execution" {
   role       = aws_iam_role.execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  policy_arn = "arn:${local.aws_partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 resource "aws_iam_role" "validator_execution" {
@@ -426,7 +433,7 @@ resource "aws_iam_role" "validator_execution" {
 
 resource "aws_iam_role_policy_attachment" "validator_execution" {
   role       = aws_iam_role.validator_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  policy_arn = "arn:${local.aws_partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 data "aws_iam_policy_document" "validator_secrets" {
@@ -554,6 +561,12 @@ resource "aws_ecs_service" "this" {
     container_name = "shauth"
     container_port = 8080
   }
+  # A release whose tasks never become healthy is rolled back to the last
+  # working task definition instead of holding the apply until it times out.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
   wait_for_steady_state = true
   lifecycle { ignore_changes = [desired_count] }
   tags = local.tags
@@ -571,9 +584,10 @@ resource "aws_ecs_task_definition" "validator" {
     operating_system_family = "LINUX"
   }
   container_definitions = jsonencode([{
-    name      = "shauth-validator"
-    image     = var.validator_container_image
-    essential = true
+    name            = "shauth-validator"
+    image           = var.validator_container_image
+    essential       = true
+    linuxParameters = local.validator_linux_parameters
     environment = [
       { name = "SHAUTH_URL", value = local.public_url },
       { name = "SHAUTH_VALIDATION_USERNAME", value = "shauth-validator" },
@@ -605,6 +619,10 @@ resource "aws_ecs_service" "validator" {
     subnets          = var.private_subnet_ids
     security_groups  = [aws_security_group.validator.id]
     assign_public_ip = false
+  }
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
   }
   wait_for_steady_state = true
   tags                  = local.tags

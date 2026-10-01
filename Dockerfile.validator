@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-FROM golang:1.27.1-bookworm AS build
+FROM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -10,11 +10,15 @@ COPY internal/observe ./internal/observe
 COPY cmd/shauth-validator ./cmd/shauth-validator
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shauth-validator ./cmd/shauth-validator
 
-FROM node:26-bookworm-slim
+FROM node:26.10.0-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2
 WORKDIR /opt/shauth-validator
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY package.json package-lock.json ./
-RUN npm ci && npx playwright install --with-deps chromium && npm cache clean --force
+# Chromium's system packages come from the Debian mirror. A stalled mirror
+# connection is retried and the whole install is bounded, so a slow mirror
+# fails the build with a clear error instead of exhausting the CI job.
+RUN printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-bounded-downloads
+RUN npm ci && timeout 600 npx playwright install --with-deps chromium && npm cache clean --force
 COPY validator/validate.mjs validator/application-ui.mjs validator/security.mjs validator/readiness.mjs ./
 COPY --from=build /out/shauth-validator /usr/local/bin/shauth-validator
 ENV SHAUTH_VALIDATOR_SCRIPT=/opt/shauth-validator/validate.mjs

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidationPagePublishesClosedIdentityAndLogoutContract(t *testing.T) {
@@ -440,5 +441,40 @@ func TestFrontchannelSessionIDIsBoundedBeforeItIsPersisted(t *testing.T) {
 		if got := validProviderSessionID(sid); got != want {
 			t.Errorf("validProviderSessionID(%q) = %v, want %v", sid, got, want)
 		}
+	}
+}
+
+// Identity headers cannot be smuggled in under an underscore spelling, which
+// servers exposing CGI-style variables read as the real header.
+func TestProxyStripsUnderscoreSpelledIdentityHeaders(t *testing.T) {
+	t.Parallel()
+	publicURL, _ := url.Parse("https://app.example.test")
+	request := httptest.NewRequest(http.MethodGet, "https://app.example.test/", nil)
+	request.Header["X_Forwarded_Role"] = []string{"admin"}
+	request.Header["X_FORWARDED_USER"] = []string{"someone-else"}
+	request.Header["x_real_ip"] = []string{"203.0.113.1"}
+	sanitizeProxyHeaders(request, Config{PublicURL: publicURL})
+	for name := range request.Header {
+		normalized := strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+		if normalized == "x-forwarded-role" || normalized == "x-forwarded-user" || normalized == "x-real-ip" {
+			t.Fatalf("client header %q reached the upstream", name)
+		}
+	}
+}
+
+// Signing out of an application whose own session has already ended still
+// ends the Shauth session: Shauth's sign-out is told which application asked,
+// so it returns there afterwards.
+func TestLogoutWithoutAnApplicationSessionHandsOverToShauth(t *testing.T) {
+	t.Parallel()
+	issuer, _ := url.Parse("https://auth.example.test")
+	publicURL, _ := url.Parse("https://app.example.test")
+	server := &Server{config: Config{Issuer: issuer, PublicURL: publicURL, ClientID: "app-client"}, now: time.Now}
+	request := httptest.NewRequest(http.MethodPost, "https://app.example.test/auth/logout", nil)
+	request.Header.Set("Origin", "https://app.example.test")
+	response := httptest.NewRecorder()
+	server.logout(response, request)
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "https://auth.example.test/logout?client_id=app-client" {
+		t.Fatalf("logout without a session = %d %q", response.Code, response.Header().Get("Location"))
 	}
 }

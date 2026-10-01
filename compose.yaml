@@ -5,7 +5,7 @@ x-shauth-image: &shauth-image
 
 services:
   postgres:
-    image: postgres:17.11-alpine
+    image: postgres:17.11-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     environment:
       POSTGRES_DB: shauth
       POSTGRES_USER: shauth
@@ -25,6 +25,9 @@ services:
     <<: *shauth-image
     entrypoint: ["/hydra"]
     command: migrate sql up --read-from-env --yes
+    # The image's own healthcheck probes Shauth, which this container is not.
+    healthcheck:
+      disable: true
     environment: &hydra-environment
       DSN: ${HYDRA_DSN:?set HYDRA_DSN}
       HYDRA_DSN: ${HYDRA_DSN:?set HYDRA_DSN}
@@ -63,12 +66,15 @@ services:
       - "gateway-secondary.localhost:host-gateway"
       - "gateway-tertiary.localhost:host-gateway"
     command: serve all --dev --config /etc/config/hydra.yaml
+    healthcheck:
+      disable: true
     environment: *hydra-environment
     depends_on:
       hydra-migrate:
         condition: service_completed_successfully
     ports:
-      - "4444:4444"
+      # Development settings; reachable from this machine only.
+      - "127.0.0.1:4444:4444"
       - "127.0.0.1:4445:4445"
     volumes:
       - ./config/hydra.yaml:/etc/config/hydra.yaml:ro
@@ -105,7 +111,7 @@ services:
       hydra:
         condition: service_started
     ports:
-      - "${SHAUTH_HOST_PORT:-8080}:8080"
+      - "127.0.0.1:${SHAUTH_HOST_PORT:-8080}:8080"
 
   shauth-migrate:
     <<: *shauth-image

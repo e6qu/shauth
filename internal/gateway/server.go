@@ -74,11 +74,22 @@ type Server struct {
 	endSessionEndpoint string
 	transactions       cipher.AEAD
 	proxy              *httputil.ReverseProxy
+	providerClient     *http.Client
 	now                func() time.Time
 }
 
+// logoutTombstoneLifetime covers the only race a tombstone guards: an
+// authorization code issued for a provider session just before that session
+// was logged out, redeemed at the callback afterwards. A code and the
+// transaction carrying it each live ten minutes.
+const logoutTombstoneLifetime = 20 * time.Minute
+
 func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error) {
-	discoveryContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// Every call to the provider is bounded, including the key-set fetches
+	// go-oidc makes later on its own: one that hangs would stall every
+	// sign-in and every back-channel logout behind it.
+	providerClient := &http.Client{Timeout: 10 * time.Second}
+	discoveryContext, cancel := context.WithTimeout(oidc.ClientContext(ctx, providerClient), 10*time.Second)
 	defer cancel()
 	provider, err := oidc.NewProvider(discoveryContext, config.Issuer.String())
 	if err != nil {
@@ -94,7 +105,7 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 	if err != nil || endSessionURL.Scheme != config.Issuer.Scheme || endSessionURL.Host != config.Issuer.Host {
 		return nil, fmt.Errorf("OpenID Connect end_session_endpoint did not use the configured issuer origin")
 	}
-	store, err := NewStore(pool, config.ClientID, config.Issuer.String(), config.CookieSecret, config.SessionMaxAge)
+	store, err := NewStore(pool, config.ClientID, config.Issuer.String(), config.CookieSecret, logoutTombstoneLifetime)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +159,7 @@ func New(ctx context.Context, config Config, pool *pgxpool.Pool) (*Server, error
 		endSessionEndpoint: metadata.EndSessionEndpoint,
 		transactions:       transactions,
 		proxy:              proxy,
+		providerClient:     providerClient,
 		now:                time.Now,
 	}, nil
 }
@@ -188,8 +200,15 @@ func assertUpstreamIdentity(request *http.Request, config Config) {
 
 func sanitizeProxyHeaders(request *http.Request, config Config) {
 	for name := range request.Header {
-		if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Forwarded") || strings.EqualFold(name, "X-Real-IP") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
-			request.Header.Del(name)
+		// Servers that expose headers as CGI-style variables read
+		// X_Forwarded_Role as HTTP_X_FORWARDED_ROLE, the variable the real
+		// header also becomes, so names are compared with "_" as "-" and a
+		// client cannot reach an identity header by spelling it differently.
+		normalized := strings.ToLower(strings.ReplaceAll(name, "_", "-"))
+		if normalized == "authorization" || normalized == "forwarded" || normalized == "x-real-ip" || strings.HasPrefix(normalized, "x-forwarded-") {
+			// The key as stored, not Del's canonical form: Go leaves a
+			// name with "_" uncanonicalized, so Del would miss it.
+			delete(request.Header, name)
 		}
 	}
 	request.Header.Set("X-Forwarded-Host", config.PublicURL.Host)
@@ -210,7 +229,23 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/backchannel-logout", server.backchannelLogout)
 	mux.HandleFunc("GET /auth/healthz", server.healthz)
 	mux.Handle("/", server.requireSession(server.proxy))
-	return server.securityHeaders(mux)
+	return server.securityHeaders(boundAuthRoutes(mux))
+}
+
+// boundAuthRoutes gives the gateway's own /auth/ endpoints a read and write
+// deadline. The server sets none, because proxied application traffic
+// (WebSockets, server-sent events, long downloads) must run as long as the
+// application keeps it open.
+func boundAuthRoutes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/auth/") {
+			controller := http.NewResponseController(response)
+			deadline := time.Now().Add(30 * time.Second)
+			_ = controller.SetReadDeadline(deadline)
+			_ = controller.SetWriteDeadline(deadline)
+		}
+		next.ServeHTTP(response, request)
+	})
 }
 
 // healthz answers only after proving the session store is still reachable.
@@ -315,7 +350,16 @@ func (server *Server) callback(response http.ResponseWriter, request *http.Reque
 		http.Error(response, "Authentication transaction is invalid", http.StatusBadRequest)
 		return
 	}
-	token, err := server.oauth.Exchange(request.Context(), request.URL.Query().Get("code"), oauth2.VerifierOption(pending.Verifier))
+	if providerError := request.URL.Query().Get("error"); providerError != "" {
+		// Shauth refused or the person cancelled; there is no code to
+		// exchange, and this application's signed-out page offers a fresh
+		// sign-in.
+		observe.Warnf("OIDC gateway sign-in was not completed: %s", providerError)
+		http.Redirect(response, request, "/auth/signed-out", http.StatusSeeOther)
+		return
+	}
+	exchangeContext := context.WithValue(request.Context(), oauth2.HTTPClient, server.providerClient)
+	token, err := server.oauth.Exchange(exchangeContext, request.URL.Query().Get("code"), oauth2.VerifierOption(pending.Verifier))
 	if err != nil {
 		http.Error(response, "Authorization code exchange failed", http.StatusBadGateway)
 		return
@@ -345,6 +389,14 @@ func (server *Server) callback(response http.ResponseWriter, request *http.Reque
 		http.Error(response, "Could not create application session", http.StatusInternalServerError)
 		return
 	}
+	// A new sign-in in this browser replaces the previous session outright,
+	// so a copy of the earlier cookie stops working now, not when it expires.
+	if _, previousToken, previousErr := server.currentSession(request); previousErr == nil {
+		if err := server.store.RevokeToken(request.Context(), previousToken, server.now()); err != nil {
+			http.Error(response, "Could not replace the previous application session", http.StatusServiceUnavailable)
+			return
+		}
+	}
 	now := server.now()
 	session := Session{ID: sessionID, Subject: claims.Subject, ProviderSessionID: claims.ProviderSessionID, IDToken: rawIDToken, Username: claims.Username, Email: claims.Email, Role: claims.Role, ExpiresAt: now.Add(server.config.SessionMaxAge)}
 	if err := server.store.Create(request.Context(), session, browserToken, now); err != nil {
@@ -357,6 +409,10 @@ func (server *Server) callback(response http.ResponseWriter, request *http.Reque
 
 func (server *Server) session(response http.ResponseWriter, request *http.Request) {
 	session, _, err := server.currentSession(request)
+	if err != nil && !errors.Is(err, errNoSession) {
+		server.storeUnavailable(response, err)
+		return
+	}
 	if err != nil {
 		http.Error(response, "Authentication required", http.StatusUnauthorized)
 		return
@@ -366,6 +422,10 @@ func (server *Server) session(response http.ResponseWriter, request *http.Reques
 
 func (server *Server) validation(response http.ResponseWriter, request *http.Request) {
 	session, _, err := server.currentSession(request)
+	if err != nil && !errors.Is(err, errNoSession) {
+		server.storeUnavailable(response, err)
+		return
+	}
 	if err != nil {
 		http.Redirect(response, request, "/auth/signed-out", http.StatusSeeOther)
 		return
@@ -389,13 +449,20 @@ func (server *Server) logout(response http.ResponseWriter, request *http.Request
 		return
 	}
 	session, browserToken, err := server.currentSession(request)
-	if err != nil {
-		// This application holds no session to end, usually because a
-		// logout elsewhere already revoked it. Without an ID token the
-		// provider refuses a return address, so the person is shown this
-		// application's own signed-out page rather than a provider error.
+	if errors.Is(err, errNoSession) {
+		// This application holds no session to end: a logout elsewhere
+		// already revoked it, or it reached its own lifetime while the
+		// Shauth session lives on. Without an ID token the provider will
+		// not return here, so Shauth's own sign-out takes over: it ends the
+		// Shauth session and every application's, then returns to this
+		// application's signed-out page.
 		server.clearCookie(response, server.sessionCookieName())
-		http.Redirect(response, request, "/auth/signed-out", http.StatusSeeOther)
+		target := server.config.Issuer.ResolveReference(&url.URL{Path: "/logout", RawQuery: url.Values{"client_id": {server.config.ClientID}}.Encode()})
+		http.Redirect(response, request, target.String(), http.StatusSeeOther)
+		return
+	}
+	if err != nil {
+		server.storeUnavailable(response, err)
 		return
 	}
 	if err := server.store.RevokeToken(request.Context(), browserToken, server.now()); err != nil {
@@ -489,6 +556,13 @@ func validLogoutEvent(events map[string]json.RawMessage) bool {
 func (server *Server) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		session, _, err := server.currentSession(request)
+		if err != nil && !errors.Is(err, errNoSession) {
+			// The session store could not be read. The cookie may be
+			// perfectly valid, so it is kept and the request refused,
+			// rather than signing everyone out during a brief outage.
+			server.storeUnavailable(response, err)
+			return
+		}
 		if err != nil {
 			if request.Method == http.MethodGet || request.Method == http.MethodHead {
 				if _, cookieErr := request.Cookie(server.sessionCookieName()); cookieErr == nil {
@@ -507,17 +581,33 @@ func (server *Server) requireSession(next http.Handler) http.Handler {
 	})
 }
 
+// errNoSession reports that the request carries no live session for this
+// application: no cookie, a malformed one, or one that names no session that
+// is still in force. Any other error from currentSession means the session
+// store could not be read.
+var errNoSession = errors.New("no application session")
+
 func (server *Server) currentSession(request *http.Request) (Session, []byte, error) {
 	cookie, err := request.Cookie(server.sessionCookieName())
 	if err != nil {
-		return Session{}, nil, err
+		return Session{}, nil, errNoSession
 	}
 	token, err := base64.RawURLEncoding.DecodeString(cookie.Value)
 	if err != nil || len(token) != 32 {
-		return Session{}, nil, fmt.Errorf("session cookie is invalid")
+		return Session{}, nil, errNoSession
 	}
 	session, err := server.store.Find(request.Context(), token, server.now())
+	if errors.Is(err, ErrSessionNotFound) {
+		return Session{}, nil, errNoSession
+	}
 	return session, token, err
+}
+
+func (server *Server) storeUnavailable(response http.ResponseWriter, err error) {
+	observe.Errorf("OIDC gateway could not read its session store: %v", err)
+	response.Header().Set("Cache-Control", "no-store")
+	response.Header().Set("Retry-After", "5")
+	http.Error(response, "Sign-in is temporarily unavailable", http.StatusServiceUnavailable)
 }
 
 func (server *Server) sameOrigin(request *http.Request) bool {

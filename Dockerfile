@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-FROM golang:1.27.1-alpine AS build
+FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
 # The revision this image was built from, stamped into the binaries so every
 # page and contract can report exactly which build is serving it.
 ARG SHAUTH_REVISION=unknown
@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth-healthcheck ./cmd/shauth-healthcheck
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth-gateway ./cmd/shauth-gateway
 
-FROM golang:1.27.1-alpine AS hydra-build
+FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS hydra-build
 ARG HYDRA_COMMIT=0b84568fffccf151dc5e6c7955fdfb738555bf4b
 ARG HYDRA_SOURCE_SHA256=7ceaae3299780959e8390925732629931f63f20300464d2822d49628eeb3332e
 RUN apk add --no-cache patch
@@ -43,7 +43,7 @@ RUN go get \
     && go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/hydra .
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/shauth /shauth
 COPY --from=build /out/shauth-migrate /shauth-migrate
 COPY --from=build /out/shauth-healthcheck /shauth-healthcheck

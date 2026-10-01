@@ -32,11 +32,35 @@ export SHAUTH_PUBLIC_URL
 SHAUTH_URL=$SHAUTH_PUBLIC_URL
 export SHAUTH_URL
 
+# The whole run has one budget, below the CI job's fifteen minutes, so a stall
+# anywhere fails here with service logs and a torn-down stack rather than
+# being killed by the runner with neither. When the budget is spent the
+# watchdog ends the script's children, and the TERM trap runs cleanup.
+stack_budget_seconds=${SHAUTH_STACK_BUDGET_SECONDS:-720}
+stack_deadline=$(( $(date +%s) + stack_budget_seconds ))
+stack_parent=$$
+(
+	trap '' TERM
+	while [ "$(date +%s)" -lt "$stack_deadline" ]; do
+		sleep 5
+	done
+	echo "Shauth acceptance stack exceeded its ${stack_budget_seconds}-second budget; stopping it." >&2
+	pkill -TERM -P "$stack_parent" 2>/dev/null || true
+	kill -TERM "$stack_parent" 2>/dev/null || true
+) &
+stack_watchdog_pid=$!
+trap 'kill -KILL "$stack_watchdog_pid" 2>/dev/null || true; wait "$stack_watchdog_pid" 2>/dev/null || true' EXIT
+
+# Every HTTP request and every Compose command is bounded; a later
+# --max-time on a call overrides the default.
+curl() {
+	command curl --max-time 30 "$@"
+}
+
 ./scripts/test-workflow-timeouts.sh
 ./scripts/check-workflow-timeouts.sh
 ./scripts/test-process-wait.sh
 ./scripts/check-gateway-test-coordinates.sh
-npm ci
 
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
@@ -44,6 +68,7 @@ random_secret() {
 
 # shellcheck source=./scripts/process-wait.sh
 . "$root/scripts/process-wait.sh"
+
 
 # run_bounded runs one command in the background and waits for it under a
 # deadline, so a stalled download fails this script with a clear message
@@ -56,6 +81,8 @@ run_bounded() {
 	bounded_pid=$!
 	wait_for_process "$bounded_pid" "$bounded_label" "$bounded_timeout"
 }
+
+run_bounded 'npm ci' 180 npm ci
 
 # Chromium comes from Playwright's CDN. Its system libraries normally come
 # with the host (the GitHub runner image ships them), so the distribution
@@ -105,7 +132,7 @@ compose() {
     SHAUTH_ADMIN_API_READ_TOKEN=$SHAUTH_ADMIN_API_READ_TOKEN \
     SHAUTH_ADMIN_API_WRITE_TOKEN=$SHAUTH_ADMIN_API_WRITE_TOKEN \
     SHAUTH_TOKEN_HOOK_TOKEN=$SHAUTH_TOKEN_HOOK_TOKEN \
-    command docker compose "$@"
+    timeout --kill-after=10 300 docker compose "$@"
 }
 
 prepare_test_app_coordinates() {
@@ -177,6 +204,8 @@ cleanup() {
 		compose logs --no-color --tail=10 hydra >&2 || true
 	fi
 	compose down --volumes --remove-orphans
+	kill -KILL "$stack_watchdog_pid" 2>/dev/null || true
+	wait "$stack_watchdog_pid" 2>/dev/null || true
 	rm -f "$cookie_jar" "$validation_cookie_jar" "$gateway_binary" "$validator_binary"
 	rm -rf "$validator_coordination_directory"
 	return "$status"
@@ -192,7 +221,7 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
 chmod 700 "$validator_coordination_directory"
-docker build --load --tag shauth-local .
+run_bounded 'Shauth image build' 420 docker build --load --tag shauth-local .
 compose up --no-build --detach
 
 attempt=0
@@ -213,7 +242,7 @@ fi
 SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1:${SHAUTH_POSTGRES_HOST_PORT}/shauth?sslmode=disable" \
 	SHAUTH_ACCEPTANCE_HYDRA_ADMIN_URL=http://localhost:4445 \
 	SHAUTH_ACCEPTANCE_HYDRA_PUBLIC_URL=http://localhost:4444 \
-	go test -tags acceptance ./internal/identity ./internal/gateway ./internal/app -count=1
+	go test -tags acceptance -timeout 4m ./internal/identity ./internal/gateway ./internal/app -count=1
 
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'id="main-content"'
 # The sign-in page shows only messages the server wrote; a crafted link
@@ -492,7 +521,7 @@ for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECO
 		exit 1
 	fi
 	migration_count=$(compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc 'SELECT count(*) FROM shauth_gateway_schema_migrations')
-	[ "$migration_count" = 2 ]
+	[ "$migration_count" = "$(find internal/gateway/migrations -name '*.sql' | wc -l | tr -d ' ')" ]
 done
 if [ "${SHAUTH_STACK_FOCUS:-}" = browser-global-logout ]; then
 	compose restart shauth >/dev/null
@@ -689,7 +718,7 @@ app_slug=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT slug F
 curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/apps/${app_slug}" | grep -q 'Validation history'
 admin_user_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username='admin'")
 [ -n "$admin_user_id" ]
-curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}" | grep -q 'Account state'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}" | grep -q '<dt>State</dt>'
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}/sessions")" = 301 ]
 
 # A narrow screen stacks table rows instead of scrolling the page sideways.
@@ -970,6 +999,8 @@ refresh_refused() {
 	refusal_status=$(printf '%s' "$refusal" | tail -n 1)
 	case "$refusal_status" in
 		400|401) ;;
+		# The token hook refused it: Hydra reports access_denied.
+		403) printf '%s' "$refusal" | grep -q '"error":"access_denied"' || return 1 ;;
 		*) echo "refresh token was not refused with an OAuth error: HTTP ${refusal_status}" >&2; return 1 ;;
 	esac
 	printf '%s' "$refusal" | grep -q '"error":"'
@@ -1181,6 +1212,51 @@ curl --fail --silent --show-error \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
 	"${SHAUTH_PUBLIC_URL}"/oauth2/revoke >/dev/null
 refresh_refused "$revocable_refresh_token"
+# Ending one sign-in session ends the tokens issued under it, even though the
+# account stays active: Hydra keeps refresh tokens alive when only its login
+# session is removed, so the token hook refuses them by their sid. A second
+# browser signs in, the application gets tokens through it, and an
+# administrator ends just that session from the first browser.
+printf '%s\n' 'ending one sign-in session stops its refresh tokens'
+single_session_jar=$(mktemp)
+single_session_agent='shauth-stack single-session revocation'
+curl --fail --silent --show-error --output /dev/null --user-agent "$single_session_agent" --cookie-jar "$single_session_jar" "${SHAUTH_PUBLIC_URL}"/login
+single_session_csrf=$(awk '$6 == "shauth_csrf" { print $7 }' "$single_session_jar")
+curl --fail --silent --show-error --output /dev/null --location --user-agent "$single_session_agent" --cookie-jar "$single_session_jar" --cookie "$single_session_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+	--data-urlencode "_csrf=${single_session_csrf}" \
+	--data-urlencode 'username=admin' \
+	--data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
+	--data-urlencode 'next=/' \
+	"${SHAUTH_PUBLIC_URL}"/login
+single_session_location="${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&scope=openid%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=single-session"
+single_session_hops=0
+while :; do
+	single_session_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --user-agent "$single_session_agent" --cookie-jar "$single_session_jar" --cookie "$single_session_jar" "$single_session_location" |
+		awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+	case "$single_session_location" in
+		"${auto_consent_redirect_uri}"?*) break ;;
+		"${SHAUTH_PUBLIC_URL}"/*) ;;
+		*) echo "single-session grant left the expected flow at: ${single_session_location}" >&2; exit 1 ;;
+	esac
+	single_session_hops=$((single_session_hops + 1))
+	[ "$single_session_hops" -le 8 ]
+done
+single_session_code=$(printf '%s' "$single_session_location" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+single_session_refresh_token=$(curl --fail --silent --show-error \
+	--data-urlencode 'grant_type=authorization_code' \
+	--data-urlencode "code=${single_session_code}" \
+	--data-urlencode "redirect_uri=${auto_consent_redirect_uri}" \
+	--data-urlencode "client_id=${auto_consent_client_id}" \
+	--data-urlencode "client_secret=${auto_consent_client_secret}" \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
+[ -n "$single_session_refresh_token" ]
+single_session_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM sessions WHERE user_agent='${single_session_agent}' AND revoked_at IS NULL")
+[ -n "$single_session_id" ]
+curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+	--data-urlencode "_csrf=${csrf_token}" --data-urlencode 'return_to=/admin/sessions' \
+	"${SHAUTH_PUBLIC_URL}/admin/sessions/${single_session_id}/revoke"
+refresh_refused "$single_session_refresh_token"
+rm -f "$single_session_jar"
 # The first grant still refreshes; keep its rotated token for the
 # subject-wide invalidation check below.
 refresh_token=$(curl --fail --silent --show-error \
@@ -1197,7 +1273,7 @@ curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Or
   --data-urlencode 'kind=user' \
   --data-urlencode 'target=Octocat' \
   --data-urlencode 'role=developer' \
-  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'GitHub account 583231'
+  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'Bound to GitHub ID 583231'
 # A user rule is bound to GitHub's permanent numeric account ID, resolved
 # through GitHub's public API when the rule is added, not to the login alone.
 github_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'user' AND target = 'octocat' AND github_user_id = 583231")

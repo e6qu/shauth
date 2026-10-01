@@ -51,9 +51,18 @@ Shauth. Ory Hydra sends signed back-channel logout tokens and, when configured,
 front-channel logout requests to every client session correlated by `sid`.
 Relying applications validate those notifications and idempotently revoke the
 correlated local sessions.
-The Shauth container includes Ory Hydra v26.2.0 with the repository's audited
-provider patch that adds the Back-Channel Logout 1.0 Errata 1 `exp` claim with
-a two-minute lifetime. The same immutable image runs Shauth, Hydra, and their
+An application whose own session has already ended (it reached its lifetime,
+say, while the Shauth session lives on) has no ID token to send, so it hands
+the sign-out to Shauth's `/logout?client_id=<its client>` instead. Shauth asks
+for confirmation, ends its own session and every application's, and returns
+to that application's registered signed-out page; if nobody is signed in to
+Shauth it returns there at once. Only a registered application's client
+selects a destination.
+The Shauth container includes Ory Hydra v26.2.0 with the repository's two
+audited provider patches (`third_party/hydra-v26.2.0/`): one adds the
+Back-Channel Logout 1.0 Errata 1 `exp` claim with a two-minute lifetime, and
+one stops Hydra logging the routine redirect to the login or consent page as
+an error. The same immutable image runs Shauth, Hydra, and their
 migration entry points, so production never builds or patches the provider at
 startup.
 Each push to `main` publishes `ghcr.io/e6qu/shauth:<sha12>` as a Linux amd64
@@ -108,9 +117,15 @@ and refresh tokens.
 
 Ory Hydra asks Shauth's token hook (`POST /internal/hydra/token-hook`) before
 it issues any token, including every refresh. Shauth reads the account again:
-a disabled or deleted account gets no new token, and new tokens carry the
-account's current role and email rather than those accepted at consent. If
-Shauth cannot answer, Hydra issues nothing. Access tokens are JWTs in every
+a disabled or deleted account gets no new token, a token whose sign-in session
+was ended (from the account page, by an administrator, or by logging out of
+an application) gets no new token, and new tokens carry the account's current
+role and email rather than those accepted at consent. If Shauth cannot
+answer, Hydra issues nothing. A client-credentials token, which acts for the
+client rather than a person, is issued unchanged; any other grant that names
+a person is refused. A role that depends on GitHub team or organization
+membership is re-evaluated when the person next signs in with GitHub; Shauth
+does not hold their GitHub token between sign-ins. Access tokens are JWTs in every
 environment, which a relying party verifies against Hydra's published keys
 without calling back; a JWT already issued therefore stays valid until it
 expires, at most the configured access token lifetime (15 minutes by
@@ -411,7 +426,10 @@ publish: what happened, how much of it, and which dependency is at fault.
   work, while the record keeps the reason, so a disabled account is
   distinguishable from a mistyped name without telling an attacker which.
   A token-authorized write records no person, because bearer credentials are
-  shared and opaque; it records the address it came from.
+  shared and opaque; it records the address it came from. An event no account
+  performed says who did in `details.actor_kind`: `token` for a bearer
+  credential, `visitor` for someone without a session (a sign-in attempt or
+  an invitation acceptance), or `service` for Shauth itself.
 - `GET /api/v1/metrics` — `shauth.metrics/v1`: accounts by role, identity
   source and disabled state; sessions by state; invitations by state;
   applications; validation runs by status with the queue depth and the age of
@@ -607,7 +625,7 @@ from runtime secret injection; none has a default.
 | `HYDRA_ADMIN_URL` | yes | Ory Hydra admin API, reachable only from Shauth. |
 | `HYDRA_PUBLIC_INTERNAL_URL` | yes | Ory Hydra public API as Shauth reaches it internally; it is published at `SHAUTH_PUBLIC_URL`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | yes | The GitHub OAuth application whose sole callback is `/oauth/github/callback`. |
-| `GITHUB_DEVELOPER_TEAM`, `GITHUB_ADMIN_TEAM` | no | `org/team` access rules created once on first start; edit them in the interface afterwards. |
+| `GITHUB_DEVELOPER_TEAM`, `GITHUB_ADMIN_TEAM` | yes | `org/team` access rules created once on first start; edit them in the interface afterwards. |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` | together | Enable Microsoft Entra ID for one specific tenant. |
 | `SHAUTH_SES_REGION`, `SHAUTH_INVITATION_EMAIL_FROM` | yes | Amazon SES region and verified sender for invitations. |
 | `SHAUTH_BOOTSTRAP_ADMIN_EMAIL`, `SHAUTH_BOOTSTRAP_ADMIN_PASSWORD` | together | Break-glass administrator; the password is 14 to 72 bytes. A disabled bootstrap administrator stays disabled. |
@@ -639,7 +657,13 @@ forwards every request to Shauth, which serves Ory Hydra's public OAuth and
 OpenID Connect endpoints from its own origin. Hydra's administration API and
 its own listener are never published, and every `/internal/` endpoint requires
 its bearer credential. PostgreSQL is the durable source of truth.
-All services remain always-on.
+All services remain always-on. A deployment whose tasks never become healthy
+is rolled back to the previous task definition.
+
+The module names no organization: `github_admin_team` and
+`github_developer_team` are required `organization/team-slug` inputs. Logs go
+to `/shauth/<name>` unless `log_group_name` is set; a deployment that already
+has a log group sets it to that name, because renaming a log group replaces it.
 
 Runtime secret requirements: the Hydra system secret must remain stable across
 restarts. Terraform creates it and the bootstrap-admin password with a

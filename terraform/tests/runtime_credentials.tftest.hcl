@@ -23,6 +23,8 @@ variables {
   bootstrap_admin_email         = "admin@test.example.com"
   invitation_email_from         = "invitations@test.example.com"
   database_url_secret_arn       = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:shauth-database"
+  github_admin_team             = "example-org/admins"
+  github_developer_team         = "example-org/developers"
   hydra_database_url_secret_arn = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:hydra-database"
 }
 
@@ -138,7 +140,7 @@ run "data_key_admits_logs_and_secret_injection" {
     condition = anytrue([
       for statement in data.aws_iam_policy_document.data_key.statement :
       contains(flatten([for principal in statement.principals : principal.identifiers]), "logs.eu-west-1.amazonaws.com")
-      && one([for condition in statement.condition : condition.values[0]]) == "arn:aws:logs:eu-west-1:123456789012:log-group:/e6qu/shauth-test"
+      && one([for condition in statement.condition : condition.values[0]]) == "arn:aws:logs:eu-west-1:123456789012:log-group:/shauth/shauth-test"
     ])
     error_message = "The data key policy must admit CloudWatch Logs for exactly this module's log group."
   }
@@ -190,5 +192,35 @@ run "hydra_runs_with_the_token_hook_and_the_tested_settings" {
   assert {
     condition     = contains([for secret in local.shauth_secrets : secret.name], "SHAUTH_TOKEN_HOOK_TOKEN")
     error_message = "Shauth must receive the token hook credential it verifies."
+  }
+}
+
+# The module names no particular organization: both GitHub teams are required
+# inputs and must be organization/team-slug.
+run "github_teams_are_required_coordinates" {
+  command = plan
+
+  plan_options {
+    refresh = false
+  }
+
+  variables {
+    github_admin_team = "not-a-team"
+  }
+
+  expect_failures = [var.github_admin_team]
+}
+
+# The validator runs Chromium, whose orphaned helpers must be reaped.
+run "validator_runs_under_an_init_process" {
+  command = plan
+
+  plan_options {
+    refresh = false
+  }
+
+  assert {
+    condition     = local.validator_linux_parameters.initProcessEnabled
+    error_message = "The validator container must run under an init process."
   }
 }

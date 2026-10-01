@@ -8,6 +8,7 @@ package app
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -431,7 +432,14 @@ func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
 		page = identity.Page{}
 	}
 	filter, err := requestedAuditFilter(r)
+	filterError := ""
+	if err == nil && filter.EventType != "" && !slices.Contains(identity.AuditEventTypes, filter.EventType) {
+		err = identity.Invalid("there is no event type %q", filter.EventType)
+	}
 	if err != nil {
+		// The page says the filter was not applied instead of quietly
+		// showing everything as though it had been.
+		filterError = asSentence(err.Error())
 		filter = identity.AuditFilter{}
 	}
 	events, total, err := s.store.ListAuditEvents(r.Context(), filter, page)
@@ -444,8 +452,23 @@ func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
 	for _, event := range events {
 		records = append(records, newAuditEventRecord(event))
 	}
+	accountIDs := make([]string, 0, len(records)*2)
+	for _, record := range records {
+		for _, id := range []string{record.ActorUserID, record.SubjectUserID} {
+			if id != "" {
+				accountIDs = append(accountIDs, id)
+			}
+		}
+	}
+	names, err := s.store.AccountNames(r.Context(), accountIDs)
+	if err != nil {
+		observe.Errorf("name audit record accounts: %v", err)
+		names = map[string]string{}
+	}
 	s.render(w, "audit", s.view(r, "Audit record", map[string]any{
-		"SignedIn": true, "IsAdmin": true, "Events": records,
-		"EventType": filter.EventType, "Page": browserPage(r, page, len(records), total),
+		"SignedIn": true, "IsAdmin": true, "Events": records, "Names": names,
+		"EventType": filter.EventType, "EventTypes": identity.AuditEventTypes,
+		"Filtered": filter.EventType != "" || filter.ActorUserID != "" || filter.SubjectUserID != "",
+		"Error":    filterError, "Page": browserPage(r, page, len(records), total),
 	}))
 }

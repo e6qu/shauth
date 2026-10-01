@@ -296,11 +296,15 @@ try {
     headers: { origin: "http://gateway-integration.localhost:5556" },
     maxRedirects: 0,
   });
-  // An application whose session another logout already revoked shows its
-  // own signed-out page: the provider refuses a return address without an
-  // ID token, so sending the browser there would end on a provider error.
+  // An application whose own session already ended hands the sign-out to
+  // Shauth, naming itself, so a Shauth session that outlived it still ends.
+  // Here the global logout already ended the Shauth session too, so Shauth
+  // returns straight to this application's signed-out page.
   assert.equal(noLocalSessionLogout.status(), 303);
-  assert.equal(noLocalSessionLogout.headers().location, "/auth/signed-out");
+  assert.equal(noLocalSessionLogout.headers().location, `${issuer}/logout?client_id=gateway-integration`);
+  const noLocalSessionHandover = await gatewayRequest(context, "GET", noLocalSessionLogout.headers().location, { maxRedirects: 0 });
+  assert.equal(noLocalSessionHandover.status(), 303);
+  assert.equal(noLocalSessionHandover.headers().location, "http://gateway-integration.localhost:5556/auth/signed-out");
   const noLocalSessionPage = await gatewayRequest(context, "GET", "http://gateway-integration.localhost:5556/auth/signed-out", { maxRedirects: 0 });
   assert.equal(noLocalSessionPage.status(), 200);
   assert.match(await noLocalSessionPage.text(), /Sign in with Shauth/);
@@ -314,6 +318,38 @@ try {
   await page.goto(`${issuer}/apps`);
   await page.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
   assert.deepEqual(browserErrors, []);
+
+  // An application session that reached its own lifetime while the Shauth
+  // session lives on must not make signing out of that application a no-op.
+  // The application hands over to Shauth's sign-out naming itself; Shauth
+  // ends its own session and every application's, then returns here.
+  const outlivedContext = await browser.newContext();
+  try {
+    const outlivedPage = await outlivedContext.newPage();
+    await outlivedPage.goto(`${issuer}/login`);
+    await outlivedPage.locator("#username").fill("admin");
+    await outlivedPage.locator("#password").fill(password);
+    await outlivedPage.getByRole("button", { name: "Sign in with password" }).click();
+    await outlivedPage.waitForURL(`${issuer}/`);
+    await outlivedPage.goto("http://gateway-integration.localhost:5556/auth/login");
+    await outlivedPage.waitForURL("http://gateway-integration.localhost:5556/");
+    await assertSession(outlivedContext, "http://gateway-integration.localhost:5556", 200);
+    assert.equal(
+      queryGateway(primaryDatabase, "WITH aged AS (UPDATE oidc_gateway_sessions SET expires_at=now() WHERE revoked_at IS NULL AND expires_at>now() RETURNING 1) SELECT count(*) FROM aged"),
+      "1",
+      "exactly the new application session should have been aged out",
+    );
+    await outlivedPage.locator("[data-shauth-user]").click();
+    await outlivedPage.locator("[data-shauth-sign-out]").click();
+    await outlivedPage.waitForURL((url) => url.origin === issuer && url.pathname === "/logout");
+    await outlivedPage.getByText("You signed out from").waitFor();
+    await outlivedPage.getByRole("button", { name: "Sign out of all apps" }).click();
+    await outlivedPage.waitForURL("http://gateway-integration.localhost:5556/auth/signed-out");
+    await outlivedPage.goto(`${issuer}/apps`);
+    await outlivedPage.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
+  } finally {
+    await outlivedContext.close();
+  }
 
   // A Shauth-only browser has no relying-party ID token or Hydra login cookie.
   // Provider logout must still revoke the local session and land durably on

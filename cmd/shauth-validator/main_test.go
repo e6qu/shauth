@@ -191,3 +191,21 @@ func TestBrowserRunReadsTheResultFromStdoutOnly(t *testing.T) {
 		t.Fatalf("a crashing run = %#v, want its exit status and stderr tail", outcome)
 	}
 }
+
+// A run that floods its output keeps only what a decision needs: the start of
+// the result, flagged when it was cut, and the end of the diagnostics.
+func TestBrowserOutputBuffersAreBounded(t *testing.T) {
+	head := &headBuffer{limit: 8}
+	_, _ = head.Write([]byte("0123"))
+	_, _ = head.Write([]byte("456789"))
+	if head.String() != "01234567" || !head.overflowed {
+		t.Fatalf("head buffer = %q overflowed=%v", head.String(), head.overflowed)
+	}
+	tail := &tailBuffer{limit: 8}
+	for _, chunk := range []string{"early noise ", "more ", "cause!"} {
+		_, _ = tail.Write([]byte(chunk))
+	}
+	if tail.String() != "e cause!" {
+		t.Fatalf("tail buffer = %q", tail.String())
+	}
+}

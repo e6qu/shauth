@@ -32,7 +32,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := &http.Server{Addr: config.Address, Handler: application.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 * 1024}
+	// No server-wide read or write deadline: proxied WebSockets, event streams
+	// and downloads run as long as the application keeps them open. The
+	// gateway's own /auth/ routes set their deadlines per request.
+	server := &http.Server{Addr: config.Address, Handler: application.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 * 1024}
 	observe.Infof("Shauth OIDC gateway listening on %s", config.Address)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)

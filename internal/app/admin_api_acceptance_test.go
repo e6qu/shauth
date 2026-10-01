@@ -27,6 +27,7 @@ import (
 const adminAPIAcceptanceReadToken = "admin-api-acceptance-read-token-0123456789ab"
 const adminAPIAcceptanceWriteToken = "admin-api-acceptance-write-token-0123456789a"
 const tokenHookAcceptanceToken = "token-hook-acceptance-token-0123456789abcdef"
+const sessionResetAcceptanceToken = "session-reset-acceptance-token-0123456789ab"
 
 // newAdminAPIAcceptanceServer runs the complete handler chain against real
 // PostgreSQL (an isolated schema clone) and the real Ory Hydra
@@ -112,6 +113,7 @@ func newAdminAPIAcceptanceService(t *testing.T) (*pgxpool.Pool, *Server, *identi
 			AdminAPIReadToken:   adminAPIAcceptanceReadToken,
 			AdminAPIWriteToken:  adminAPIAcceptanceWriteToken,
 			TokenHookToken:      tokenHookAcceptanceToken,
+			SessionResetToken:   sessionResetAcceptanceToken,
 			GitHubAdminTeam:     "e6qu-org/e6qu-org-admins",
 			GitHubDeveloperTeam: "e6qu-org/e6qu-org-members",
 		},
@@ -1035,4 +1037,64 @@ func TestAcceptingAnInvitationIsRecordedAndSurvivesARejectedUsername(t *testing.
 func withoutChangeTime(record sessionPolicyRecord) sessionPolicyRecord {
 	record.UpdatedAt = time.Time{}
 	return record
+}
+
+// The whole-account session reset is its own credential boundary: no other
+// token opens it, and it ends every session of the account it names, whether
+// addressed by identifier or by email in the body.
+func TestSessionResetRequiresItsOwnCredentialAndEndsEverySession(t *testing.T) {
+	_, handler, store := newAdminAPIAcceptanceServer(t)
+	ctx := context.Background()
+	user, err := store.CreatePasswordUser(ctx, "reset-target", "reset-target@example.test", "a-long-acceptance-password", identity.RoleDeveloper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, _, err := store.CreateSession(ctx, user.ID, "curl/8 acceptance", net.ParseIP("192.0.2.30"), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reset := func(token, contentType, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/internal/sessions/reset", strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", contentType)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	for _, token := range []string{adminAPIAcceptanceWriteToken, adminAPIAcceptanceReadToken, tokenHookAcceptanceToken} {
+		if response := reset(token, "application/json", `{"email":"reset-target@example.test"}`); response.Code != http.StatusUnauthorized {
+			t.Fatalf("another boundary's credential reset sessions: status %d", response.Code)
+		}
+	}
+	if response := reset(sessionResetAcceptanceToken, "application/json", `{"email":"nobody@example.test"}`); response.Code != http.StatusNotFound {
+		t.Fatalf("reset of an unknown account = %d, want 404: %s", response.Code, response.Body.String())
+	}
+	response := reset(sessionResetAcceptanceToken, "application/json", `{"email":" Reset-Target@example.test "}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var receipt struct {
+		SchemaVersion string `json:"schema_version"`
+		ResetUserID   string `json:"reset_user_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &receipt); err != nil || receipt.SchemaVersion != "shauth.session-reset/v1" || receipt.ResetUserID != user.ID {
+		t.Fatalf("reset receipt = %+v (%v)", receipt, err)
+	}
+	sessions, _, err := store.ListSessions(ctx, user.ID, identity.Page{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(sessions))
+	}
+	for _, session := range sessions {
+		if session.Active {
+			t.Fatalf("session %s survived the reset", session.ID)
+		}
+	}
+	if response := reset(sessionResetAcceptanceToken, "application/x-www-form-urlencoded", "user_id="+user.ID); response.Code != http.StatusOK {
+		t.Fatalf("form-encoded reset = %d: %s", response.Code, response.Body.String())
+	}
 }

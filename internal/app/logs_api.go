@@ -61,33 +61,38 @@ func (s *Server) logsAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestedLogFilter reads the filters an operator narrows a search with.
+// Every valid filter is kept even when another is rejected, so the browser
+// view can keep what was typed and name only the field that was wrong.
 func requestedLogFilter(r *http.Request) (observe.Filter, error) {
 	query := r.URL.Query()
 	filter := observe.Filter{
 		Contains: strings.TrimSpace(query.Get("contains")),
 	}
+	var problem error
 	switch level := strings.ToLower(strings.TrimSpace(query.Get("level"))); level {
 	case "", "all":
 	case observe.LevelError, observe.LevelWarn, observe.LevelInfo:
 		filter.MinimumLevel = level
 	default:
-		return observe.Filter{}, identity.Invalid("level must be error, warn, info, or all")
+		problem = identity.Invalid("level must be error, warn, info, or all")
 	}
 	if raw := strings.TrimSpace(query.Get("since")); raw != "" {
 		since, err := time.Parse(time.RFC3339, raw)
 		if err != nil {
-			return observe.Filter{}, identity.Invalid("since must be an RFC 3339 timestamp")
+			problem = identity.Invalid("since must be an RFC 3339 timestamp")
+		} else {
+			filter.Since = since
 		}
-		filter.Since = since
 	}
 	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil || limit < 1 || limit > serviceLogSize {
-			return observe.Filter{}, identity.Invalid("limit must be a whole number between 1 and %d", serviceLogSize)
+			problem = identity.Invalid("lines (limit) must be a whole number between 1 and %d", serviceLogSize)
+		} else {
+			filter.Limit = limit
 		}
-		filter.Limit = limit
 	}
-	return filter, nil
+	return filter, problem
 }
 
 // adminLogs is the browser view of the same buffer, with the same filters.
@@ -99,7 +104,6 @@ func (s *Server) adminLogs(w http.ResponseWriter, r *http.Request) {
 	message := ""
 	if err != nil {
 		_, message = describeOperationFailure("read service log", err)
-		filter = observe.Filter{}
 	}
 	if filter.Limit == 0 {
 		filter.Limit = 200

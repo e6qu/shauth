@@ -40,6 +40,10 @@ type actor struct {
 	UserID    string
 	SessionID string
 	Address   net.IP
+	// Kind says who acted when no account did: "token" for a bearer
+	// credential, "visitor" for someone without a session. Empty means
+	// Shauth acted on its own.
+	Kind string
 }
 
 func (a actor) isSelf(userID string) bool { return a.UserID != "" && a.UserID == userID }
@@ -47,11 +51,11 @@ func (a actor) isSelf(userID string) bool { return a.UserID != "" && a.UserID ==
 // tokenActor describes a token-authorized caller. Bearer credentials are
 // shared and opaque, so no person can be named; the address the call came
 // from is recorded instead, which is what an operator has to work with.
-func tokenActor(r *http.Request) actor { return actor{Address: clientIP(r)} }
+func tokenActor(r *http.Request) actor { return actor{Address: clientIP(r), Kind: "token"} }
 
 // visitorActor describes somebody acting before they have an account or a
 // session, such as an invitation recipient. Only the address is knowable.
-func visitorActor(r *http.Request) actor { return actor{Address: clientIP(r)} }
+func visitorActor(r *http.Request) actor { return actor{Address: clientIP(r), Kind: "visitor"} }
 
 // browserActor describes the signed-in administrator performing an action,
 // including the session and address they acted from.
@@ -63,6 +67,20 @@ func browserActor(r *http.Request, user identity.User, session identity.Session)
 // fails the operation: losing the record is bad, but refusing a legitimate
 // administrative action because a log write failed is worse.
 func (s *Server) record(ctx context.Context, requester actor, eventType, subjectUserID string, details map[string]any) {
+	if requester.UserID == "" {
+		// Without an account the record still says what kind of caller
+		// acted, so a token-driven change is not mistaken for a visitor.
+		kind := requester.Kind
+		if kind == "" {
+			kind = "service"
+		}
+		labelled := make(map[string]any, len(details)+1)
+		for key, value := range details {
+			labelled[key] = value
+		}
+		labelled["actor_kind"] = kind
+		details = labelled
+	}
 	entry := identity.AuditEntry{
 		EventType: eventType, ActorUserID: requester.UserID, SubjectUserID: subjectUserID,
 		SessionID: requester.SessionID, RemoteAddress: requester.Address, Details: details,
@@ -75,7 +93,7 @@ func (s *Server) record(ctx context.Context, requester actor, eventType, subject
 var (
 	// errOIDCClientInUse reports that a managed app still depends on the
 	// OpenID Connect client a caller asked to delete.
-	errOIDCClientInUse = errors.New("delete the connected app before deleting its OAuth client")
+	errOIDCClientInUse = errors.New("remove the connected app before deleting its OAuth client")
 	// errOIDCClientDeploymentOwned reports an attempt to delete the OAuth
 	// client of an app the deployment's bootstrap configuration declares;
 	// every start would recreate it.
@@ -121,7 +139,7 @@ func describeOperationFailure(action string, err error) (int, string) {
 	case errors.Is(err, identity.ErrAlreadyExists):
 		// The action names what was being created ("create user"); the
 		// caller is told that such a thing already exists.
-		return http.StatusConflict, "that " + strings.TrimPrefix(action, "create ") + " already exists"
+		return http.StatusConflict, "that " + userFacingNoun(strings.TrimPrefix(action, "create ")) + " already exists"
 	case errors.Is(err, errHydraClientConflict):
 		return http.StatusConflict, "an OAuth client with that identifier already exists"
 	case errors.Is(err, errOIDCClientInUse), errors.Is(err, errSelfDisable),
@@ -136,6 +154,18 @@ func describeOperationFailure(action string, err error) (int, string) {
 	default:
 		observe.Errorf("%s: %v", action, err)
 		return http.StatusInternalServerError, "could not complete the request"
+	}
+}
+
+// userFacingNoun names a stored thing the way the interface does.
+func userFacingNoun(noun string) string {
+	switch noun {
+	case "GitHub role mapping":
+		return "GitHub access rule"
+	case "managed app":
+		return "application"
+	default:
+		return noun
 	}
 }
 
