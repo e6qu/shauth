@@ -717,7 +717,7 @@ app_slug=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT slug F
 curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/apps/${app_slug}" | grep -q 'Validation history'
 admin_user_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM users WHERE username='admin'")
 [ -n "$admin_user_id" ]
-curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}" | grep -q 'Account state'
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}" | grep -q '<dt>State</dt>'
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/users/${admin_user_id}/sessions")" = 301 ]
 
 # A narrow screen stacks table rows instead of scrolling the page sideways.
