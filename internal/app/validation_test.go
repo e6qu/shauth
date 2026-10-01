@@ -44,7 +44,7 @@ func TestApplicationValidationComponentReportsBothDirections(t *testing.T) {
 	passed := identity.AppValidationRun{Status: identity.ValidationPassed, ReleaseRevision: "0123456789ab", DurationMilliseconds: &duration}
 	failed := identity.AppValidationRun{Status: identity.ValidationFailed, ReleaseRevision: "0123456789ab", Failure: "logout returned to the identity service"}
 	view := managedAppView{
-		ManagedApp: identity.ManagedApp{ID: "00000000-0000-4000-8000-000000000001", Name: "Bleephub"},
+		ManagedApp: identity.ManagedApp{ID: "00000000-0000-4000-8000-000000000001", Name: "Workshop"},
 		FromShauth: newAppValidationRunView(passed),
 		FromApp:    newAppValidationRunView(failed),
 		Operator:   true,
@@ -82,14 +82,14 @@ func TestApplicationValidationComponentPollsOnlyOngoingRuns(t *testing.T) {
 		t.Fatalf("parse templates: %v", err)
 	}
 	view := managedAppView{
-		ManagedApp: identity.ManagedApp{ID: "00000000-0000-4000-8000-000000000001", Name: "Bleephub"},
+		ManagedApp: identity.ManagedApp{ID: "00000000-0000-4000-8000-000000000001", Name: "Workshop"},
 		NeedsPoll:  true,
 	}
 	var rendered bytes.Buffer
 	if err := pages.ExecuteTemplate(&rendered, "app-validation", view); err != nil {
 		t.Fatalf("render validation component: %v", err)
 	}
-	for _, expected := range []string{"validation-running", "> Ongoing</span>", `hx-trigger="every 5s"`, `aria-label="Bleephub sign-in and sign-out validation"`, `aria-live="polite"`, `aria-busy="true"`} {
+	for _, expected := range []string{"validation-running", "> Ongoing</span>", `hx-trigger="every 5s"`, `aria-label="Workshop sign-in and sign-out validation"`, `aria-live="polite"`, `aria-busy="true"`} {
 		if !strings.Contains(rendered.String(), expected) {
 			t.Fatalf("ongoing validation component omitted %q: %s", expected, rendered.String())
 		}

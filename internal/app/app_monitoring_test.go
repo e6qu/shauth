@@ -37,15 +37,15 @@ func TestApplicationWithoutAMonitoringEndpointIsReportedNotSkipped(t *testing.T)
 	sources, unpublished := applicationMonitoringSources(
 		[]identity.ManagedApp{
 			{Slug: "e6irc", Name: "e6irc", OIDCClientID: "e6irc", MonitoringURL: "https://e6irc.example.com/v1/observations"},
-			{Slug: "bleephub", Name: "Bleephub"},
+			{Slug: "workshop", Name: "Workshop"},
 		},
-		map[string]monitoringCredential{"e6irc": {Token: strings.Repeat("t", 32), URL: "https://e6irc.example.com/v1/observations", ClientID: "e6irc"}, "bleephub": {Token: strings.Repeat("t", 32)}},
+		map[string]monitoringCredential{"e6irc": {Token: strings.Repeat("t", 32), URL: "https://e6irc.example.com/v1/observations", ClientID: "e6irc"}, "workshop": {Token: strings.Repeat("t", 32)}},
 	)
 	if len(sources) != 1 {
 		t.Fatalf("sources = %d, want 1", len(sources))
 	}
-	if len(unpublished) != 1 || unpublished[0] != "Bleephub" {
-		t.Fatalf("unpublished = %v, want [Bleephub]", unpublished)
+	if len(unpublished) != 1 || unpublished[0] != "Workshop" {
+		t.Fatalf("unpublished = %v, want [Workshop]", unpublished)
 	}
 }
 

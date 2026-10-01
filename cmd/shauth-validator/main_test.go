@@ -16,9 +16,9 @@ import (
 
 func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 	valid := job{
-		ID: "run-id", ManagedAppID: "bleephub-id", AppSlug: "bleephub", AppName: "Bleephub", OIDCClientID: "bleephub",
-		LaunchURL: "https://bleephub.example.test/", ValidationURL: "https://bleephub.example.test/auth/validation",
-		SignedOutURL: "https://bleephub.example.test/ui/signed-out", LogoutBridgeURL: "https://bleephub.example.test/auth/shauth/logout/complete", Direction: "from_app",
+		ID: "run-id", ManagedAppID: "workshop-id", AppSlug: "workshop", AppName: "Workshop", OIDCClientID: "workshop",
+		LaunchURL: "https://workshop.example.test/", ValidationURL: "https://workshop.example.test/auth/validation",
+		SignedOutURL: "https://workshop.example.test/ui/signed-out", LogoutBridgeURL: "https://workshop.example.test/auth/shauth/logout/complete", Direction: "from_app",
 		ReleaseRevision: "0123456789ab", ShauthURL: "https://auth.example.test",
 		ValidationUsername: "shauth-validator-1", ValidationEmail: "shauth-validator+1@example.test",
 		Witness: &witness{ManagedAppID: "sharecrop-id", AppSlug: "sharecrop", AppName: "Sharecrop", OIDCClientID: "sharecrop", LaunchURL: "https://sharecrop.example.test/", ValidationURL: "https://sharecrop.example.test/me", SignedOutURL: "https://sharecrop.example.test/signed-out", LogoutBridgeURL: "https://sharecrop.example.test/auth/shauth/logout/complete", ReleaseRevision: "abcdef012345"},
@@ -36,15 +36,15 @@ func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 		"different signed-out origin": func(value *job) { value.SignedOutURL = "https://attacker.example.test/signed-out" },
 		"missing logout bridge":       func(value *job) { value.LogoutBridgeURL = "" },
 		"different bridge origin":     func(value *job) { value.LogoutBridgeURL = "https://attacker.example.test/auth/shauth/logout/complete" },
-		"wrong bridge path":           func(value *job) { value.LogoutBridgeURL = "https://bleephub.example.test/signed-out" },
+		"wrong bridge path":           func(value *job) { value.LogoutBridgeURL = "https://workshop.example.test/signed-out" },
 		"bridge query":                func(value *job) { value.LogoutBridgeURL += "?next=https://attacker.example.test" },
 		"insecure external app": func(value *job) {
-			value.LaunchURL = "http://bleephub.example.test/"
-			value.ValidationURL = "http://bleephub.example.test/auth/validation"
-			value.SignedOutURL = "http://bleephub.example.test/ui/signed-out"
-			value.LogoutBridgeURL = "http://bleephub.example.test/auth/shauth/logout/complete"
+			value.LaunchURL = "http://workshop.example.test/"
+			value.ValidationURL = "http://workshop.example.test/auth/validation"
+			value.SignedOutURL = "http://workshop.example.test/ui/signed-out"
+			value.LogoutBridgeURL = "http://workshop.example.test/auth/shauth/logout/complete"
 		},
-		"credentials in URL":          func(value *job) { value.LaunchURL = "https://user:secret@bleephub.example.test/" },
+		"credentials in URL":          func(value *job) { value.LaunchURL = "https://user:secret@workshop.example.test/" },
 		"fragment":                    func(value *job) { value.SignedOutURL += "#credential-form" },
 		"mutable app revision":        func(value *job) { value.ReleaseRevision = "main" },
 		"mutable witness revision":    func(value *job) { value.Witness.ReleaseRevision = "latest" },
@@ -55,10 +55,10 @@ func TestValidateJobPinsCredentialEntryToConfiguredShauthOrigin(t *testing.T) {
 		"same witness app":            func(value *job) { value.Witness.ManagedAppID = value.ManagedAppID },
 		"same witness client":         func(value *job) { value.Witness.OIDCClientID = value.OIDCClientID },
 		"same witness origin": func(value *job) {
-			value.Witness.LaunchURL = "https://bleephub.example.test/witness"
-			value.Witness.ValidationURL = "https://bleephub.example.test/witness/me"
-			value.Witness.SignedOutURL = "https://bleephub.example.test/witness/signed-out"
-			value.Witness.LogoutBridgeURL = "https://bleephub.example.test/auth/shauth/logout/complete"
+			value.Witness.LaunchURL = "https://workshop.example.test/witness"
+			value.Witness.ValidationURL = "https://workshop.example.test/witness/me"
+			value.Witness.SignedOutURL = "https://workshop.example.test/witness/signed-out"
+			value.Witness.LogoutBridgeURL = "https://workshop.example.test/auth/shauth/logout/complete"
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

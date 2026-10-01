@@ -23,3 +23,26 @@ func TestErrorPageSignInAgainKeepsTheDestination(t *testing.T) {
 		t.Fatalf("sign-in-again link did not carry the escaped destination: %s", rendered.String())
 	}
 }
+
+// A rejected registration shows its message beside the field it concerns,
+// tied to that field for assistive technology, and nowhere else in the form.
+func TestRegistrationFormsShowRejectionsBesideTheirField(t *testing.T) {
+	pages := template.Must(template.New("pages").Funcs(templateHelpers()).Parse(pageTemplates))
+	var rendered bytes.Buffer
+	data := map[string]any{"SignedIn": true, "IsAdmin": true, "Error": "Redirect URI must use HTTPS.", "ErrorField": "redirect_uris", "Form": oidcClientInput{}}
+	if err := pages.ExecuteTemplate(&rendered, "oidc-clients", data); err != nil {
+		t.Fatal(err)
+	}
+	page := rendered.String()
+	start := strings.Index(page, `name="redirect_uris"`)
+	end := strings.Index(page[start:], ">")
+	if start < 0 || !strings.Contains(page[start:start+end], `aria-describedby="redirect-help redirect-uris-error"`) || !strings.Contains(page[start:start+end], `aria-invalid="true"`) {
+		t.Fatalf("the redirect URI field is not marked invalid: %s", page)
+	}
+	if !strings.Contains(page, `<span class="field-error" id="redirect-uris-error">Redirect URI must use HTTPS.</span>`) {
+		t.Fatal("the rejection is not shown beside the redirect URI field")
+	}
+	if strings.Count(page, `aria-invalid="true"`) != 1 || strings.Count(page, `class="field-error"`) != 1 {
+		t.Fatal("other fields were marked invalid")
+	}
+}

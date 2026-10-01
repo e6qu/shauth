@@ -11,13 +11,13 @@ import (
 
 func TestOIDCClientInputValidate(t *testing.T) {
 	valid := oidcClientInput{
-		ID:                     "intraktible-dev",
-		Name:                   "Intraktible development",
+		ID:                     "planner-dev",
+		Name:                   "Planner development",
 		Secret:                 "0123456789abcdef0123456789abcdef",
-		RedirectURIs:           []string{"https://intraktible.example.com/v1/auth/oidc/shauth/callback"},
-		PostLogoutRedirectURIs: []string{"https://intraktible.example.com/auth/shauth/logout/complete"},
-		FrontChannelLogoutURI:  "https://intraktible.example.com/v1/auth/oidc/shauth/frontchannel-logout",
-		BackChannelLogoutURI:   "https://intraktible.example.com/v1/auth/oidc/shauth/backchannel-logout",
+		RedirectURIs:           []string{"https://planner.example.com/v1/auth/oidc/shauth/callback"},
+		PostLogoutRedirectURIs: []string{"https://planner.example.com/auth/shauth/logout/complete"},
+		FrontChannelLogoutURI:  "https://planner.example.com/v1/auth/oidc/shauth/frontchannel-logout",
+		BackChannelLogoutURI:   "https://planner.example.com/v1/auth/oidc/shauth/backchannel-logout",
 	}
 	if err := valid.validate(); err != nil {
 		t.Fatalf("validate valid client: %v", err)
@@ -27,7 +27,7 @@ func TestOIDCClientInputValidate(t *testing.T) {
 		"invalid identifier": func(input *oidcClientInput) { input.ID = "Invalid" },
 		"short secret":       func(input *oidcClientInput) { input.Secret = "too-short" },
 		"insecure remote": func(input *oidcClientInput) {
-			input.RedirectURIs = []string{"http://intraktible.example.com/callback"}
+			input.RedirectURIs = []string{"http://planner.example.com/callback"}
 		},
 		"front-channel origin mismatch": func(input *oidcClientInput) {
 			input.FrontChannelLogoutURI = "https://attacker.example.test/frontchannel-logout"
@@ -42,7 +42,7 @@ func TestOIDCClientInputValidate(t *testing.T) {
 			input.PostLogoutRedirectURIs = []string{"http://auth.example.com/oauth/logout/complete"}
 		},
 		"fragment": func(input *oidcClientInput) {
-			input.RedirectURIs = []string{"https://intraktible.example.com/callback#fragment"}
+			input.RedirectURIs = []string{"https://planner.example.com/callback#fragment"}
 		},
 		"missing logout receiver": func(input *oidcClientInput) {
 			input.FrontChannelLogoutURI = ""
@@ -131,13 +131,13 @@ func TestMarshalHydraClientOmitsUnusedLogoutChannel(t *testing.T) {
 
 func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 	body, err := marshalHydraClient(oidcClientInput{
-		ID:                     "intraktible-dev",
-		Name:                   "Intraktible",
+		ID:                     "planner-dev",
+		Name:                   "Planner",
 		Secret:                 "a-very-long-client-secret-that-is-safe-for-a-test",
-		RedirectURIs:           []string{"https://intraktible.example.test/v1/auth/oidc/shauth/callback"},
-		PostLogoutRedirectURIs: []string{"https://intraktible.example.test/"},
-		FrontChannelLogoutURI:  "https://intraktible.example.test/oidc/frontchannel-logout",
-		BackChannelLogoutURI:   "https://intraktible.example.test/oidc/backchannel-logout",
+		RedirectURIs:           []string{"https://planner.example.test/v1/auth/oidc/shauth/callback"},
+		PostLogoutRedirectURIs: []string{"https://planner.example.test/"},
+		FrontChannelLogoutURI:  "https://planner.example.test/oidc/frontchannel-logout",
+		BackChannelLogoutURI:   "https://planner.example.test/oidc/backchannel-logout",
 	}, identity.DefaultSessionPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func TestMarshalHydraClientUsesConfidentialAuthorizationCodeFlow(t *testing.T) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.ClientID != "intraktible-dev" || payload.ClientSecret == "" {
+	if payload.ClientID != "planner-dev" || payload.ClientSecret == "" {
 		t.Fatalf("client payload = %#v, want client ID and secret", payload)
 	}
 	if len(payload.GrantTypes) != 2 || payload.GrantTypes[0] != "authorization_code" || payload.GrantTypes[1] != "refresh_token" {

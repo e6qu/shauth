@@ -106,33 +106,33 @@ type oidcClientInput struct {
 
 func (input oidcClientInput) validate() error {
 	if !oidcClientIDPattern.MatchString(input.ID) {
-		return identity.Invalid("client ID must contain 3–128 lowercase letters, digits, or hyphens and start with a letter")
+		return identity.InvalidField("client_id", "client ID must contain 3–128 lowercase letters, digits, or hyphens and start with a letter")
 	}
 	if strings.TrimSpace(input.Name) == "" {
-		return identity.Invalid("client name is required")
+		return identity.InvalidField("client_name", "client name is required")
 	}
 	if len(input.Secret) < 32 {
-		return identity.Invalid("client secret must contain at least 32 characters")
+		return identity.InvalidField("client_secret", "client secret must contain at least 32 characters")
 	}
 	if len(input.RedirectURIs) == 0 {
-		return identity.Invalid("at least one redirect URI is required")
+		return identity.InvalidField("redirect_uris", "at least one redirect URI is required")
 	}
 	if len(input.PostLogoutRedirectURIs) == 0 {
-		return identity.Invalid("at least one post-logout redirect URI is required")
+		return identity.InvalidField("post_logout_redirect_uris", "at least one post-logout redirect URI is required")
 	}
 	if input.FrontChannelLogoutURI == "" && input.BackChannelLogoutURI == "" {
-		return identity.Invalid("a front-channel or back-channel logout URI is required")
+		return identity.InvalidField("frontchannel_logout_uri", "a front-channel or back-channel logout URI is required")
 	}
-	if err := validateClientURIs("redirect URI", input.RedirectURIs); err != nil {
+	if err := validateClientURIs("redirect_uris", "redirect URI", input.RedirectURIs); err != nil {
 		return err
 	}
-	if err := validateClientURIs("post-logout redirect URI", input.PostLogoutRedirectURIs); err != nil {
+	if err := validateClientURIs("post_logout_redirect_uris", "post-logout redirect URI", input.PostLogoutRedirectURIs); err != nil {
 		return err
 	}
-	if err := validateClientURIs("front-channel logout URI", []string{input.FrontChannelLogoutURI}); err != nil {
+	if err := validateClientURIs("frontchannel_logout_uri", "front-channel logout URI", []string{input.FrontChannelLogoutURI}); err != nil {
 		return err
 	}
-	if err := validateClientURIs("back-channel logout URI", []string{input.BackChannelLogoutURI}); err != nil {
+	if err := validateClientURIs("backchannel_logout_uri", "back-channel logout URI", []string{input.BackChannelLogoutURI}); err != nil {
 		return err
 	}
 	if _, err := oidcClientOrigin(input.RedirectURIs, input.PostLogoutRedirectURIs, input.FrontChannelLogoutURI, input.BackChannelLogoutURI); err != nil {
@@ -159,7 +159,7 @@ func oidcClientOrigin(redirectURIs, postLogoutRedirectURIs []string, frontChanne
 			continue
 		}
 		if !sameOrigin(origin, coordinate) {
-			return nil, identity.Invalid("all redirect and logout URIs must use one application origin")
+			return nil, identity.InvalidField("redirect_uris", "all redirect and logout URIs must use one application origin")
 		}
 	}
 	if origin == nil {
@@ -208,7 +208,7 @@ func validateManagedAppClient(app identity.ManagedApp, client oidcClient) error 
 		{"front-channel logout URI", []string{client.FrontChannelLogoutURI}},
 		{"back-channel logout URI", []string{client.BackChannelLogoutURI}},
 	} {
-		if err := validateClientURIs(check.label, check.uris); err != nil {
+		if err := validateClientURIs("", check.label, check.uris); err != nil {
 			return err
 		}
 	}
@@ -228,7 +228,7 @@ func validateManagedAppClient(app identity.ManagedApp, client oidcClient) error 
 		return err
 	}
 	if !sameOrigin(clientOrigin, launchURL) {
-		return identity.Invalid("managed app and OpenID Connect client must use one application origin")
+		return identity.InvalidField("launch_url", "managed app and OpenID Connect client must use one application origin")
 	}
 	return nil
 }
@@ -280,17 +280,17 @@ func managedAppLogoutBridgeURL(launchURL string) (string, error) {
 	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: "/auth/shauth/logout/complete"}).String(), nil
 }
 
-func validateClientURIs(label string, uris []string) error {
+func validateClientURIs(field, label string, uris []string) error {
 	for _, rawURI := range uris {
 		if rawURI == "" {
 			continue
 		}
 		uri, err := url.Parse(rawURI)
 		if err != nil || uri.Scheme == "" || uri.Host == "" || uri.User != nil || uri.Fragment != "" {
-			return identity.Invalid("%s %q must be an absolute URI without user information or a fragment", label, rawURI)
+			return identity.InvalidField(field, "%s %q must be an absolute URI without user information or a fragment", label, rawURI)
 		}
 		if uri.Scheme != "https" && !isLoopbackRedirect(uri) {
-			return identity.Invalid("%s %q must use HTTPS unless it targets loopback", label, rawURI)
+			return identity.InvalidField(field, "%s %q must use HTTPS unless it targets loopback", label, rawURI)
 		}
 	}
 	return nil
@@ -1995,7 +1995,21 @@ func (s *Server) adminApps(w http.ResponseWriter, r *http.Request) {
 	s.renderAdminApps(w, r, http.StatusOK, noticeError(r), identity.ManagedApp{})
 }
 
+// invalidFieldOf names the form field a rejection is about, if any.
+func invalidFieldOf(err error) string {
+	var invalid identity.InvalidInputError
+	if errors.As(err, &invalid) {
+		return invalid.Field
+	}
+	return ""
+}
+
 func (s *Server) renderAdminApps(w http.ResponseWriter, r *http.Request, status int, message string, form identity.ManagedApp) {
+	s.renderAdminAppsForm(w, r, status, message, "", form)
+}
+
+// renderAdminAppsForm also shows a rejection beside the field it concerns.
+func (s *Server) renderAdminAppsForm(w http.ResponseWriter, r *http.Request, status int, message, errorField string, form identity.ManagedApp) {
 	apps, err := s.appViews(r.Context())
 	if err != nil {
 		observe.Errorf("list applications: %v", err)
@@ -2014,7 +2028,7 @@ func (s *Server) renderAdminApps(w http.ResponseWriter, r *http.Request, status 
 	}
 	s.render(w, "admin-apps", s.view(r, "Connected apps", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Apps": apps,
-		"Error": message, "Done": noticeDone(r), "Form": form,
+		"Error": message, "ErrorField": errorField, "Done": noticeDone(r), "Form": form,
 	}))
 }
 
@@ -2041,7 +2055,7 @@ func (s *Server) adminCreateApp(w http.ResponseWriter, r *http.Request) {
 	created, err := s.createApp(r.Context(), app, s.currentActor(r))
 	if err != nil {
 		status, message := describeOperationFailure("create managed app", err)
-		s.renderAdminApps(w, r, status, message, app)
+		s.renderAdminAppsForm(w, r, status, message, invalidFieldOf(err), app)
 		return
 	}
 	s.redirectWithNotice(w, r, "/admin/apps", false, "Registered the application "+created.Name+".")
@@ -2546,6 +2560,11 @@ func (s *Server) adminOIDCClients(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renderOIDCClients(w http.ResponseWriter, r *http.Request, status int, message string, form oidcClientInput) {
+	s.renderOIDCClientsForm(w, r, status, message, "", form)
+}
+
+// renderOIDCClientsForm also shows a rejection beside the field it concerns.
+func (s *Server) renderOIDCClientsForm(w http.ResponseWriter, r *http.Request, status int, message, errorField string, form oidcClientInput) {
 	clients, err := s.listOIDCClients(r.Context())
 	if err != nil {
 		failureStatus, failureMessage := describeOperationFailure("list OAuth clients", err)
@@ -2571,7 +2590,7 @@ func (s *Server) renderOIDCClients(w http.ResponseWriter, r *http.Request, statu
 	}
 	s.render(w, "oidc-clients", s.view(r, "OAuth clients", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Clients": clients,
-		"Error": message, "Done": noticeDone(r), "Form": form,
+		"Error": message, "ErrorField": errorField, "Done": noticeDone(r), "Form": form,
 	}))
 }
 
@@ -2602,7 +2621,7 @@ func (s *Server) adminCreateOIDCClient(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.createOIDCClient(r.Context(), input, s.currentActor(r)); err != nil {
 		status, message := describeOperationFailure("create OAuth client", err)
-		s.renderOIDCClients(w, r, status, message, input)
+		s.renderOIDCClientsForm(w, r, status, message, invalidFieldOf(err), input)
 		return
 	}
 	s.redirectWithNotice(w, r, "/admin/clients", false, "Registered the OAuth client "+input.ID+".")

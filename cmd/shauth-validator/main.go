@@ -267,8 +267,6 @@ func run(ctx context.Context, script string, claimed job) result {
 		"HOME=" + os.Getenv("HOME"),
 		"NODE_PATH=" + os.Getenv("NODE_PATH"),
 		"PLAYWRIGHT_BROWSERS_PATH=" + os.Getenv("PLAYWRIGHT_BROWSERS_PATH"),
-		"SHAUTH_VALIDATION_USERNAME=" + os.Getenv("SHAUTH_VALIDATION_USERNAME"),
-		"SHAUTH_VALIDATION_EMAIL=" + os.Getenv("SHAUTH_VALIDATION_EMAIL"),
 	}
 	// Only stdout carries the result. Warnings Node or Chromium print on
 	// stderr must not turn a passing run into an undecodable one; they are

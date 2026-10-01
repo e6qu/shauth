@@ -75,7 +75,7 @@ func TestValidationStatusRecordCarriesDurationAndWitnessOnlyForTerminalRuns(t *t
 	started := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	completed := started.Add(time.Duration(duration) * time.Millisecond)
 	terminal := identity.AppValidationRun{
-		AppSlug: "bleephub", Direction: identity.ValidationFromShauth, Status: identity.ValidationPassed,
+		AppSlug: "workshop", Direction: identity.ValidationFromShauth, Status: identity.ValidationPassed,
 		ReleaseRevision: "0123456789ab", ValidationContractHash: strings.Repeat("a", 64),
 		RequestedAt: started.Add(-time.Minute), StartedAt: &started, CompletedAt: &completed,
 		DurationMilliseconds: &duration,
@@ -120,14 +120,14 @@ func TestAppRecordReportsCatalogHealthAndValidationShape(t *testing.T) {
 	duration := int64(1500)
 	completed := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	view := newManagedAppView(identity.ManagedApp{
-		Slug: "bleephub", Name: "Bleephub", LaunchURL: "https://bleephub.example.test/",
-		OIDCClientID: "bleephub-dev", HealthURL: "https://bleephub.example.test/health",
-		ValidationURL: "https://bleephub.example.test/validation", SignedOutURL: "https://bleephub.example.test/signed-out",
+		Slug: "workshop", Name: "Workshop", LaunchURL: "https://workshop.example.test/",
+		OIDCClientID: "workshop-dev", HealthURL: "https://workshop.example.test/health",
+		ValidationURL: "https://workshop.example.test/validation", SignedOutURL: "https://workshop.example.test/signed-out",
 		ReleaseRevision: "0123456789ab", CreatedAt: completed,
 	})
 	view.Healthy, view.StatusCode = true, 200
 	view.FromShauth = newAppValidationRunView(identity.AppValidationRun{
-		AppSlug: "bleephub", Direction: identity.ValidationFromShauth, Status: identity.ValidationPassed,
+		AppSlug: "workshop", Direction: identity.ValidationFromShauth, Status: identity.ValidationPassed,
 		ReleaseRevision: "0123456789ab", CompletedAt: &completed, DurationMilliseconds: &duration,
 	})
 	encoded, err := json.Marshal(newAppRecord(view))
@@ -135,9 +135,9 @@ func TestAppRecordReportsCatalogHealthAndValidationShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		`"slug":"bleephub"`, `"oidc_client_id":"bleephub-dev"`,
+		`"slug":"workshop"`, `"oidc_client_id":"workshop-dev"`,
 		`"health":{"healthy":true,"status_code":200}`,
-		`"from_shauth":{"slug":"bleephub"`, `"duration_ms":1500`, `"from_app":null`,
+		`"from_shauth":{"slug":"workshop"`, `"duration_ms":1500`, `"from_app":null`,
 	} {
 		if !strings.Contains(string(encoded), expected) {
 			t.Fatalf("app record omitted %s: %s", expected, encoded)
@@ -187,12 +187,12 @@ func TestDecodeValidationEnqueueRequestTreatsEmptyBodyAsAllApps(t *testing.T) {
 			}
 		})
 	}
-	request, err := decodeValidationEnqueueRequest(strings.NewReader(`{"slug":" bleephub "}`))
+	request, err := decodeValidationEnqueueRequest(strings.NewReader(`{"slug":" workshop "}`))
 	if err != nil {
 		t.Fatalf("slug request error = %v", err)
 	}
 	ref, err := request.ref()
-	if err != nil || ref.Slug != "bleephub" || ref.All() {
+	if err != nil || ref.Slug != "workshop" || ref.All() {
 		t.Fatalf("slug ref = %#v, %v", ref, err)
 	}
 
@@ -208,9 +208,9 @@ func TestDecodeValidationEnqueueRequestTreatsEmptyBodyAsAllApps(t *testing.T) {
 		}
 	}
 	for name, body := range map[string]string{
-		"unknown field":  `{"slug":"bleephub","force":true}`,
-		"trailing value": `{"slug":"bleephub"} {}`,
-		"not an object":  `"bleephub"`,
+		"unknown field":  `{"slug":"workshop","force":true}`,
+		"trailing value": `{"slug":"workshop"} {}`,
+		"not an object":  `"workshop"`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := decodeValidationEnqueueRequest(strings.NewReader(body)); err == nil {

@@ -1,133 +1,83 @@
-# Shauth Amazon ECS module
+# Shauth on Amazon ECS
 
-This module deploys Shauth and Ory Hydra as an always-on ARM64 Amazon Elastic
-Container Service task in private subnets. It connects to dedicated `shauth`
-and `hydra` databases supplied by the shared `fck-rds` PostgreSQL service.
-The `fck-rds` service owns database and role creation; Shauth's migration
-containers only apply application and Ory Hydra schema migrations.
+This module runs Shauth on Amazon ECS Fargate (ARM64) in private subnets:
 
-The only public entry point is an Amazon API Gateway HTTP API with a private
-VPC link to Amazon Cloud Map service discovery using SRV records, which carry
-the live Amazon ECS task port; no Application Load Balancer is provisioned.
-The module creates the regional AWS Certificate Manager
-certificate and Route 53 alias for `domain_name` and applies conservative
-default-route throttling.
+- Shauth, Ory Hydra and both migrations run in one task;
+- the browser validator runs as a second service.
 
-The Cloud Map service name is suffixed with `-srv` because SRV records carry
-the live task port. The module waits for the Amazon ECS service to reach
-steady state before Terraform completes.
+The module creates:
 
-Pass pinned multi-architecture image manifests such as
-`ghcr.io/e6qu/shauth:0123456789ab` and
-`ghcr.io/e6qu/shauth-validator:0123456789ab`, and the ARN of the GitHub OAuth client
-secret stored in AWS Secrets Manager, together with the separate Secrets
-Manager ARNs for the Shauth and Ory Hydra database URLs created by `fck-rds`.
-The module creates a runtime secret containing the generated Hydra and
-bootstrap-admin secrets together with the `bootstrap_apps` and
-`monitoring_sources` configuration, which carry their own client secrets and
-bearer tokens. It creates a separate secret for each closed-API bearer
-credential, so a consumer can be granted exactly one boundary without
-receiving the others. The validation identity has no password;
-the worker exchanges its queue credential for hashed, short-lived, single-use
-browser bootstrap links.
-The supplied Shauth image also provides the patched `/hydra` binary; the task
-uses that same immutable image for Hydra and both database migration entry
-points. The provider is fully built before deployment.
+| Resource | Purpose |
+|---|---|
+| ECS task definitions and services | Shauth with Hydra and their migrations; the validator. One task each. A circuit breaker rolls back a deployment that never becomes healthy. Terraform waits for steady state. |
+| API Gateway HTTP API, custom domain, ACM certificate, Route 53 alias | The only public entry point, for `domain_name`. Throttled to a burst of 50 and 25 requests per second. |
+| VPC Link and its security group | Private route from the API to the task. Reaches the task through a Cloud Map SRV record (`<name>-srv`) on TCP 8080. |
+| Secrets Manager secrets | One runtime secret, plus one secret per bearer credential (see below). |
+| Generated secrets | The Hydra system secret, the bootstrap admin password, and every bearer token. |
+| SES domain identity with DKIM | Invitation email from `invitation_email_from`'s domain. |
+| IAM roles | Execution roles that can read exactly the listed secrets. A task role that can only send invitation email. The validator has no task role. |
+| CloudWatch log group | `/shauth/<name>`, unless `log_group_name` is set. |
 
-Set `entra_tenant_id`, `entra_client_id`, and `entra_oauth_secret_arn` together
-to enable Microsoft Entra ID as an additional upstream identity source. The
-tenant is a specific tenant UUID and the secret ARN names a JSON secret with a
-`client_secret` key. Omitting all three leaves the connector disabled. Partial
-configuration and a non-specific or malformed tenant are rejected by variable
-validation, which fails the plan; Shauth applies the identical rule at startup.
+You supply the network, the databases and the identity provider credentials.
 
-The caller supplies the shared VPC, private subnet IDs, Amazon ECS cluster,
-and Route 53 hosted zone so Shauth can coexist with the other `dev` services.
-By default the module also creates and owns its Amazon API Gateway VPC Link and
-the link's security group. A deployment that consolidates links can instead set
-`create_api_gateway_vpc_link = false`, `api_gateway_vpc_link_id`, and
-`api_gateway_vpc_link_security_group_id` together. In that mode the module
-creates neither shared resource, permits the supplied link security group to
-reach Shauth's task, and attaches the HTTP API integration to the supplied
-link. The explicit creation flag remains known while resource-derived IDs are
-unknown during planning. Terraform rejects either ownership mode when its
-corresponding coordinate contract is not satisfied.
+## Inputs
 
-The module restricts its API Gateway VPC Link security group to TCP 8080 only
-to the Shauth task security group. Shauth and its validator still need DNS and
-HTTPS egress to configured identity providers, email delivery, monitoring
-sources, and registered application origins; AWS security groups cannot express
-those hostname-based allowlists. The Trivy IaC scan records those six precise
-rules as reviewed exceptions. A deployment that requires destination filtering
-must provide an approved egress firewall or proxy and replace the exceptions
-with that boundary's security-group coordinates.
+| Variable | Required | Meaning |
+|---|---|---|
+| `region`, `name` | `name` defaults to `shauth` | Resource naming. |
+| `vpc_id`, `private_subnet_ids`, `ecs_cluster_arn` | yes | Where to run. |
+| `hosted_zone_id`, `domain_name` | yes | Public name and its Route 53 zone. |
+| `container_image`, `validator_container_image` | yes | Immutable references: a 12–64 hex tag or a `sha256` digest. |
+| `database_url_secret_arn`, `hydra_database_url_secret_arn` | yes | Secrets holding each database's connection URL. Create the databases and roles beforehand; the module only runs migrations. |
+| `github_client_id`, `github_oauth_secret_arn` | yes | GitHub OAuth app. The secret is JSON with a `client_secret` key. |
+| `github_admin_team`, `github_developer_team` | yes | `org/team-slug`. Seeds the first access rules. |
+| `entra_tenant_id`, `entra_client_id`, `entra_oauth_secret_arn` | all or none | Microsoft Entra ID, for one tenant UUID. |
+| `bootstrap_admin_email`, `invitation_email_from` | yes | Break-glass admin, and the invitation sender. |
+| `bootstrap_apps` | no | Sensitive. The [`SHAUTH_BOOTSTRAP_APPS_JSON`](../docs/integrating-apps.md#bootstrap-configuration) entries. |
+| `monitoring_sources` | no | [Monitoring sources](../docs/operations.md#monitoring-sources). Stored in the runtime secret. |
+| `create_api_gateway_vpc_link` | default `true` | Set it to `false` to reuse a VPC Link. In that case also set `api_gateway_vpc_link_id` and `api_gateway_vpc_link_security_group_id`. |
+| `log_group_name` | no | Keep an existing log group. Renaming a log group replaces it. |
+| `tags` | no | Added to every resource. |
 
-Shauth's task role has only the permissions required for identity delivery.
-Administrators register each managed app with its OIDC client, launch URL,
-published health URL, and optional machine observation endpoint in
-`monitoring_url`. Shauth reads observations server-side with the deployment
-credential and presents them to administrators on its protected Monitoring
-page; the endpoint is not a browser destination. Shauth checks health through
-standard HTTP and remains independent of deployment platforms and log systems.
-Each `bootstrap_apps` client also supplies its sign-in redirect URIs, allowed
-post-logout redirect URIs, and at least one front-channel or back-channel
-logout URI. These coordinates let Ory Hydra propagate one Shauth logout to
-every correlated relying-application session. Each app also supplies an
-immutable `release_revision`, a normal launch UI exposing
-`data-shauth-user="<username>"` and an actionable `data-shauth-sign-out`
-control, an authenticated `validation_url` exposing exact username, email,
-normalized role, and release-revision fields,
-and an app-local `signed_out_url` exposing an accessible `Sign in with Shauth`
-control. The client must register its exact app-origin
-`/auth/shauth/logout/complete` bridge as the only value in
-`post_logout_redirect_uris`; the bridge
-returns to Shauth's one-time completion endpoint, which then redirects to the
-trusted app-local `signed_out_url`. Release revisions and both container images must use immutable
-lowercase hexadecimal commits/tags or `sha256` digests; moving labels are
-rejected. Any release, endpoint-coordinate, or OpenID Connect registration change queues real browser checks
-through both the Shauth catalog and the app's direct launch URL.
+## Outputs
 
-The ARM64 validator is a standalone outbound-only Amazon ECS service, not a
-sidecar and not an authentication proxy. PostgreSQL leases at most three checks at
-once, never runs one application as a target and a witness at the same time,
-and joins a repeated request to the run already queued or running. Each check uses a second registered
-application on a distinct origin to prove global session revocation; without a
-real witness application the result is red. The validator task has no AWS task
-role, no ingress, and an execution role limited to its dedicated secret. The
-validation identity has no reusable password. The worker exchanges its
-dedicated validator credential for short-lived, single-use Shauth browser
-bootstraps; only their hashes are stored, and neither credential crosses an
-application origin. Managed applications receive and validate ordinary OIDC
-artifacts and never receive or directly accept validator credentials.
+| Output | Contents |
+|---|---|
+| `url` | `https://<domain_name>` |
+| `runtime_secret_arn` | The runtime secret. |
+| `validation_status_secret_arn` | `SHAUTH_VALIDATION_STATUS_TOKEN` |
+| `admin_api_reader_secret_arn` | `SHAUTH_ADMIN_API_READ_TOKEN` |
+| `admin_api_writer_secret_arn` | `SHAUTH_ADMIN_API_WRITE_TOKEN` |
+| `session_reset_secret_arn` | `SHAUTH_SESSION_RESET_TOKEN` |
+| `service_security_group_id`, `api_gateway_vpc_link_id`, `api_gateway_vpc_link_security_group_id` | Network coordinates. |
 
-The module creates a separate `${var.name}/validation-status-reader` secret.
-Its read-only bearer token authorizes the application API, including
-`GET /api/v1/apps/validations`, which returns the latest durable result for
-both directions of every registered app without exposing browser sessions,
-OIDC artifacts, or validator-control credentials.
+Each bearer credential has its own secret, so a consumer can be granted exactly
+one. Every secret also has a `*_CONFIG_VERSION` environment entry, so rotating
+a secret rolls out a new task definition.
 
-Three further single-credential secrets carry the remaining closed-API bearer
-tokens, each generated here and injected only into the Shauth container:
+## Network egress
 
-- `${var.name}/session-reset` authorizes `POST /internal/sessions/reset`,
-  which clears every session for one account without an admin browser login.
-- `${var.name}/admin-api-reader` authorizes the read-only administration
-  contracts under `/api/v1/`.
-- `${var.name}/admin-api-writer` authorizes the state-changing administration
-  endpoints under `/internal/`.
+Shauth and the validator need outbound DNS and HTTPS:
 
-Reads never accept the write credential and writes never accept the read
-credential, so a read-only consumer never holds a state-changing secret. Each
-secret ARN is exported as an output and granted individually to the task
-execution role, which enumerates secret ARNs explicitly rather than by
-wildcard. Every credential secret also has a `*_CONFIG_VERSION` environment
-entry so rotating a secret produces a new task-definition revision instead of
-leaving the running task on the superseded value. `terraform test` asserts
-that every credential the application supports reaches the container, is
-granted to the execution role, and has a redeploy trigger.
+- Shauth reaches GitHub, Entra ID, SES, monitoring sources and registered
+  applications;
+- the validator reaches Shauth and the registered applications.
 
-`monitoring_sources` supplies deployment-neutral, authenticated HTTPS
-coordinates that publish the `e6qu.monitoring/v1` observation contract. The
-module stores this configuration in the runtime secret, so bearer tokens do
-not appear in task-definition environment values. Shauth only reads the
-endpoints and receives no deployment-control permission.
+Security groups cannot filter by hostname, so these six egress rules are
+marked as reviewed Trivy exceptions (`trivy:ignore` in `main.tf`). If you need
+destination filtering, put an egress firewall or proxy in front and narrow the
+rules to it.
+
+## Tests
+
+```sh
+terraform -chdir=terraform init -backend=false
+terraform -chdir=terraform test
+```
+
+The tests check, among other things, that:
+
+- every credential the application reads reaches the container;
+- the right execution role can read each one;
+- each one has a redeploy trigger;
+- invalid inputs are rejected at plan time.
