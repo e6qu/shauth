@@ -105,12 +105,35 @@ session for a user. Shauth revokes each correlated Ory Hydra login session by
 `sid` so relying applications receive logout notifications, then deletes any
 remaining subject login state and consent grants to revoke associated access
 and refresh tokens.
+
+Ory Hydra asks Shauth's token hook (`POST /internal/hydra/token-hook`) before
+it issues any token, including every refresh. Shauth reads the account again:
+a disabled or deleted account gets no new token, and new tokens carry the
+account's current role and email rather than those accepted at consent. If
+Shauth cannot answer, Hydra issues nothing. Access tokens are JWTs in every
+environment, which a relying party verifies against Hydra's published keys
+without calling back; a JWT already issued therefore stays valid until it
+expires, at most the configured access token lifetime (15 minutes by
+default), even after its session or account is revoked. Relying parties that
+must act on revocation sooner use back-channel logout, which every revocation
+delivers.
+
+Applications use the default `query` response mode. Shauth's content policy
+forbids the self-submitting page `form_post` needs, so discovery does not
+advertise it and an authorization request asking for it is refused with an
+explanation.
+
 Administrators also configure the durable browser absolute lifetime, browser
 idle timeout, OIDC single sign-on lifetime, and access, ID, and refresh token
 lifetimes. Shauth applies the token lifetimes to every paginated Ory Hydra
 client and enforces the browser limits from PostgreSQL.
 GitHub mappings are evaluated on every GitHub sign-in; a matching administrator
-mapping overrides a matching developer mapping. Administration and monitoring
+mapping overrides a matching developer mapping. Only accepted organization
+memberships count, and a user mapping is bound to the account's permanent
+numeric GitHub ID. When a sign-in finds that no mapping admits an account any
+longer, or that it lost its administrator role, the account's existing
+sessions and tokens are revoked; removing a mapping revokes those of every
+account it may have admitted, and each is evaluated again at its next sign-in. Administration and monitoring
 navigation are shown only to administrators, and the corresponding handlers
 enforce that role server-side.
 
@@ -300,7 +323,8 @@ receiving an unbounded array.
 - `GET /api/v1/oidc-clients` — `shauth.oidc-clients/v1`: the Ory Hydra client
   catalog as Shauth manages it (never any client secret).
 - `GET /api/v1/github-mappings` — `shauth.github-role-mappings/v1`: GitHub
-  kind/target/role rules.
+  kind/target/role rules. A user rule also carries `github_user_id`, the
+  numeric GitHub account it is bound to.
 - `GET /api/v1/connectors` — `shauth.connectors/v1`: GitHub and Microsoft
   Entra ID enablement, team names, and tenant.
 - `GET /api/v1/monitoring` — `shauth.monitoring/v1`: active Shauth sessions,
@@ -344,7 +368,11 @@ and answer with a versioned receipt:
   client. Deleting a client still referenced by a managed app answers `409`.
 - `POST /internal/github-mappings` and
   `DELETE /internal/github-mappings/{id}` — manage GitHub role mappings
-  (`shauth.github-role-mapping/v1`).
+  (`shauth.github-role-mapping/v1`). A user rule's login is resolved with
+  GitHub's public API when the rule is added and the rule is bound to that
+  account's numeric ID, so renaming the login, or someone else later claiming
+  it, never changes who the rule admits. A login GitHub does not know answers
+  `400`; if GitHub cannot be reached the rule is not added (`502`).
 - `POST /internal/apps` and `DELETE /internal/apps/{slug}` — register
   (`201`, `shauth.app/v1`) or remove a managed app. Registration enforces the
   same invariants as the form: the OpenID Connect client must already exist,
@@ -589,6 +617,7 @@ from runtime secret injection; none has a default.
 | `SHAUTH_VALIDATION_STATUS_TOKEN` | no | Read-only validation status and enqueue API. |
 | `SHAUTH_ADMIN_API_READ_TOKEN`, `SHAUTH_ADMIN_API_WRITE_TOKEN` | no | Administration API; at least 32 characters and distinct. |
 | `SHAUTH_SESSION_RESET_TOKEN` | no | Whole-account session reset endpoint. |
+| `SHAUTH_TOKEN_HOOK_TOKEN` | yes | Credential Ory Hydra presents to Shauth's token hook (`OAUTH2_TOKEN_HOOK_*` in Hydra's environment, sent as `Authorization: Bearer …`). At least 32 characters and distinct. |
 
 `shauth-migrate` reads `DATABASE_URL` and `SHAUTH_MIGRATIONS_DIR` (default
 `/migrations`). It serializes concurrent migrators with an advisory lock, waits
@@ -605,8 +634,11 @@ and optionally `OIDC_GATEWAY_LISTEN_ADDRESS`, `OIDC_GATEWAY_SESSION_MAX_AGE`
 ## Deployment model
 
 The Terraform module deploys Shauth, Ory Hydra, and a standalone ARM64 browser
-validator in private Amazon ECS Fargate subnets. A public HTTPS entry point routes only
-the required identity endpoints. PostgreSQL is the durable source of truth.
+validator in private Amazon ECS Fargate subnets. A public HTTPS entry point
+forwards every request to Shauth, which serves Ory Hydra's public OAuth and
+OpenID Connect endpoints from its own origin. Hydra's administration API and
+its own listener are never published, and every `/internal/` endpoint requires
+its bearer credential. PostgreSQL is the durable source of truth.
 All services remain always-on.
 
 Runtime secret requirements: the Hydra system secret must remain stable across

@@ -4,6 +4,7 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -125,7 +126,10 @@ func TestOrganizationsSendsTheHeadersGitHubRequires(t *testing.T) {
 		if r.URL.Path != organizationsPath {
 			t.Fatalf("unexpected request path %q", r.URL.Path)
 		}
-		membership := OrganizationMembership{}
+		if r.URL.Query().Get("state") != "active" {
+			t.Fatalf("organization memberships were requested without state=active: %s", r.URL.RawQuery)
+		}
+		membership := OrganizationMembership{State: "active"}
 		membership.Organization.Login = "e6qu-org"
 		_ = json.NewEncoder(w).Encode([]OrganizationMembership{membership})
 	}))
@@ -152,5 +156,69 @@ func TestProfileFailsClosedWhenGitHubRejectsTheRequest(t *testing.T) {
 
 	if _, err := newTestClient(t, server).Profile(t.Context(), "gho_test_token"); err == nil {
 		t.Fatal("Profile() succeeded against a rejecting GitHub API")
+	}
+}
+
+// An invitation the person has not accepted confers no role, even if GitHub
+// returns it.
+func TestOrganizationsIgnoresPendingMemberships(t *testing.T) {
+	const accessToken = "gho_test_token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !requireGitHubContract(t, w, r, accessToken) {
+			return
+		}
+		active := OrganizationMembership{State: "active"}
+		active.Organization.Login = "member-org"
+		pending := OrganizationMembership{State: "pending"}
+		pending.Organization.Login = "invited-org"
+		_ = json.NewEncoder(w).Encode([]OrganizationMembership{active, pending})
+	}))
+	defer server.Close()
+	organizations, err := newTestClient(t, server).Organizations(t.Context(), accessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(organizations) != 1 || organizations[0] != "member-org" {
+		t.Fatalf("Organizations() = %v, want only the accepted membership", organizations)
+	}
+}
+
+// AccountID resolves an access rule's login to GitHub's numeric ID through the
+// public API. It must send no credentials, and must reject a login GitHub does
+// not know rather than storing a rule that can never match.
+func TestAccountIDResolvesALoginWithoutCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Fatal("AccountID sent credentials to GitHub's public API")
+		}
+		if r.Header.Get("User-Agent") == "" || r.Header.Get("X-GitHub-Api-Version") == "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/users/octocat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 583231, "login": "Octocat"})
+		case "/users/renamed":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 7, "login": "someone-else"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server)
+
+	id, err := client.AccountID(t.Context(), "octocat")
+	if err != nil || id != 583231 {
+		t.Fatalf("AccountID(octocat) = %d, %v", id, err)
+	}
+	if _, err := client.AccountID(t.Context(), "nobody-here"); !errors.Is(err, ErrAccountNotFound) {
+		t.Fatalf("AccountID(unknown) error = %v, want ErrAccountNotFound", err)
+	}
+	if _, err := client.AccountID(t.Context(), "renamed"); err == nil || errors.Is(err, ErrAccountNotFound) {
+		t.Fatalf("AccountID accepted a response for a different account: %v", err)
+	}
+	if _, err := client.AccountID(t.Context(), "a/b"); err == nil {
+		t.Fatal("AccountID accepted a login containing a path separator")
 	}
 }

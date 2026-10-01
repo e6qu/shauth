@@ -46,6 +46,9 @@ type Config struct {
 	SessionResetToken      string
 	AdminAPIReadToken      string
 	AdminAPIWriteToken     string
+	// TokenHookToken authenticates Ory Hydra's call to the token hook, which
+	// re-reads the account behind every token Hydra issues or refreshes.
+	TokenHookToken string
 }
 
 // BootstrapApp is a confidential OpenID Connect client and its corresponding
@@ -114,6 +117,7 @@ func Load(getenv func(string) string) (Config, error) {
 		SessionResetToken:      getenv("SHAUTH_SESSION_RESET_TOKEN"),
 		AdminAPIReadToken:      getenv("SHAUTH_ADMIN_API_READ_TOKEN"),
 		AdminAPIWriteToken:     getenv("SHAUTH_ADMIN_API_WRITE_TOKEN"),
+		TokenHookToken:         getenv("SHAUTH_TOKEN_HOOK_TOKEN"),
 	}
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_EMAIL and SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must be set together")
@@ -170,6 +174,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"SHAUTH_SESSION_RESET_TOKEN", config.SessionResetToken},
 		{"SHAUTH_ADMIN_API_READ_TOKEN", config.AdminAPIReadToken},
 		{"SHAUTH_ADMIN_API_WRITE_TOKEN", config.AdminAPIWriteToken},
+		{"SHAUTH_TOKEN_HOOK_TOKEN", config.TokenHookToken},
 	}
 	for index, token := range bearerTokens {
 		if token.value == "" {
@@ -192,6 +197,9 @@ func Load(getenv func(string) string) (Config, error) {
 		"GITHUB_ADMIN_TEAM":            config.GitHubAdminTeam,
 		"SHAUTH_SES_REGION":            config.SESRegion,
 		"SHAUTH_INVITATION_EMAIL_FROM": config.InvitationEmailFrom,
+		// Without the token hook a refreshed token keeps the role and
+		// account state it was first issued with, so it is not optional.
+		"SHAUTH_TOKEN_HOOK_TOKEN": config.TokenHookToken,
 	} {
 		if value == "" {
 			return Config{}, fmt.Errorf("%s must be set", name)

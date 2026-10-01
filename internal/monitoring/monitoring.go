@@ -4,6 +4,7 @@
 package monitoring
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -190,15 +191,21 @@ func (client *Client) fetch(ctx context.Context, source Source) (Snapshot, error
 	if mediaType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0])); mediaType != "application/json" {
 		return Snapshot{}, fmt.Errorf("observation endpoint returned %q instead of application/json", mediaType)
 	}
-	limited := &io.LimitedReader{R: response.Body, N: maximumResponseBytes + 1}
-	decoder := json.NewDecoder(limited)
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumResponseBytes+1))
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("read observation: %w", err)
+	}
+	if len(body) > maximumResponseBytes {
+		return Snapshot{}, fmt.Errorf("observation exceeds %d bytes", maximumResponseBytes)
+	}
+	if err := rejectAmbiguousKeys(body); err != nil {
+		return Snapshot{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var snapshot Snapshot
 	if err := decoder.Decode(&snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("decode observation: %w", err)
-	}
-	if limited.N <= 0 {
-		return Snapshot{}, fmt.Errorf("observation exceeds %d bytes", maximumResponseBytes)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return Snapshot{}, fmt.Errorf("observation contains trailing JSON")
@@ -207,6 +214,56 @@ func (client *Client) fetch(ctx context.Context, source Source) (Snapshot, error
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+// rejectAmbiguousKeys refuses an object that names a member twice, including
+// in a different letter case. Go's decoder would keep whichever came last
+// and match names case-insensitively, so {"status":"ok","Status":"down"}
+// could be read differently here than by the source's other consumers.
+func rejectAmbiguousKeys(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	type frame struct {
+		object bool
+		keys   map[string]bool
+		expect bool // the next string token in this object is a key
+	}
+	var stack []*frame
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("decode observation: %w", err)
+		}
+		var top *frame
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		if key, ok := token.(string); ok && top != nil && top.object && top.expect {
+			folded := strings.ToLower(key)
+			if top.keys[folded] {
+				return fmt.Errorf("observation names %q more than once", key)
+			}
+			top.keys[folded] = true
+			top.expect = false
+			continue
+		}
+		switch token {
+		case json.Delim('{'):
+			stack = append(stack, &frame{object: true, keys: map[string]bool{}, expect: true})
+			continue
+		case json.Delim('['):
+			stack = append(stack, &frame{})
+			continue
+		case json.Delim('}'), json.Delim(']'):
+			stack = stack[:len(stack)-1]
+		}
+		// A value completed; the parent object, if any, expects a key next.
+		if len(stack) > 0 && stack[len(stack)-1].object {
+			stack[len(stack)-1].expect = true
+		}
+	}
 }
 
 func (snapshot Snapshot) Validate() error {

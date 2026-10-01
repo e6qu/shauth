@@ -195,6 +195,9 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 		RedirectURIs:           []string{"https://app.example.test/auth/callback"},
 		PostLogoutRedirectURIs: []string{completionURL},
 		BackChannelLogoutURI:   "https://app.example.test/auth/backchannel-logout",
+		GrantTypes:             []string{"authorization_code", "refresh_token"},
+		ResponseTypes:          []string{"code"},
+		TokenEndpointAuth:      "client_secret_post",
 	}
 	app.OIDCContractHash = oidcClientContractHash(client)
 	if err := validateManagedAppClient(app, client); err != nil {
@@ -228,6 +231,30 @@ func TestManagedAppAndOIDCClientRegistrationContract(t *testing.T) {
 		},
 		"host spelling mismatch": func(_ *identity.ManagedApp, client *oidcClient) {
 			client.PostLogoutRedirectURIs = []string{"https://APP.example.test/auth/shauth/logout/complete"}
+		},
+		"public client": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.TokenEndpointAuth = "none"
+		},
+		"implicit grant": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.GrantTypes = []string{"authorization_code", "implicit"}
+		},
+		"client credentials only": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.GrantTypes = []string{"client_credentials"}
+		},
+		"token response type": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.ResponseTypes = []string{"code", "id_token"}
+		},
+		"no redirect URI": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.RedirectURIs = nil
+		},
+		"no logout channel": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.BackChannelLogoutURI = ""
+		},
+		"plain HTTP redirect": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.RedirectURIs = []string{"http://app.example.test/auth/callback"}
+		},
+		"redirect with a fragment": func(_ *identity.ManagedApp, client *oidcClient) {
+			client.RedirectURIs = []string{"https://app.example.test/auth/callback#x"}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

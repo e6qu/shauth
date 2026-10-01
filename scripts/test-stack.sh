@@ -37,8 +37,6 @@ export SHAUTH_URL
 ./scripts/test-process-wait.sh
 ./scripts/check-gateway-test-coordinates.sh
 npm ci
-node node_modules/playwright/cli.js install --with-deps chromium
-npm run test:validator
 
 random_secret() {
   openssl rand -base64 48 | tr -d '\n'
@@ -47,6 +45,34 @@ random_secret() {
 # shellcheck source=./scripts/process-wait.sh
 . "$root/scripts/process-wait.sh"
 
+# run_bounded runs one command in the background and waits for it under a
+# deadline, so a stalled download fails this script with a clear message
+# instead of consuming the CI job's whole time budget.
+run_bounded() {
+	bounded_label=$1
+	bounded_timeout=$2
+	shift 2
+	"$@" &
+	bounded_pid=$!
+	wait_for_process "$bounded_pid" "$bounded_label" "$bounded_timeout"
+}
+
+# Chromium comes from Playwright's CDN. Its system libraries normally come
+# with the host (the GitHub runner image ships them), so the distribution
+# mirror is used only when a real launch proves one is missing: a slow mirror
+# once spent most of the job's budget installing fonts Chromium did not need.
+run_bounded 'Chromium download' 180 node node_modules/playwright/cli.js install chromium
+chromium_launches() {
+	run_bounded 'Chromium launch check' 60 node --input-type=module --eval \
+		'import { chromium } from "playwright"; const browser = await chromium.launch({ headless: true }); const page = await browser.newPage(); await page.setContent("<p>ready</p>"); if (await page.textContent("p") !== "ready") throw new Error("Chromium did not render"); await browser.close();'
+}
+if ! chromium_launches; then
+	echo 'Chromium cannot launch on this host; installing its system dependencies.' >&2
+	run_bounded 'Chromium system dependency installation' 420 node node_modules/playwright/cli.js install-deps chromium
+	chromium_launches
+fi
+npm run test:validator
+
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 export POSTGRES_PASSWORD
 SHAUTH_POSTGRES_HOST_PORT=${SHAUTH_POSTGRES_HOST_PORT:-55432}
@@ -54,7 +80,6 @@ export SHAUTH_POSTGRES_HOST_PORT
 HYDRA_SYSTEM_SECRET=$(random_secret)
 export HYDRA_SYSTEM_SECRET
 export HYDRA_DSN="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/hydra?sslmode=disable"
-export HYDRA_PUBLIC_URL="$SHAUTH_PUBLIC_URL"
 export SHAUTH_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@postgres:5432/shauth?sslmode=disable"
 export GITHUB_CLIENT_ID=local-integration-client
 export GITHUB_CLIENT_SECRET=local-integration-secret
@@ -68,6 +93,8 @@ unset SHAUTH_ADMIN_API_READ_TOKEN
 SHAUTH_ADMIN_API_READ_TOKEN=$(random_secret)
 unset SHAUTH_ADMIN_API_WRITE_TOKEN
 SHAUTH_ADMIN_API_WRITE_TOKEN=$(random_secret)
+unset SHAUTH_TOKEN_HOOK_TOKEN
+SHAUTH_TOKEN_HOOK_TOKEN=$(random_secret)
 
 # Keep the reusable validator queue and administration API credentials out of
 # the ambient process environment. Only Shauth and its callers receive them in
@@ -77,6 +104,7 @@ compose() {
     SHAUTH_VALIDATION_STATUS_TOKEN=$SHAUTH_VALIDATION_STATUS_TOKEN \
     SHAUTH_ADMIN_API_READ_TOKEN=$SHAUTH_ADMIN_API_READ_TOKEN \
     SHAUTH_ADMIN_API_WRITE_TOKEN=$SHAUTH_ADMIN_API_WRITE_TOKEN \
+    SHAUTH_TOKEN_HOOK_TOKEN=$SHAUTH_TOKEN_HOOK_TOKEN \
     command docker compose "$@"
 }
 
@@ -482,6 +510,42 @@ fi
 bootstrap_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='bootstrap-app'")
 [ -n "$bootstrap_app_id" ]
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE oidc_contract_hash=repeat('0',64) OR oidc_contract_hash !~ '^[0-9a-f]{64}$'")" = 0 ]
+# An app the deployment's bootstrap configuration declares, and its OAuth
+# client, are changed there rather than deleted from the interface: removing
+# only the catalog row would strand the client and stop every replica from
+# starting. Both deletions are refused and nothing is removed.
+bootstrap_app_delete_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --cookie "$cookie_jar" \
+	--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/apps" \
+	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/apps/${bootstrap_app_id}/delete")
+[ "$bootstrap_app_delete_status" = 303 ]
+[ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT count(*) FROM managed_apps WHERE slug='bootstrap-app'")" = 1 ]
+curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/admin/apps" | grep -q 'Managed by deployment configuration'
+bootstrap_client_delete_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+	--header "Authorization: Bearer ${SHAUTH_ADMIN_API_WRITE_TOKEN}" --request DELETE "${SHAUTH_PUBLIC_URL}/internal/oidc-clients/bootstrap-app")
+[ "$bootstrap_client_delete_status" = 409 ]
+bootstrap_client_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' 'http://localhost:4445/admin/clients/bootstrap-app')
+if [ "$bootstrap_client_status" != 200 ]; then
+	echo "a deployment-owned OAuth client was deleted: Hydra answered HTTP ${bootstrap_client_status}" >&2
+	exit 1
+fi
+# The supported removal: drop the app from the deployment's configuration,
+# restart, and then remove the app and its client from the interface.
+SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '%s' "$SHAUTH_BOOTSTRAP_APPS_JSON" | node -e '
+let body = "";
+process.stdin.on("data", value => body += value);
+process.stdin.on("end", () => {
+  const apps = JSON.parse(body).filter(app => app.slug !== "bootstrap-app");
+  process.stdout.write(JSON.stringify(apps));
+});
+')
+export SHAUTH_BOOTSTRAP_APPS_JSON
+compose up --force-recreate --no-deps --detach shauth
+attempt=0
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
+	attempt=$((attempt + 1))
+	sleep 1
+done
+[ "$attempt" -lt 30 ]
 curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
 	--header "Origin: ${SHAUTH_PUBLIC_URL}" --header "Referer: ${SHAUTH_PUBLIC_URL}/admin/apps" \
 	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/apps/${bootstrap_app_id}/delete"
@@ -491,7 +555,7 @@ curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" \
 	--data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/clients/bootstrap-app/delete"
 bootstrap_client_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' 'http://localhost:4445/admin/clients/bootstrap-app')
 if [ "$bootstrap_client_status" != 404 ]; then
-	echo "bootstrap OAuth client deletion returned HTTP ${bootstrap_client_status}; expected 404" >&2
+	echo "the OAuth client of an app removed from the deployment configuration was not deleted: Hydra answered HTTP ${bootstrap_client_status}" >&2
 	exit 1
 fi
 integration_app_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM managed_apps WHERE slug='integration-app'")
@@ -959,6 +1023,51 @@ refreshed_response=$(curl --fail --silent --show-error \
 printf '%s' "$refreshed_response" | grep -q '"access_token"'
 refresh_token=$(printf '%s' "$refreshed_response" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
 [ -n "$refresh_token" ]
+# jwt_payload prints the decoded claims of a compact JWT.
+jwt_payload() {
+	segment=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
+	case $(( ${#segment} % 4 )) in
+		2) segment="${segment}==" ;;
+		3) segment="${segment}=" ;;
+	esac
+	printf '%s' "$segment" | base64 -d
+}
+# Access tokens are JWTs in every environment, so a relying party verifies
+# them the same way locally as in production.
+printf '%s' "$refreshed_response" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' | grep -Eq '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+# Every refresh is confirmed by Shauth's token hook, which reads the account
+# as it is now. A change made after consent reaches the next refreshed
+# tokens, Hydra's own sid survives in the ID token, and an account disabled
+# behind Shauth's back (no session revocation at all) gets no new token.
+printf '%s\n' 'refreshing through the token hook'
+compose exec -T postgres psql -U shauth -d shauth -qAtc "UPDATE users SET email='hook-refreshed@localhost.test' WHERE username='admin'" >/dev/null
+hooked_response=$(curl --fail --silent --show-error \
+	--data-urlencode 'grant_type=refresh_token' \
+	--data-urlencode "refresh_token=${refresh_token}" \
+	--data-urlencode "client_id=${auto_consent_client_id}" \
+	--data-urlencode "client_secret=${auto_consent_client_secret}" \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token)
+compose exec -T postgres psql -U shauth -d shauth -qAtc "UPDATE users SET email='admin@localhost.test' WHERE username='admin'" >/dev/null
+refresh_token=$(printf '%s' "$hooked_response" | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
+[ -n "$refresh_token" ]
+hooked_access=$(jwt_payload "$(printf '%s' "$hooked_response" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')")
+hooked_identity=$(jwt_payload "$(printf '%s' "$hooked_response" | sed -n 's/.*"id_token":"\([^"]*\)".*/\1/p')")
+printf '%s' "$hooked_access" | grep -q '"email":"hook-refreshed@localhost.test"'
+printf '%s' "$hooked_access" | grep -q '"role":"admin"'
+printf '%s' "$hooked_identity" | grep -q '"email":"hook-refreshed@localhost.test"'
+printf '%s' "$hooked_identity" | grep -q '"sid":"'
+compose exec -T postgres psql -U shauth -d shauth -qAtc "UPDATE users SET disabled_at=now() WHERE username='admin'" >/dev/null
+hook_refusal=$(curl --silent --show-error --write-out '\n%{http_code}' \
+	--data-urlencode 'grant_type=refresh_token' \
+	--data-urlencode "refresh_token=${refresh_token}" \
+	--data-urlencode "client_id=${auto_consent_client_id}" \
+	--data-urlencode "client_secret=${auto_consent_client_secret}" \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token)
+compose exec -T postgres psql -U shauth -d shauth -qAtc "UPDATE users SET disabled_at=NULL WHERE username='admin'" >/dev/null
+if [ "$(printf '%s' "$hook_refusal" | tail -n 1)" = 200 ] || ! printf '%s' "$hook_refusal" | grep -q '"error":"access_denied"'; then
+	echo "a disabled account's refresh token was not refused by the token hook: ${hook_refusal}" >&2
+	exit 1
+fi
 # An application asking for prompt=login gets a credential presented for that
 # request: the signed-in administrator is sent back to sign in, and the same
 # challenge completes only after a new password sign-in.
@@ -1086,10 +1195,22 @@ curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'kind=user' \
-  --data-urlencode 'target=integration-github-user' \
+  --data-urlencode 'target=Octocat' \
   --data-urlencode 'role=developer' \
-  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'integration-github-user'
-github_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'user' AND target = 'integration-github-user'")
+  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'GitHub account 583231'
+# A user rule is bound to GitHub's permanent numeric account ID, resolved
+# through GitHub's public API when the rule is added, not to the login alone.
+github_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'user' AND target = 'octocat' AND github_user_id = 583231")
+[ -n "$github_mapping_id" ]
+# A login GitHub does not know is refused rather than stored as a rule that
+# could later admit whoever registers it.
+unknown_login_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 30 --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+  --data-urlencode "_csrf=${csrf_token}" \
+  --data-urlencode 'kind=user' \
+  --data-urlencode 'target=shauth-no-such-account-7f3c9e1a2b' \
+  --data-urlencode 'role=admin' \
+  "${SHAUTH_PUBLIC_URL}"/admin/github)
+[ "$unknown_login_status" = 400 ]
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${github_mapping_id}/delete" | grep -q 'GitHub access rules'
 developer_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'team' AND target = 'e6qu-org/e6qu-org-members'")
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${developer_mapping_id}/delete" >/dev/null
@@ -1126,6 +1247,20 @@ if [ "$attempt" -eq 30 ]; then
   compose logs --no-color
   exit 1
 fi
+# The issuer is Shauth's own origin, and discovery advertises only response
+# modes Shauth can complete; form_post is refused with an explanation rather
+# than answered with a self-submitting page the content policy blocks.
+discovery=$(curl --fail --silent --show-error --max-time 10 "${SHAUTH_PUBLIC_URL}"/.well-known/openid-configuration)
+printf '%s' "$discovery" | grep -q "\"issuer\":\"${SHAUTH_PUBLIC_URL}"
+printf '%s' "$discovery" | grep -q '"response_modes_supported":\['
+if printf '%s' "$discovery" | grep -q 'form_post'; then
+  echo 'discovery still advertises the form_post response mode' >&2
+  exit 1
+fi
+form_post_page=$(curl --silent --show-error --max-time 10 --write-out '\n%{http_code}' \
+  "${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&response_mode=form_post&scope=openid&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=form-post-integration")
+[ "$(printf '%s' "$form_post_page" | tail -n 1)" = 400 ]
+printf '%s' "$form_post_page" | grep -q 'form_post response mode'
 
 # Browser form posts must remain same-origin. Provider-initiated logout revokes
 # the user's correlated Ory Hydra sessions before rendering a durable signed-out

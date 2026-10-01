@@ -34,6 +34,9 @@ const (
 	AuditAppDeleted           = "app.deleted"
 	AuditGitHubMappingCreated = "github_mapping.created"
 	AuditGitHubMappingDeleted = "github_mapping.deleted"
+	// AuditGitHubMappingBound records a user rule from before numeric IDs
+	// were kept being bound, at sign-in, to the account its login named.
+	AuditGitHubMappingBound   = "github_mapping.bound"
 	AuditSessionPolicyUpdated = "session_policy.updated"
 	AuditValidationEnqueued   = "app_validation.enqueued"
 	AuditLogoutCompleted      = "logout.completed"

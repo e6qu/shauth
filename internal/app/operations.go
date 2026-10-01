@@ -20,9 +20,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
+	githubapi "github.com/e6qu/shauth/internal/github"
 	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/monitoring"
 	"github.com/e6qu/shauth/internal/observe"
@@ -73,6 +76,10 @@ var (
 	// errOIDCClientInUse reports that a managed app still depends on the
 	// OpenID Connect client a caller asked to delete.
 	errOIDCClientInUse = errors.New("delete the connected app before deleting its OAuth client")
+	// errOIDCClientDeploymentOwned reports an attempt to delete the OAuth
+	// client of an app the deployment's bootstrap configuration declares;
+	// every start would recreate it.
+	errOIDCClientDeploymentOwned = errors.New("this OAuth client belongs to an app declared by the deployment's bootstrap configuration; remove it there")
 	// errSelfDisable reports an administrator attempting to disable the
 	// account they are signed in with, which would lock them out.
 	errSelfDisable = errors.New("you cannot disable the account you are signed in with")
@@ -104,16 +111,21 @@ func describeOperationFailure(action string, err error) (int, string) {
 	switch {
 	case errors.As(err, &invalid):
 		return http.StatusBadRequest, invalid.Error()
+	case errors.Is(err, githubapi.ErrAccountNotFound), errors.Is(err, githubapi.ErrInvalidLogin):
+		return http.StatusBadRequest, err.Error()
 	case errors.As(err, &dependency):
 		// The caller sees only the safe message; the cause is what an
 		// operator needs to diagnose the dependency.
 		observe.Errorf("%s: %s: %v", action, dependency.message, dependency.cause)
 		return http.StatusBadGateway, dependency.Error()
 	case errors.Is(err, identity.ErrAlreadyExists):
-		return http.StatusConflict, action + " already exists"
+		// The action names what was being created ("create user"); the
+		// caller is told that such a thing already exists.
+		return http.StatusConflict, "that " + strings.TrimPrefix(action, "create ") + " already exists"
 	case errors.Is(err, errHydraClientConflict):
 		return http.StatusConflict, "an OAuth client with that identifier already exists"
 	case errors.Is(err, errOIDCClientInUse), errors.Is(err, errSelfDisable),
+		errors.Is(err, errOIDCClientDeploymentOwned), errors.Is(err, identity.ErrManagedAppDeploymentOwned),
 		errors.Is(err, identity.ErrValidationUserProtected), errors.Is(err, identity.ErrActiveSessionNotFound),
 		errors.Is(err, identity.ErrUserInactive):
 		return http.StatusConflict, err.Error()
@@ -336,6 +348,19 @@ func (s *Server) updateSessionPolicy(ctx context.Context, request sessionPolicyR
 	if err != nil {
 		return sessionPolicyRecord{}, err
 	}
+	// Held for the whole change: a client registered meanwhile would be
+	// missed by the update below yet created with the old lifetimes, and two
+	// concurrent changes could leave Hydra and PostgreSQL holding different
+	// policies.
+	var applied sessionPolicyRecord
+	err = s.store.WithSessionPolicyLock(ctx, func(ctx context.Context) error {
+		applied, err = s.replaceSessionPolicy(ctx, policy, requester)
+		return err
+	})
+	return applied, err
+}
+
+func (s *Server) replaceSessionPolicy(ctx context.Context, policy identity.SessionPolicy, requester actor) (sessionPolicyRecord, error) {
 	previous, err := s.store.SessionPolicy(ctx)
 	if err != nil {
 		return sessionPolicyRecord{}, fmt.Errorf("load current session policy: %w", err)
@@ -386,6 +411,9 @@ func (s *Server) deleteOIDCClient(ctx context.Context, clientID string, requeste
 	if !deletableOIDCClientID(clientID) {
 		return identity.Invalid("OAuth client identifier is invalid")
 	}
+	if s.isBootstrapClient(clientID) {
+		return errOIDCClientDeploymentOwned
+	}
 	// Registering an app against this client checks the provider and then
 	// writes the catalog row, so the usage check and the deletion have to
 	// hold the same lock or the two can cross and strand the app.
@@ -413,15 +441,33 @@ func (s *Server) deleteOIDCClient(ctx context.Context, clientID string, requeste
 }
 
 // createGitHubMapping records a rule granting a role to a GitHub user,
-// organization, or team.
+// organization, or team. A user rule is bound to the account's numeric ID
+// now, while the login names the account the administrator means: a login
+// can later be renamed and claimed by someone else, the ID cannot.
 func (s *Server) createGitHubMapping(ctx context.Context, kind, target, role string, requester actor) (identity.GitHubRoleMapping, error) {
-	mapping, err := s.store.CreateGitHubRoleMapping(ctx, kind, target, identity.Role(role))
+	if err := identity.ValidateGitHubRoleMapping(kind, target, identity.Role(role)); err != nil {
+		return identity.GitHubRoleMapping{}, err
+	}
+	var githubUserID int64
+	if kind == "user" {
+		id, err := s.github.AccountID(ctx, target)
+		if errors.Is(err, githubapi.ErrAccountNotFound) || errors.Is(err, githubapi.ErrInvalidLogin) {
+			return identity.GitHubRoleMapping{}, err
+		}
+		if err != nil {
+			return identity.GitHubRoleMapping{}, dependencyFailure("GitHub could not confirm the account; try again", err)
+		}
+		githubUserID = id
+	}
+	mapping, err := s.store.CreateGitHubRoleMapping(ctx, kind, target, githubUserID, identity.Role(role))
 	if err != nil {
 		return identity.GitHubRoleMapping{}, err
 	}
-	s.record(ctx, requester, identity.AuditGitHubMappingCreated, "", map[string]any{
-		"mapping_id": mapping.ID, "kind": mapping.Kind, "target": mapping.Target, "role": string(mapping.Role),
-	})
+	details := map[string]any{"mapping_id": mapping.ID, "kind": mapping.Kind, "target": mapping.Target, "role": string(mapping.Role)}
+	if mapping.GitHubUserID > 0 {
+		details["github_user_id"] = mapping.GitHubUserID
+	}
+	s.record(ctx, requester, identity.AuditGitHubMappingCreated, "", details)
 	return mapping, nil
 }
 
@@ -429,11 +475,52 @@ func (s *Server) deleteGitHubMapping(ctx context.Context, mappingID string, requ
 	if err := requireUUID(mappingID, identity.ErrGitHubRoleMappingNotFound); err != nil {
 		return err
 	}
-	if err := s.store.DeleteGitHubRoleMapping(ctx, mappingID); err != nil {
+	mapping, err := s.store.DeleteGitHubRoleMapping(ctx, mappingID)
+	if err != nil {
 		return err
 	}
-	s.record(ctx, requester, identity.AuditGitHubMappingDeleted, "", map[string]any{"mapping_id": mappingID})
+	s.record(ctx, requester, identity.AuditGitHubMappingDeleted, "", map[string]any{
+		"mapping_id": mapping.ID, "kind": mapping.Kind, "target": mapping.Target, "role": string(mapping.Role),
+	})
+	// A role granted by a rule that no longer exists must not outlive it in
+	// a browser session or an OAuth token. The accounts it may have granted
+	// are signed out everywhere and re-evaluated at their next sign-in.
+	accounts, err := s.store.GitHubAccountsPossiblyGrantedBy(ctx, mapping)
+	if err != nil {
+		return dependencyFailure("the rule was removed, but the sessions it granted could not be listed; end them from the sessions page", err)
+	}
+	var failures []error
+	for _, userID := range accounts {
+		if _, err := s.revokeUserSessions(ctx, userID, "", requester); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if len(failures) > 0 {
+		return dependencyFailure(fmt.Sprintf("the rule was removed, but %d of %d affected accounts could not be signed out; end their sessions from the sessions page", len(failures), len(accounts)), errors.Join(failures...))
+	}
 	return nil
+}
+
+// bootstrapSlugs lists the apps the deployment's configuration declares.
+func (s *Server) bootstrapSlugs() []string {
+	slugs := make([]string, 0, len(s.config.BootstrapApps))
+	for _, app := range s.config.BootstrapApps {
+		slugs = append(slugs, app.Slug)
+	}
+	return slugs
+}
+
+func (s *Server) isBootstrapSlug(slug string) bool {
+	return slices.Contains(s.bootstrapSlugs(), slug)
+}
+
+func (s *Server) isBootstrapClient(clientID string) bool {
+	for _, app := range s.config.BootstrapApps {
+		if app.OIDCClientID == clientID {
+			return true
+		}
+	}
+	return false
 }
 
 // createApp registers a managed app against an already-registered OpenID
@@ -485,10 +572,11 @@ func (s *Server) deleteApp(ctx context.Context, ref identity.ManagedAppRef, requ
 			return err
 		}
 	}
-	if err := s.store.DeleteManagedApp(ctx, ref); err != nil {
+	slug, err := s.store.DeleteManagedApp(ctx, ref, s.bootstrapSlugs())
+	if err != nil {
 		return err
 	}
-	s.record(ctx, requester, identity.AuditAppDeleted, "", map[string]any{"id": ref.ID, "slug": ref.Slug})
+	s.record(ctx, requester, identity.AuditAppDeleted, "", map[string]any{"id": ref.ID, "slug": slug})
 	return nil
 }
 

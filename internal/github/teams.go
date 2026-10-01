@@ -6,9 +6,12 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -34,9 +37,55 @@ type Team struct {
 	} `json:"organization"`
 }
 type OrganizationMembership struct {
+	State        string `json:"state"`
 	Organization struct {
 		Login string `json:"login"`
 	} `json:"organization"`
+}
+
+// ErrAccountNotFound reports that GitHub has no account with the login.
+var ErrAccountNotFound = errors.New("GitHub has no account with that login")
+
+// ErrInvalidLogin reports a value that cannot be a GitHub login.
+var ErrInvalidLogin = errors.New("a GitHub login is 1–39 letters, digits, or single interior hyphens")
+
+// loginPattern is GitHub's rule for account names.
+var loginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){0,38}$`)
+
+// AccountID resolves a login to GitHub's numeric account ID, which stays the
+// same when the account is renamed and is never given to another account.
+// It uses GitHub's public API without credentials.
+func (client *Client) AccountID(ctx context.Context, login string) (int64, error) {
+	login = strings.TrimSpace(login)
+	if !loginPattern.MatchString(login) {
+		return 0, ErrInvalidLogin
+	}
+	request, err := newRequest(ctx, http.MethodGet, client.baseURL+"/users/"+url.PathEscape(login), "")
+	if err != nil {
+		return 0, err
+	}
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return 0, fmt.Errorf("request GitHub account: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return 0, ErrAccountNotFound
+	}
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("GitHub account lookup returned HTTP %d", response.StatusCode)
+	}
+	var account struct {
+		ID    int64  `json:"id"`
+		Login string `json:"login"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&account); err != nil {
+		return 0, fmt.Errorf("decode GitHub account: %w", err)
+	}
+	if account.ID == 0 || !strings.EqualFold(account.Login, login) {
+		return 0, fmt.Errorf("GitHub account lookup returned a different account")
+	}
+	return account.ID, nil
 }
 
 // Profile retrieves the authenticated GitHub user's stable identifier and
@@ -146,7 +195,9 @@ func newRequest(ctx context.Context, method, endpoint, accessToken string) (*htt
 	}
 	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("Authorization", "Bearer "+accessToken)
+	if accessToken != "" {
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+	}
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	return request, nil
 }
@@ -224,6 +275,9 @@ func (client *Client) Organizations(ctx context.Context, accessToken string) ([]
 		query := requestURL.Query()
 		query.Set("per_page", "100")
 		query.Set("page", fmt.Sprint(page))
+		// Only accepted memberships confer a role; an invitation someone has
+		// not accepted, or that an owner may still withdraw, does not.
+		query.Set("state", "active")
 		requestURL.RawQuery = query.Encode()
 		request, err := newRequest(ctx, http.MethodGet, requestURL.String(), accessToken)
 		if err != nil {
@@ -244,6 +298,9 @@ func (client *Client) Organizations(ctx context.Context, accessToken string) ([]
 			return nil, fmt.Errorf("decode GitHub organizations: %w", decodeErr)
 		}
 		for _, membership := range memberships {
+			if membership.State != "active" {
+				continue
+			}
 			if login := strings.TrimSpace(membership.Organization.Login); login != "" {
 				result = append(result, login)
 			}

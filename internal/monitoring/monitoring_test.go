@@ -73,6 +73,39 @@ func TestClientRejectsUnknownObservationFields(t *testing.T) {
 	}
 }
 
+// A member named twice, in any letter case, is refused: Go would silently keep
+// the last one, and another reader of the same document might keep the first.
+func TestClientRejectsAmbiguousObservationMembers(t *testing.T) {
+	valid, err := json.Marshal(validSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"duplicate":        `{"schema_version":"e6qu.monitoring/v1","schema_version":"e6qu.monitoring/v1"}`,
+		"case variant":     `{"schema_version":"e6qu.monitoring/v1","Schema_Version":"other"}`,
+		"nested duplicate": strings.Replace(string(valid), `{"schema_version"`, `{"schema_version":"x","nested":[{"a":1,"A":2}],"schema_version"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			client := &Client{httpClient: server.Client(), now: func() time.Time { return testNow }}
+			result := client.FetchAll(context.Background(), []Source{{Name: "development", URL: server.URL, BearerToken: testToken}})[0]
+			if !strings.Contains(result.Error, "more than once") {
+				t.Fatalf("FetchAll() error = %q, want an ambiguous member refusal", result.Error)
+			}
+		})
+	}
+	if err := rejectAmbiguousKeys(valid); err != nil {
+		t.Fatalf("a valid observation was refused: %v", err)
+	}
+	if err := rejectAmbiguousKeys([]byte(`{"a":{"b":1},"b":[{"b":1},{"b":2}],"c":"b"}`)); err != nil {
+		t.Fatalf("the same name in different objects was refused: %v", err)
+	}
+}
+
 func TestSnapshotValidationRequiresCompletePricingBasis(t *testing.T) {
 	snapshot := validSnapshot()
 	snapshot.CostEstimate.Excludes = []string{"taxes"}
