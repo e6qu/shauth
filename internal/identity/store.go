@@ -1292,49 +1292,55 @@ func ValidateGitHubRoleMapping(kind, target string, role Role) error {
 // ValidateManagedApp checks app-owned endpoint coordinates.
 func ValidateManagedApp(app ManagedApp) error {
 	if len(app.Slug) < 3 || len(app.Slug) > 63 {
-		return invalidInput("app slug must be between 3 and 63 characters")
+		return invalidField("slug", "app slug must be between 3 and 63 characters")
 	}
 	for index, character := range app.Slug {
 		if !(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') && character != '-' || (character == '-' && (index == 0 || index == len(app.Slug)-1)) {
-			return invalidInput("app slug must use lowercase letters, digits, and interior hyphens")
+			return invalidField("slug", "app slug must use lowercase letters, digits, and interior hyphens")
 		}
 	}
-	if strings.TrimSpace(app.Name) == "" || strings.TrimSpace(app.Description) == "" || strings.TrimSpace(app.OIDCClientID) == "" {
-		return invalidInput("app name, description, and OIDC client ID are required")
+	for _, required := range []struct{ field, value, label string }{
+		{"name", app.Name, "display name"}, {"oidc_client_id", app.OIDCClientID, "OIDC client ID"}, {"description", app.Description, "description"},
+	} {
+		if strings.TrimSpace(required.value) == "" {
+			return invalidField(required.field, "app %s is required", required.label)
+		}
 	}
 	if !oidcContractHashPattern.MatchString(app.OIDCContractHash) {
 		return invalidInput("app OIDC registration contract hash must be a lowercase SHA-256 digest")
 	}
 	if !immutableReleaseRevisionPattern.MatchString(app.ReleaseRevision) {
-		return invalidInput("app release revision must be a 12–64 character lowercase hexadecimal commit or a sha256 digest")
+		return invalidField("release_revision", "app release revision must be a 12–64 character lowercase hexadecimal commit or a sha256 digest")
 	}
 	launchURL, err := url.ParseRequestURI(strings.TrimSpace(app.LaunchURL))
 	if err != nil || !validManagedAppURL(launchURL) {
-		return invalidInput("app launch URL must use HTTPS unless it targets loopback")
+		return invalidField("launch_url", "app launch URL must use HTTPS unless it targets loopback")
 	}
 	healthURL, err := url.ParseRequestURI(strings.TrimSpace(app.HealthURL))
 	if err != nil || !validManagedAppURL(healthURL) {
-		return invalidInput("app health URL must use HTTPS unless it targets loopback")
+		return invalidField("health_url", "app health URL must use HTTPS unless it targets loopback")
 	}
 	if !sameURLOrigin(launchURL, healthURL) {
-		return invalidInput("app launch and health URLs must use one application origin")
+		return invalidField("health_url", "app launch and health URLs must use one application origin")
 	}
-	for label, raw := range map[string]string{"validation": app.ValidationURL, "signed-out": app.SignedOutURL} {
-		coordinate, err := url.ParseRequestURI(raw)
-		if err != nil || !validManagedAppURL(coordinate) {
-			return invalidInput("app %s URL must use HTTPS unless it targets loopback", label)
+	for _, coordinate := range []struct{ field, label, raw string }{
+		{"validation_url", "validation", app.ValidationURL}, {"signed_out_url", "signed-out", app.SignedOutURL},
+	} {
+		parsed, err := url.ParseRequestURI(coordinate.raw)
+		if err != nil || !validManagedAppURL(parsed) {
+			return invalidField(coordinate.field, "app %s URL must use HTTPS unless it targets loopback", coordinate.label)
 		}
-		if !sameURLOrigin(launchURL, coordinate) {
-			return invalidInput("app launch and %s URLs must use one application origin", label)
+		if !sameURLOrigin(launchURL, parsed) {
+			return invalidField(coordinate.field, "app launch and %s URLs must use one application origin", coordinate.label)
 		}
 	}
 	if app.MonitoringURL != "" {
 		monitoringURL, err := url.ParseRequestURI(app.MonitoringURL)
 		if err != nil || !validManagedAppURL(monitoringURL) {
-			return invalidInput("app monitoring URL must use HTTPS unless it targets loopback")
+			return invalidField("monitoring_url", "app monitoring URL must use HTTPS unless it targets loopback")
 		}
 		if !sameURLOrigin(launchURL, monitoringURL) {
-			return invalidInput("app launch and monitoring URLs must use one application origin")
+			return invalidField("monitoring_url", "app launch and monitoring URLs must use one application origin")
 		}
 	}
 	return nil
@@ -2015,7 +2021,12 @@ func federatedIdentityLabel(source, githubLogin string) string {
 // distinct from an infrastructure failure so a caller can answer "your
 // request is wrong" without reporting a database outage as a client error,
 // and without echoing internal database detail.
-type InvalidInputError struct{ cause error }
+type InvalidInputError struct {
+	cause error
+	// Field names the form field the rejection is about, when there is
+	// one, so a form can show the message beside that field.
+	Field string
+}
 
 func (err InvalidInputError) Error() string {
 	if err.cause == nil {
@@ -2033,6 +2044,15 @@ func invalidInput(format string, args ...any) error {
 // lets code outside this package raise the same rejection the store raises,
 // so every transport classifies it identically.
 func Invalid(format string, args ...any) error { return invalidInput(format, args...) }
+
+// InvalidField is Invalid for a rejection about one named form field.
+func InvalidField(field, format string, args ...any) error {
+	return InvalidInputError{cause: fmt.Errorf(format, args...), Field: field}
+}
+
+func invalidField(field, format string, args ...any) error {
+	return InvalidField(field, format, args...)
+}
 
 // ErrUserInactive reports an operation that needs an enabled account but
 // found it disabled or absent.

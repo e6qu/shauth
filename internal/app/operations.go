@@ -575,7 +575,7 @@ func (s *Server) createApp(ctx context.Context, app identity.ManagedApp, request
 			}
 		}
 		if registered == nil {
-			return identity.Invalid("register the OIDC client before adding its app")
+			return identity.InvalidField("oidc_client_id", "register the OIDC client before adding its app")
 		}
 		app.OIDCContractHash = oidcClientContractHash(*registered)
 		if err := identity.ValidateManagedApp(app); err != nil {
