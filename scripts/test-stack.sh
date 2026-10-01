@@ -520,7 +520,7 @@ for gateway_database in "$SHAUTH_GATEWAY_PRIMARY_DATABASE" "$SHAUTH_GATEWAY_SECO
 		exit 1
 	fi
 	migration_count=$(compose exec -T postgres psql -U shauth -d "$gateway_database" -Atc 'SELECT count(*) FROM shauth_gateway_schema_migrations')
-	[ "$migration_count" = 2 ]
+	[ "$migration_count" = "$(find internal/gateway/migrations -name '*.sql' | wc -l | tr -d ' ')" ]
 done
 if [ "${SHAUTH_STACK_FOCUS:-}" = browser-global-logout ]; then
 	compose restart shauth >/dev/null
