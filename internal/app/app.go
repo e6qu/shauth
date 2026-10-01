@@ -89,6 +89,9 @@ type oidcClient struct {
 	// DeploymentOwned marks the client of an app the bootstrap
 	// configuration declares, which the interface does not offer to delete.
 	DeploymentOwned bool `json:"-"`
+	// UsedBy names the catalog app that depends on this client, which must
+	// be removed before the client can be deleted.
+	UsedBy string `json:"-"`
 }
 
 type oidcClientInput struct {
@@ -819,7 +822,7 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusTooManyRequests)
 		s.render(w, "login", s.view(r, "Sign in", map[string]any{
-			"Error": fmt.Sprintf("Too many unsuccessful sign-in attempts. Wait %d minutes and try again, or use another sign-in method.", int(identity.PasswordFailureWindow/time.Minute)),
+			"Error": fmt.Sprintf("Too many unsuccessful sign-in attempts. Wait up to %d minutes and try again, or use another sign-in method.", int(identity.PasswordFailureWindow/time.Minute)),
 			"Next":  next, "Username": username, "EntraEnabled": s.entraOAuth != nil, "SignedIn": false,
 		}))
 		return
@@ -838,7 +841,7 @@ func (s *Server) passwordLogin(w http.ResponseWriter, r *http.Request) {
 			allowOIDCFormAction(w)
 		}
 		s.render(w, "login", s.view(r, "Sign in", map[string]any{
-			"Error": "Invalid username or password.", "Next": next, "Username": username,
+			"Error": "Invalid username or password.", "CredentialError": true, "Next": next, "Username": username,
 			"EntraEnabled": s.entraOAuth != nil, "SignedIn": false,
 		}))
 		return
@@ -1087,7 +1090,7 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	user, demoted, err := s.store.FindOrCreateGitHubUser(r.Context(), profile.ID, profile.Login, profile.Email, role)
 	if errors.Is(err, identity.ErrUserInactive) {
 		s.recordSignIn(r, identity.AuditSignInBlocked, "github", profile.Login, "", identity.SignInReasonDisabled)
-		s.failPage(w, r, http.StatusForbidden, "This account is disabled. Ask an administrator to restore it.")
+		s.failPage(w, r, http.StatusForbidden, "This account is disabled. Ask an administrator to enable it.")
 		return
 	}
 	if err != nil {
@@ -1751,8 +1754,16 @@ func (s *Server) adminConnectors(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	// The configured teams only seed the first rules; what admits people
+	// is the rule list as it stands now.
+	mappings, err := s.store.ListGitHubRoleMappings(r.Context())
+	if err != nil {
+		observe.Errorf("count GitHub access rules: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The identity sources could not be loaded.")
+		return
+	}
 	s.render(w, "connectors", s.view(r, "Identity sources", map[string]any{
-		"SignedIn": true, "IsAdmin": true, "Connectors": s.connectors(),
+		"SignedIn": true, "IsAdmin": true, "Connectors": s.connectors(), "GitHubRuleCount": len(mappings),
 	}))
 }
 
@@ -1767,7 +1778,10 @@ type managedAppView struct {
 	ReturnTo string
 	// DeploymentOwned marks an app the bootstrap configuration declares;
 	// it is changed there, not removed from the catalog.
-	DeploymentOwned        bool
+	DeploymentOwned bool
+	// Operator is set for administrators, who may re-run the checks;
+	// everyone else sees their results only.
+	Operator               bool
 	DisplayReleaseRevision string
 	Healthy                bool
 	StatusCode             int
@@ -1906,6 +1920,7 @@ func (s *Server) apps(w http.ResponseWriter, r *http.Request) {
 	for index := range apps {
 		apps[index].CSRF = token
 		apps[index].ReturnTo = "/apps"
+		apps[index].Operator = user.Role == identity.RoleAdmin
 	}
 	setMonitoringPageURLs(apps, user.Role)
 	s.render(w, "apps", s.view(r, "Apps", map[string]any{"SignedIn": true, "User": newUserRecord(user), "Apps": apps, "IsAdmin": user.Role == identity.RoleAdmin, "Error": noticeError(r), "Done": noticeDone(r)}))
@@ -1965,6 +1980,7 @@ func (s *Server) renderAdminApps(w http.ResponseWriter, r *http.Request, status 
 	for index := range apps {
 		apps[index].CSRF = token
 		apps[index].ReturnTo = "/admin/apps"
+		apps[index].Operator = true
 		apps[index].DeploymentOwned = s.isBootstrapSlug(apps[index].Slug)
 	}
 	if status != http.StatusOK {
@@ -2011,16 +2027,22 @@ func (s *Server) validateApp(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusUnauthorized, "sign-in required")
 		return
 	}
-	if _, err := s.enqueueAppValidations(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}, s.currentActor(r)); err != nil {
-		s.failOperation(w, r, "queue application validation", "/apps", err)
+	if user.Role != identity.RoleAdmin {
+		// Each run signs a dedicated identity in and out of two
+		// applications; starting them is an operator's decision.
+		s.failPage(w, r, http.StatusForbidden, "Only administrators can run the sign-in checks again.")
 		return
 	}
 	// The control names the page it sits on; Shauth sends no Referer, so
 	// that cannot be inferred. Only the catalog and, for administrators,
-	// the application pages are accepted.
+	// the application pages are accepted, for success and failure alike.
 	destination := "/apps"
 	if requested := r.FormValue("return_to"); strictRelativeNext(requested) && user.Role == identity.RoleAdmin && (requested == "/admin/apps" || strings.HasPrefix(requested, "/admin/apps/")) {
 		destination = requested
+	}
+	if _, err := s.enqueueAppValidations(r.Context(), identity.ManagedAppRef{ID: r.PathValue("id")}, s.currentActor(r)); err != nil {
+		s.failOperation(w, r, "queue application validation", destination, err)
+		return
 	}
 	s.redirectWithNotice(w, r, destination+"#validation-"+url.PathEscape(r.PathValue("id")), false, "Both checks were queued. Their results appear here as they finish.")
 }
@@ -2504,8 +2526,19 @@ func (s *Server) renderOIDCClients(w http.ResponseWriter, r *http.Request, statu
 		s.failPage(w, r, failureStatus, failureMessage)
 		return
 	}
+	apps, err := s.store.ListManagedApps(r.Context())
+	if err != nil {
+		observe.Errorf("list applications for the OAuth client page: %v", err)
+		s.failPage(w, r, http.StatusInternalServerError, "The OAuth clients could not be loaded.")
+		return
+	}
+	usedBy := make(map[string]string, len(apps))
+	for _, app := range apps {
+		usedBy[app.OIDCClientID] = app.Name
+	}
 	for index := range clients {
 		clients[index].DeploymentOwned = s.isBootstrapClient(clients[index].ID)
+		clients[index].UsedBy = usedBy[clients[index].ID]
 	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
@@ -2602,6 +2635,20 @@ func (s *Server) adminSessionPolicy(w http.ResponseWriter, r *http.Request) {
 // submission shows what the operator typed rather than reverting to the
 // stored policy and hiding their edit.
 func (s *Server) renderSessionPolicy(w http.ResponseWriter, r *http.Request, status int, message string, policy sessionPolicyRecord) {
+	s.renderSessionPolicyForm(w, r, status, message, policy, nil)
+}
+
+// renderSessionPolicyForm also redraws exactly what was submitted, including
+// a value that could not be read as a number.
+func (s *Server) renderSessionPolicyForm(w http.ResponseWriter, r *http.Request, status int, message string, policy sessionPolicyRecord, submitted url.Values) {
+	values := map[string]string{}
+	for _, field := range sessionPolicyFields(&policy) {
+		if submitted != nil {
+			values[field.name] = submitted.Get(field.name)
+		} else {
+			values[field.name] = strconv.FormatInt(*field.target, 10)
+		}
+	}
 	if policy.UpdatedAt.IsZero() {
 		// A rejected edit carries only what the operator typed, so read
 		// the stored change time instead of dropping it from the page.
@@ -2613,7 +2660,7 @@ func (s *Server) renderSessionPolicy(w http.ResponseWriter, r *http.Request, sta
 		w.WriteHeader(status)
 	}
 	s.render(w, "session-policy", s.view(r, "Session time limits", map[string]any{
-		"SignedIn": true, "IsAdmin": true, "Policy": policy,
+		"SignedIn": true, "IsAdmin": true, "Policy": policy, "Values": values,
 		"Error": message, "Done": noticeDone(r),
 	}))
 }
@@ -2628,12 +2675,12 @@ func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request
 	}
 	request, err := parseSessionPolicyForm(r.Form)
 	if err != nil {
-		s.renderSessionPolicy(w, r, http.StatusBadRequest, err.Error(), request)
+		s.renderSessionPolicyForm(w, r, http.StatusBadRequest, err.Error(), request, r.Form)
 		return
 	}
 	if _, err := s.updateSessionPolicy(r.Context(), request, s.currentActor(r)); err != nil {
 		status, message := describeOperationFailure("update session policy", err)
-		s.renderSessionPolicy(w, r, status, message, request)
+		s.renderSessionPolicyForm(w, r, status, message, request, r.Form)
 		return
 	}
 	s.redirectWithNotice(w, r, "/admin/session-policy", false, "Session time limits were saved and applied to every OAuth client.")
@@ -2644,33 +2691,41 @@ func (s *Server) adminUpdateSessionPolicy(w http.ResponseWriter, r *http.Request
 // transports enforce one rule set.
 func parseSessionPolicyForm(values url.Values) (sessionPolicyRecord, error) {
 	var record sessionPolicyRecord
-	// Ordered so a form with several unparseable fields always reports the
-	// same one; map iteration would name a different field each submission.
-	for _, field := range []struct {
-		name   string
-		target *int64
-	}{
-		{"browser_absolute_hours", &record.BrowserAbsoluteHours},
-		{"browser_idle_minutes", &record.BrowserIdleMinutes},
-		{"oidc_sso_hours", &record.OIDCSSOHours},
-		{"access_token_minutes", &record.AccessTokenMinutes},
-		{"id_token_minutes", &record.IDTokenMinutes},
-		{"refresh_token_hours", &record.RefreshTokenHours},
-	} {
+	var problems []string
+	// Every field is read, so one rejected value does not hide another, and
+	// each is named as its label reads.
+	for _, field := range sessionPolicyFields(&record) {
 		value, err := strconv.ParseInt(strings.TrimSpace(values.Get(field.name)), 10, 64)
-		if err != nil {
-			return record, fmt.Errorf("%s must be a positive whole number", strings.ReplaceAll(field.name, "_", " "))
+		if err != nil || value <= 0 {
+			problems = append(problems, field.label)
+			continue
 		}
 		*field.target = value
+	}
+	if len(problems) > 0 {
+		return record, identity.Invalid("%s must be a positive whole number", strings.Join(problems, ", "))
 	}
 	return record, nil
 }
 
-// hydraClientLifespans sets the policy's token lifetimes for both grants an
-// application uses. Hydra applies a client's authorization-code lifespans only
-// to the first tokens; every refresh uses the refresh-token-grant lifespans and
-// otherwise falls back to Hydra's global defaults, which would quietly undo
-// the policy from the first refresh on.
+// sessionPolicyFields names each form field with the label the form shows.
+func sessionPolicyFields(record *sessionPolicyRecord) []struct {
+	name, label string
+	target      *int64
+} {
+	return []struct {
+		name, label string
+		target      *int64
+	}{
+		{"browser_absolute_hours", "Browser absolute lifetime (hours)", &record.BrowserAbsoluteHours},
+		{"browser_idle_minutes", "Browser idle timeout (minutes)", &record.BrowserIdleMinutes},
+		{"oidc_sso_hours", "OIDC SSO lifetime (hours)", &record.OIDCSSOHours},
+		{"access_token_minutes", "Access token lifetime (minutes)", &record.AccessTokenMinutes},
+		{"id_token_minutes", "ID token lifetime (minutes)", &record.IDTokenMinutes},
+		{"refresh_token_hours", "Refresh token lifetime (hours)", &record.RefreshTokenHours},
+	}
+}
+
 // hydraClientURL addresses one client in Hydra's administration API. The
 // identifier is one escaped path segment: escaping it into Path alone would
 // be escaped a second time, and leaving it raw would let a "/" or ".." in a
@@ -2682,6 +2737,11 @@ func (s *Server) hydraClientURL(clientID, suffix string) *url.URL {
 	})
 }
 
+// hydraClientLifespans sets the policy's token lifetimes for both grants an
+// application uses. Hydra applies a client's authorization-code lifespans only
+// to the first tokens; every refresh uses the refresh-token-grant lifespans and
+// otherwise falls back to Hydra's global defaults, which would quietly undo
+// the policy from the first refresh on.
 func hydraClientLifespans(policy identity.SessionPolicy) map[string]string {
 	lifespans := map[string]string{}
 	for _, grant := range []string{"authorization_code_grant", "refresh_token_grant"} {
@@ -3131,7 +3191,11 @@ func (s *Server) adminCreateGitHubMapping(w http.ResponseWriter, r *http.Request
 		s.renderGitHubMappings(w, r, status, message, request)
 		return
 	}
-	s.redirectWithNotice(w, r, "/admin/github", false, "Added the access rule for "+mapping.Target+".")
+	notice := "Added the access rule for " + mapping.Target + "."
+	if mapping.GitHubUserID > 0 {
+		notice = fmt.Sprintf("Added the access rule for %s, bound to GitHub ID %d.", mapping.Target, mapping.GitHubUserID)
+	}
+	s.redirectWithNotice(w, r, "/admin/github", false, notice)
 }
 func (s *Server) adminDeleteGitHubMapping(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -3225,17 +3289,36 @@ func (s *Server) adminInvite(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusUnauthorized, "Your session has ended. Sign in again to send invitations.")
 		return
 	}
-	invitation, err := s.createInvitation(r.Context(), r.Form.Get("email"), r.Form.Get("role"), actor{UserID: inviter.ID})
+	form := invitationForm{Email: r.Form.Get("email"), Role: r.Form.Get("role")}
+	invitation, err := s.createInvitation(r.Context(), form.Email, form.Role, actor{UserID: inviter.ID})
 	if err != nil {
-		s.failOperation(w, r, "create invitation", "/admin/invitations", err)
+		// A rejected invitation is shown on the same page with what was
+		// typed, so a mistyped address is corrected rather than retyped.
+		status, message := describeOperationFailure("create invitation", err)
+		if status >= http.StatusInternalServerError {
+			s.failPage(w, r, status, message)
+			return
+		}
+		s.renderInvitations(w, r, status, message, form)
 		return
 	}
 	s.redirectWithNotice(w, r, "/admin/invitations", false, "Invitation sent to "+invitation.Email+".")
 }
+
+// invitationForm is what the invitation form submitted.
+type invitationForm struct {
+	Email string
+	Role  string
+}
+
 func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	s.renderInvitations(w, r, http.StatusOK, noticeError(r), invitationForm{Role: string(identity.RoleDeveloper)})
+}
+
+func (s *Server) renderInvitations(w http.ResponseWriter, r *http.Request, status int, message string, form invitationForm) {
 	page, err := requestedPage(r)
 	if err != nil {
 		page = identity.Page{}
@@ -3250,9 +3333,12 @@ func (s *Server) adminInvitations(w http.ResponseWriter, r *http.Request) {
 	for _, invitation := range invitations {
 		records = append(records, newInvitationRecord(invitation))
 	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	s.render(w, "invitations", s.view(r, "Invitations", map[string]any{
-		"SignedIn": true, "IsAdmin": true, "Invitations": records,
-		"Error": noticeError(r), "Done": noticeDone(r),
+		"SignedIn": true, "IsAdmin": true, "Invitations": records, "Form": form,
+		"Error": message, "Done": noticeDone(r),
 		"Page": browserPage(r, page, len(records), total),
 	}))
 }
@@ -3382,6 +3468,7 @@ func (s *Server) adminApp(w http.ResponseWriter, r *http.Request) {
 		}
 		views[index].CSRF = token
 		views[index].ReturnTo = "/admin/apps/" + url.PathEscape(r.PathValue("slug"))
+		views[index].Operator = true
 		history, err := s.store.AppValidationRunHistory(r.Context(), slug, 20)
 		if err != nil {
 			observe.Errorf("read validation history for %s: %v", slug, err)
@@ -3426,11 +3513,13 @@ func (s *Server) adminUserSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	records := make([]sessionRecord, 0, len(sessions))
+	hasActive := total > len(sessions)
 	for _, session := range sessions {
 		records = append(records, newSessionRecord(session))
+		hasActive = hasActive || session.Active
 	}
 	s.render(w, "sessions", s.view(r, user.Username+" · sessions", map[string]any{
-		"SignedIn": true, "IsAdmin": true, "Sessions": records, "UserID": userID,
+		"SignedIn": true, "IsAdmin": true, "Sessions": records, "UserID": userID, "HasActive": hasActive,
 		"Account": newUserRecord(user), "Error": noticeError(r), "Done": noticeDone(r),
 		"Page": browserPage(r, page, len(records), total),
 	}))
@@ -3805,7 +3894,7 @@ func (s *Server) recordSignIn(r *http.Request, eventType, method, username, subj
 	if reason != "" {
 		details["reason"] = reason
 	}
-	s.record(r.Context(), actor{Address: clientIP(r)}, eventType, subjectUserID, details)
+	s.record(r.Context(), visitorActor(r), eventType, subjectUserID, details)
 }
 
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, user identity.User) bool {
@@ -3943,6 +4032,13 @@ func (s *Server) view(r *http.Request, title string, data map[string]any) map[st
 	if _, ok := data["IsAdmin"]; !ok {
 		data["IsAdmin"] = false
 	}
+	// Every signed-in page names who is signed in, so a shared or
+	// forgotten browser is recognised before anything is done with it.
+	if signedIn, _ := data["SignedIn"].(bool); signedIn {
+		if user, _, err := s.peekCurrent(r); err == nil {
+			data["Viewer"] = user.Username
+		}
+	}
 	return data
 }
 
@@ -3986,6 +4082,29 @@ func browserPage(r *http.Request, page identity.Page, returned, total int) pageV
 
 func templateHelpers() template.FuncMap {
 	return template.FuncMap{
+		// Stored values shown as the interface names them everywhere.
+		"roleLabel": func(role any) string {
+			switch fmt.Sprint(role) {
+			case string(identity.RoleAdmin):
+				return "Administrator"
+			case string(identity.RoleDeveloper):
+				return "Developer"
+			default:
+				return fmt.Sprint(role)
+			}
+		},
+		"ruleKindLabel": func(kind string) string {
+			switch kind {
+			case "user":
+				return "GitHub user"
+			case "organization":
+				return "GitHub organization"
+			case "team":
+				return "GitHub team"
+			default:
+				return kind
+			}
+		},
 		// Both accept any value so a page whose data omits a timestamp
 		// renders a blank rather than failing to render at all.
 		"moment": func(value any) string {

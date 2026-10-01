@@ -1272,7 +1272,7 @@ curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Or
   --data-urlencode 'kind=user' \
   --data-urlencode 'target=Octocat' \
   --data-urlencode 'role=developer' \
-  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'GitHub account 583231'
+  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'Bound to GitHub ID 583231'
 # A user rule is bound to GitHub's permanent numeric account ID, resolved
 # through GitHub's public API when the rule is added, not to the login alone.
 github_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'user' AND target = 'octocat' AND github_user_id = 583231")

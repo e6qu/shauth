@@ -135,7 +135,9 @@ func (s *Server) adminSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "sessions-all", s.view(r, "Signed-in sessions", map[string]any{
 		"SignedIn": true, "IsAdmin": true, "Sessions": sessions, "State": state,
-		"Error": message, "Done": noticeDone(r),
+		// Ending a session returns to this exact view, filter and page.
+		"ReturnTo": r.URL.RequestURI(),
+		"Error":    message, "Done": noticeDone(r),
 		"Page": browserPage(r, page, len(sessions), total),
 	}))
 }

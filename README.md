@@ -419,7 +419,10 @@ publish: what happened, how much of it, and which dependency is at fault.
   work, while the record keeps the reason, so a disabled account is
   distinguishable from a mistyped name without telling an attacker which.
   A token-authorized write records no person, because bearer credentials are
-  shared and opaque; it records the address it came from.
+  shared and opaque; it records the address it came from. An event no account
+  performed says who did in `details.actor_kind`: `token` for a bearer
+  credential, `visitor` for someone without a session (a sign-in attempt or
+  an invitation acceptance), or `service` for Shauth itself.
 - `GET /api/v1/metrics` — `shauth.metrics/v1`: accounts by role, identity
   source and disabled state; sessions by state; invitations by state;
   applications; validation runs by status with the queue depth and the age of

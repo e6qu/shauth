@@ -61,6 +61,40 @@ type AuditEvent struct {
 	Details       map[string]any
 }
 
+// AuditEventTypes lists every event type, in the order an operator reads
+// them, for the audit record's filter.
+var AuditEventTypes = []string{
+	AuditSignInSucceeded, AuditSignInFailed, AuditSignInBlocked,
+	AuditSessionRevoked, AuditAccountSessionsEnded, AuditLogoutCompleted, AuditLogoutFailed,
+	AuditAccountCreated, AuditAccountDisabled, AuditAccountEnabled,
+	AuditInvitationCreated, AuditInvitationAccepted, AuditInvitationRevoked,
+	AuditGitHubMappingCreated, AuditGitHubMappingDeleted, AuditGitHubMappingBound,
+	AuditOIDCClientCreated, AuditOIDCClientDeleted, AuditAppCreated, AuditAppDeleted,
+	AuditSessionPolicyUpdated, AuditValidationEnqueued, AuditValidationBootstrapsIssued,
+}
+
+// AccountNames returns the usernames of the given accounts, keyed by
+// identifier. An account that no longer exists is simply absent.
+func (s *Store) AccountNames(ctx context.Context, ids []string) (map[string]string, error) {
+	names := map[string]string{}
+	if len(ids) == 0 {
+		return names, nil
+	}
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,username FROM users WHERE id=ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("read account names: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("scan account name: %w", err)
+		}
+		names[id] = name
+	}
+	return names, rows.Err()
+}
+
 // AuditEntry is one event to record. Identifiers are optional: a failed
 // sign-in for an unknown username has no subject, and a token-authorized
 // operation has no actor.

@@ -47,10 +47,21 @@ func TestApplicationValidationComponentReportsBothDirections(t *testing.T) {
 		ManagedApp: identity.ManagedApp{ID: "00000000-0000-4000-8000-000000000001", Name: "Bleephub"},
 		FromShauth: newAppValidationRunView(passed),
 		FromApp:    newAppValidationRunView(failed),
+		Operator:   true,
 	}
 	var rendered bytes.Buffer
 	if err := pages.ExecuteTemplate(&rendered, "app-validation", view); err != nil {
 		t.Fatalf("render validation component: %v", err)
+	}
+	// Everyone sees the results; only an operator is offered to run again.
+	var readOnly bytes.Buffer
+	developerView := view
+	developerView.Operator = false
+	if err := pages.ExecuteTemplate(&readOnly, "app-validation", developerView); err != nil {
+		t.Fatalf("render read-only validation component: %v", err)
+	}
+	if strings.Contains(readOnly.String(), "Run both checks again") || !strings.Contains(readOnly.String(), "From Shauth") {
+		t.Fatalf("developer validation component = %s", readOnly.String())
 	}
 	for _, expected := range []string{"validation-passed", "> Passed</span>", "validation-failed", "> Failed</span>", "From Shauth", "From app", "Run both checks again", "logout returned to the identity service"} {
 		if !strings.Contains(rendered.String(), expected) {
