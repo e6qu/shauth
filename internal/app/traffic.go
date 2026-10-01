@@ -72,11 +72,18 @@ func (t *traffic) observe(mux *http.ServeMux, next http.Handler) http.Handler {
 		// Deferred so a handler that panics is still counted and its
 		// failure still shows up as a 5xx.
 		defer func() {
+			failure := recover()
+			if failure != nil {
+				recorder.status = http.StatusInternalServerError
+			}
 			pattern := r.Pattern
 			if pattern == "" {
 				_, pattern = mux.Handler(r)
 			}
 			t.finish(r.Method, pattern, recorder.status, time.Since(started))
+			if failure != nil {
+				panic(failure)
+			}
 		}()
 		next.ServeHTTP(recorder, r)
 	})
@@ -238,7 +245,9 @@ func percentileMS(buckets []int64, requests int64, percentile int, maxMS int64) 
 	if requests == 0 {
 		return 0
 	}
-	target := requests * int64(percentile) / 100
+	// Rounded up: with ten requests the 95th percentile is the tenth, not
+	// the ninth, so a single slow request is not hidden.
+	target := (requests*int64(percentile) + 99) / 100
 	if target < 1 {
 		target = 1
 	}

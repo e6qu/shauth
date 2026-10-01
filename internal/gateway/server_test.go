@@ -244,19 +244,20 @@ func TestEndSessionURLIdentifiesClientWithoutLocalSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{config: Config{ClientID: "app-client", PostLogoutURL: postLogout}, endSessionEndpoint: "https://auth.example.test/oauth2/sessions/logout"}
-	for name, idToken := range map[string]string{"active session": "signed.id.token", "missing session": ""} {
-		t.Run(name, func(t *testing.T) {
-			target, err := url.Parse(server.endSessionURL(idToken))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if target.Query().Get("client_id") != "app-client" || target.Query().Get("post_logout_redirect_uri") != postLogout.String() {
-				t.Fatalf("logout request omitted registered client coordinates: %s", target)
-			}
-			if target.Query().Get("id_token_hint") != idToken {
-				t.Fatalf("id_token_hint = %q, want %q", target.Query().Get("id_token_hint"), idToken)
-			}
-		})
+	target, err := url.Parse(server.endSessionURL("signed.id.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Query().Get("client_id") != "app-client" || target.Query().Get("post_logout_redirect_uri") != postLogout.String() || target.Query().Get("id_token_hint") != "signed.id.token" {
+		t.Fatalf("logout request omitted registered client coordinates: %s", target)
+	}
+	// The provider refuses a return address without the ID token hint.
+	bare, err := url.Parse(server.endSessionURL(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.Query().Has("post_logout_redirect_uri") || bare.Query().Has("id_token_hint") {
+		t.Fatalf("a logout request without an ID token carried a return address: %s", bare)
 	}
 }
 

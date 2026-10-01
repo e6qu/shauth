@@ -152,6 +152,10 @@ func (store *Store) RevokeFrontchannelSession(ctx context.Context, sid string, n
 	return tx.Commit(ctx)
 }
 
+// ErrLogoutTokenReplayed reports a back-channel logout token whose jti was
+// already accepted.
+var ErrLogoutTokenReplayed = errors.New("logout token was already used")
+
 func (store *Store) RevokeProviderSession(ctx context.Context, sid, jti string, expiresAt, now time.Time) error {
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
@@ -167,7 +171,7 @@ func (store *Store) RevokeProviderSession(ctx context.Context, sid, jti string, 
 	if _, err := tx.Exec(ctx, `INSERT INTO oidc_gateway_logout_tokens(client_id,token_id,expires_at) VALUES ($1,$2,$3)`, store.clientID, jti, expiresAt.UTC()); err != nil {
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) && postgresError.Code == "23505" {
-			return fmt.Errorf("logout token was already used")
+			return ErrLogoutTokenReplayed
 		}
 		return fmt.Errorf("record logout token: %w", err)
 	}

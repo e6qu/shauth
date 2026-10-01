@@ -29,7 +29,11 @@ const tertiary = await createUpstream(5561, "Tertiary application", "44444444444
 
 if (validatorCoordinationDirectory) {
   writeFileSync(path.join(validatorCoordinationDirectory, "ready"), "", { mode: 0o600 });
-  await waitForFile(path.join(validatorCoordinationDirectory, "run-gateway-matrix"), 360_000);
+  // The shell spends up to six minutes waiting on validator runs and then
+  // runs its own checks before it starts the matrix, so this wait outlasts
+  // that worst case; the shell owns the overall deadline and stops this
+  // process if it fails first.
+  await waitForFile(path.join(validatorCoordinationDirectory, "run-gateway-matrix"), 840_000);
 }
 primary.resetIdentity();
 secondary.resetIdentity();
@@ -292,13 +296,14 @@ try {
     headers: { origin: "http://gateway-integration.localhost:5556" },
     maxRedirects: 0,
   });
+  // An application whose session another logout already revoked shows its
+  // own signed-out page: the provider refuses a return address without an
+  // ID token, so sending the browser there would end on a provider error.
   assert.equal(noLocalSessionLogout.status(), 303);
-  const noLocalSessionTarget = new URL(noLocalSessionLogout.headers().location);
-  assert.equal(noLocalSessionTarget.origin, issuer);
-  assert.equal(noLocalSessionTarget.pathname, "/oauth2/sessions/logout");
-  assert.equal(noLocalSessionTarget.searchParams.get("client_id"), "gateway-integration");
-  assert.equal(noLocalSessionTarget.searchParams.get("post_logout_redirect_uri"), "http://gateway-integration.localhost:5556/auth/shauth/logout/complete");
-  assert.equal(noLocalSessionTarget.searchParams.has("id_token_hint"), false);
+  assert.equal(noLocalSessionLogout.headers().location, "/auth/signed-out");
+  const noLocalSessionPage = await gatewayRequest(context, "GET", "http://gateway-integration.localhost:5556/auth/signed-out", { maxRedirects: 0 });
+  assert.equal(noLocalSessionPage.status(), 200);
+  assert.match(await noLocalSessionPage.text(), /Sign in with Shauth/);
   const signInTraceStart = navigationTrace.length;
   await signInControl.click();
   await page.waitForURL((url) => url.origin === issuer && url.pathname === "/login");
@@ -652,6 +657,10 @@ function queryGateway(database, query) {
     ["compose", "exec", "-T", "postgres", "psql", "-U", "shauth", "-d", database, "-Atc", query],
     {
       encoding: "utf8",
+      // A stuck psql must fail this matrix with a clear error rather than
+      // hang it until the CI job is killed.
+      timeout: 30_000,
+      killSignal: "SIGKILL",
       env: {
         ...process.env,
         SHAUTH_VALIDATOR_TOKEN: "unused-compose-interpolation-value",

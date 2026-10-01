@@ -112,8 +112,11 @@ func requestedPage(r *http.Request) (identity.Page, error) {
 			continue
 		}
 		value, err := strconv.Atoi(raw)
-		if err != nil || value < 0 || (name == "limit" && (value < 1 || value > 500)) {
-			return identity.Page{}, identity.Invalid("%s must be a whole number between 1 and 500", name)
+		if name == "limit" && (err != nil || value < 1 || value > 500) {
+			return identity.Page{}, identity.Invalid("limit must be a whole number between 1 and 500")
+		}
+		if name == "offset" && (err != nil || value < 0) {
+			return identity.Page{}, identity.Invalid("offset must be a whole number of 0 or more")
 		}
 		*target = value
 	}
@@ -230,10 +233,14 @@ func (s *Server) userSessionsAPI(w http.ResponseWriter, r *http.Request) {
 		writeAdminAPIError(w, http.StatusInternalServerError, "could not read user")
 		return
 	}
-	sessions, err := s.store.ListSessions(r.Context(), userID)
+	page, err := requestedPage(r)
 	if err != nil {
-		observe.Errorf("list sessions for user %s: %v", userID, err)
-		writeAdminAPIError(w, http.StatusInternalServerError, "could not list sessions")
+		writeOperationFailure(w, "list sessions", err)
+		return
+	}
+	sessions, total, err := s.store.ListSessions(r.Context(), userID, page)
+	if err != nil {
+		writeOperationFailure(w, "list sessions", err)
 		return
 	}
 	records := make([]sessionRecord, 0, len(sessions))
@@ -245,6 +252,7 @@ func (s *Server) userSessionsAPI(w http.ResponseWriter, r *http.Request) {
 		"observed_at":    time.Now().UTC(),
 		"user":           newUserRecord(user),
 		"sessions":       records,
+		"page":           pageEnvelope(page, len(records), total),
 	})
 }
 
@@ -671,7 +679,7 @@ func newInvitationRecord(invitation identity.Invitation) invitationRecord {
 	return invitationRecord{
 		ID: invitation.ID, Email: invitation.Email, Role: string(invitation.Role),
 		State: invitation.State, CreatedAt: invitation.CreatedAt.UTC(), ExpiresAt: invitation.ExpiresAt.UTC(),
-		AcceptedAt: invitation.AcceptedAt, RevokedAt: invitation.RevokedAt, InvitedBy: invitation.InvitedBy,
+		AcceptedAt: utcTime(invitation.AcceptedAt), RevokedAt: utcTime(invitation.RevokedAt), InvitedBy: invitation.InvitedBy,
 	}
 }
 
@@ -786,28 +794,13 @@ type managedAppCreateRequest struct {
 	ReleaseRevision string `json:"release_revision"`
 }
 
-type managedAppRecord struct {
-	Slug            string    `json:"slug"`
-	Name            string    `json:"name"`
-	Description     string    `json:"description,omitempty"`
-	ReleaseRevision string    `json:"release_revision"`
-	LaunchURL       string    `json:"launch_url"`
-	HealthURL       string    `json:"health_url,omitempty"`
-	MonitoringURL   string    `json:"monitoring_url,omitempty"`
-	ValidationURL   string    `json:"validation_url"`
-	SignedOutURL    string    `json:"signed_out_url"`
-	OIDCClientID    string    `json:"oidc_client_id"`
-	CreatedAt       time.Time `json:"created_at"`
-}
-
-func newManagedAppRecord(app identity.ManagedApp) managedAppRecord {
-	return managedAppRecord{
-		Slug: app.Slug, Name: app.Name, Description: app.Description,
-		ReleaseRevision: app.ReleaseRevision, LaunchURL: app.LaunchURL,
-		HealthURL: app.HealthURL, MonitoringURL: app.MonitoringURL,
-		ValidationURL: app.ValidationURL, SignedOutURL: app.SignedOutURL,
-		OIDCClientID: app.OIDCClientID, CreatedAt: app.CreatedAt,
+// utcTime publishes an optional timestamp in UTC, as every record does.
+func utcTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
 	}
+	moment := value.UTC()
+	return &moment
 }
 
 // createAppAPI registers a managed app exactly like the administration form:
@@ -840,9 +833,19 @@ func (s *Server) createAppAPI(w http.ResponseWriter, r *http.Request) {
 		writeOperationFailure(w, "create managed app", err)
 		return
 	}
+	// The receipt is the same shauth.app/v1 record GET /api/v1/apps/{slug}
+	// returns: one schema name, one shape. Its validations are the checks
+	// registration just queued.
+	runs, err := s.store.LatestAppValidationRunsForApp(r.Context(), created.ID)
+	if err != nil {
+		writeOperationFailure(w, "read the registered application", err)
+		return
+	}
+	view := s.viewsWithStatus(r.Context(), []identity.ManagedApp{created}, map[string]map[string]identity.AppValidationRun{created.ID: runs})[0]
 	writeAdminAPIJSON(w, http.StatusCreated, map[string]any{
 		"schema_version": "shauth.app/v1",
-		"app":            newManagedAppRecord(created),
+		"observed_at":    time.Now().UTC(),
+		"app":            newAppRecord(view),
 	})
 }
 

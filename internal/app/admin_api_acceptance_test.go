@@ -471,13 +471,15 @@ func TestAdminAPIOIDCClientAndManagedAppLifecycle(t *testing.T) {
 		t.Fatalf("create app status = %d, body = %s", appCreated.Code, appCreated.Body.String())
 	}
 	var appReceipt struct {
-		SchemaVersion string           `json:"schema_version"`
-		App           managedAppRecord `json:"app"`
+		SchemaVersion string    `json:"schema_version"`
+		App           appRecord `json:"app"`
 	}
 	if err := json.Unmarshal(appCreated.Body.Bytes(), &appReceipt); err != nil {
 		t.Fatalf("decode app receipt: %v: %s", err, appCreated.Body.String())
 	}
-	if appReceipt.SchemaVersion != "shauth.app/v1" || appReceipt.App.Slug != slug || appReceipt.App.OIDCClientID != slug || appReceipt.App.CreatedAt.IsZero() {
+	// The receipt is the same record the read API serves, including the
+	// checks registration queued.
+	if appReceipt.SchemaVersion != "shauth.app/v1" || appReceipt.App.Slug != slug || appReceipt.App.OIDCClientID != slug || appReceipt.App.CreatedAt.IsZero() || appReceipt.App.Validations.FromShauth == nil || appReceipt.App.Validations.FromApp == nil {
 		t.Fatalf("app receipt = %#v", appReceipt)
 	}
 
@@ -585,7 +587,7 @@ func TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt(t *testing.T) {
 	if _, _, err := store.AuthenticatePassword(ctx, "containment", password); err == nil {
 		t.Fatal("a disabled account authenticated with a valid password")
 	}
-	sessions, err := store.ListSessions(ctx, user.ID)
+	sessions, _, err := store.ListSessions(ctx, user.ID, identity.Page{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +622,7 @@ func TestAdminAPIDisableContainsAnAccountAndEnableRestoresIt(t *testing.T) {
 		t.Fatalf("an enabled account could not authenticate: %v", err)
 	}
 	// Enabling restores sign-in but must not resurrect the revoked sessions.
-	sessions, err = store.ListSessions(ctx, user.ID)
+	sessions, _, err = store.ListSessions(ctx, user.ID, identity.Page{})
 	if err != nil {
 		t.Fatal(err)
 	}

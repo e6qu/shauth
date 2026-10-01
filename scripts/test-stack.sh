@@ -157,7 +157,11 @@ cleanup() {
 # trap. Calling cleanup here would intentionally clear that trap and leave the
 # new stack running after a successful test.
 compose down --volumes --remove-orphans
-trap cleanup EXIT INT TERM
+# A signal ends the script after cleanup; returning from the trap would
+# resume the run with the stack already torn down.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 chmod 700 "$validator_coordination_directory"
 docker build --load --tag shauth-local .
@@ -165,8 +169,8 @@ compose up --no-build --detach
 
 attempt=0
 while [ "$attempt" -lt 300 ]; do
-  if curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1 && \
-     curl --fail --silent http://localhost:4444/health/ready >/dev/null 2>&1; then
+  if curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1 && \
+     curl --fail --silent --max-time 2 http://localhost:4444/health/ready >/dev/null 2>&1; then
     break
   fi
   attempt=$((attempt + 1))
@@ -186,7 +190,11 @@ SHAUTH_ACCEPTANCE_DATABASE_URL="postgres://shauth:${POSTGRES_PASSWORD}@127.0.0.1
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'id="main-content"'
 # The sign-in page shows only messages the server wrote; a crafted link
 # cannot put its own words on it.
-if curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}/login?error=Call+support+at+555-0100&done=Verified" | grep -q '555-0100'; then
+# Each negative check first proves the page it inspects actually rendered, so
+# an unreachable server cannot pass for an absent string.
+crafted_login=$(curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}/login?error=Call+support+at+555-0100&done=Verified")
+printf '%s' "$crafted_login" | grep -q 'id="sign-in-title"'
+if printf '%s' "$crafted_login" | grep -q '555-0100'; then
 	echo 'the sign-in page displayed text supplied in its URL' >&2
 	exit 1
 fi
@@ -195,7 +203,9 @@ curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/assets/theme.js | grep 
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'src="/assets/htmx-2.0.8.min.js"'
 curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/assets/htmx-2.0.8.min.js | grep -q 'htmx'
 curl --fail --silent --show-error --dump-header - --output /dev/null "${SHAUTH_PUBLIC_URL}"/login | grep -qi "content-security-policy: default-src 'self'; script-src 'self';"
-if curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login | grep -q 'unpkg.com'; then
+login_page=$(curl --fail --silent --show-error "${SHAUTH_PUBLIC_URL}"/login)
+printf '%s' "$login_page" | grep -q 'id="sign-in-title"'
+if printf '%s' "$login_page" | grep -q 'unpkg.com'; then
 	echo 'Shauth rendered an external browser asset' >&2
 	exit 1
 fi
@@ -260,7 +270,7 @@ SHAUTH_BOOTSTRAP_APPS_JSON=$(printf '%s' "$SHAUTH_BOOTSTRAP_APPS_JSON" | prepare
 export SHAUTH_BOOTSTRAP_APPS_JSON
 compose up --force-recreate --no-deps --detach shauth
 attempt=0
-while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   sleep 1
 done
@@ -459,7 +469,7 @@ done
 if [ "${SHAUTH_STACK_FOCUS:-}" = browser-global-logout ]; then
 	compose restart shauth >/dev/null
 	attempt=0
-	while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
+	while [ "$attempt" -lt 30 ] && ! curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
 		attempt=$((attempt + 1))
 		sleep 1
 	done
@@ -760,7 +770,9 @@ curl --silent "${SHAUTH_PUBLIC_URL}"/api/v1/no-such-endpoint | grep -q '"error":
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' "${SHAUTH_PUBLIC_URL}"/favicon.svg)" = 200 ]
 
 # Timestamps are rendered for people, not as Go debug syntax.
-if curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q '+0000 UTC'; then
+users_page=$(curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users)
+printf '%s' "$users_page" | grep -q '<time datetime="'
+if printf '%s' "$users_page" | grep -q '+0000 UTC'; then
 	echo 'the administration interface rendered a raw Go timestamp' >&2
 	exit 1
 fi
@@ -881,6 +893,23 @@ curl --fail --silent --show-error --location --cookie-jar "$cookie_jar" --cookie
   --data-urlencode 'signed_out_url=http://localhost:5570/signed-out' \
   --data-urlencode 'release_revision=999999999999' \
   "${SHAUTH_PUBLIC_URL}"/admin/apps | grep -q 'Automatic consent app'
+# refresh_refused asserts the token endpoint refused a refresh token with an
+# OAuth error. A refusal must come from Ory Hydra itself: an unreachable or
+# failing endpoint would otherwise pass for a revoked token.
+refresh_refused() {
+	refusal=$(curl --silent --show-error --write-out '\n%{http_code}' \
+		--data-urlencode 'grant_type=refresh_token' \
+		--data-urlencode "refresh_token=$1" \
+		--data-urlencode "client_id=${auto_consent_client_id}" \
+		--data-urlencode "client_secret=${auto_consent_client_secret}" \
+		"${SHAUTH_PUBLIC_URL}"/oauth2/token)
+	refusal_status=$(printf '%s' "$refusal" | tail -n 1)
+	case "$refusal_status" in
+		400|401) ;;
+		*) echo "refresh token was not refused with an OAuth error: HTTP ${refusal_status}" >&2; return 1 ;;
+	esac
+	printf '%s' "$refusal" | grep -q '"error":"'
+}
 login_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
   "${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&scope=openid%20profile%20email%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=integration" |
   awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
@@ -1009,22 +1038,49 @@ if [ "$explicit_granted" != 'openid profile' ]; then
 fi
 # RFC 7009 revocation reaches Ory Hydra through Shauth's issuer; a relying
 # party revoking its refresh token at logout must not be refused.
-printf '%s\n' 'revoking the refresh token through the published revocation endpoint'
+printf '%s\n' 'revoking a separate refresh grant through the published revocation endpoint'
+# A second, independent grant for the same application: revoking it must not
+# disturb the first, which the subject-wide invalidation below relies on.
+revocable_login=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" \
+	"${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&scope=openid%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=revocable-grant" |
+	awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+revocable_location=$revocable_login
+while :; do
+	case "$revocable_location" in
+		"${auto_consent_redirect_uri}"?*) break ;;
+		"${SHAUTH_PUBLIC_URL}"/*) ;;
+		*) echo "second grant left the expected flow at: ${revocable_location}" >&2; exit 1 ;;
+	esac
+	revocable_hops=$(( ${revocable_hops:-0} + 1 ))
+	[ "$revocable_hops" -le 8 ]
+	revocable_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --cookie-jar "$cookie_jar" --cookie "$cookie_jar" "$revocable_location" |
+		awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+done
+revocable_code=$(printf '%s' "$revocable_location" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+revocable_refresh_token=$(curl --fail --silent --show-error \
+	--data-urlencode 'grant_type=authorization_code' \
+	--data-urlencode "code=${revocable_code}" \
+	--data-urlencode "redirect_uri=${auto_consent_redirect_uri}" \
+	--data-urlencode "client_id=${auto_consent_client_id}" \
+	--data-urlencode "client_secret=${auto_consent_client_secret}" \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
+[ -n "$revocable_refresh_token" ]
 curl --fail --silent --show-error \
-	--data-urlencode "token=${refresh_token}" \
+	--data-urlencode "token=${revocable_refresh_token}" \
 	--data-urlencode 'token_type_hint=refresh_token' \
 	--data-urlencode "client_id=${auto_consent_client_id}" \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
 	"${SHAUTH_PUBLIC_URL}"/oauth2/revoke >/dev/null
-if curl --fail --silent \
+refresh_refused "$revocable_refresh_token"
+# The first grant still refreshes; keep its rotated token for the
+# subject-wide invalidation check below.
+refresh_token=$(curl --fail --silent --show-error \
 	--data-urlencode 'grant_type=refresh_token' \
 	--data-urlencode "refresh_token=${refresh_token}" \
 	--data-urlencode "client_id=${auto_consent_client_id}" \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
-	"${SHAUTH_PUBLIC_URL}"/oauth2/token >/dev/null 2>&1; then
-	echo 'a revoked refresh token still issued tokens' >&2
-	exit 1
-fi
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
+[ -n "$refresh_token" ]
 curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin/users | grep -q 'admin@localhost.test'
 curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/admin | grep -q 'Private administration'
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
@@ -1039,7 +1095,7 @@ developer_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "S
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${developer_mapping_id}/delete" >/dev/null
 compose restart shauth >/dev/null
 attempt=0
-while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
   attempt=$((attempt + 1))
   sleep 1
 done
@@ -1060,7 +1116,7 @@ printf '%s' "$monitoring_after_restart" | grep -q 'Active browser sessions'
 printf '%s' "$monitoring_after_restart" | grep -q 'No infrastructure source configured'
 attempt=0
 while [ "$attempt" -lt 30 ]; do
-  if curl --fail --silent "${SHAUTH_PUBLIC_URL}"/.well-known/openid-configuration 2>/dev/null | grep -q 'issuer'; then
+  if curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/.well-known/openid-configuration 2>/dev/null | grep -q 'issuer'; then
     break
   fi
   attempt=$((attempt + 1))
@@ -1134,15 +1190,7 @@ curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}/a
 # Subject-wide invalidation must revoke Hydra's refresh grants as well as each
 # Shauth browser session. A successful refresh here would leave a revoked user
 # able to access a relying application.
-if curl --fail --silent \
-	--data-urlencode 'grant_type=refresh_token' \
-	--data-urlencode "refresh_token=${refresh_token}" \
-	--data-urlencode "client_id=${auto_consent_client_id}" \
-	--data-urlencode "client_secret=${auto_consent_client_secret}" \
-	"${SHAUTH_PUBLIC_URL}"/oauth2/token >/dev/null 2>&1; then
-	echo 'revoked OIDC refresh token was accepted' >&2
-	exit 1
-fi
+refresh_refused "$refresh_token"
 
 # A managed application has one trusted completion bridge. Registering a
 # direct signed-out page alongside it lets an RP bypass Shauth's one-time
@@ -1190,7 +1238,7 @@ SHAUTH_BOOTSTRAP_APPS_JSON=$valid_bootstrap_apps_json
 export SHAUTH_BOOTSTRAP_APPS_JSON
 compose up --force-recreate --no-deps --detach shauth
 attempt=0
-while [ "$attempt" -lt 30 ] && ! curl --fail --silent "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
+while [ "$attempt" -lt 30 ] && ! curl --fail --silent --max-time 2 "${SHAUTH_PUBLIC_URL}"/healthz >/dev/null 2>&1; do
 	attempt=$((attempt + 1))
 	sleep 1
 done
@@ -1216,7 +1264,8 @@ if [ "$shauth_status" != exited ] || [ "$(docker inspect --format '{{.State.Exit
 	exit 1
 fi
 compose logs --no-color shauth | grep -q 'managed app slug "protected-app" or OpenID Connect client "takeover-client" belongs to another registration'
-if curl --fail --silent http://localhost:4445/admin/clients/takeover-client >/dev/null 2>&1; then
-	echo 'Shauth mutated Ory Hydra before rejecting a bootstrap ownership conflict' >&2
+takeover_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 5 http://localhost:4445/admin/clients/takeover-client)
+if [ "$takeover_status" != 404 ]; then
+	echo "Shauth mutated Ory Hydra before rejecting a bootstrap ownership conflict (Hydra answered HTTP ${takeover_status}, want 404)" >&2
 	exit 1
 fi

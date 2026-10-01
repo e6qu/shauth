@@ -118,8 +118,8 @@ func Load(getenv func(string) string) (Config, error) {
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_EMAIL and SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must be set together")
 	}
-	if config.BootstrapAdminPassword != "" && len(config.BootstrapAdminPassword) < 14 {
-		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must have at least 14 characters")
+	if config.BootstrapAdminPassword != "" && (len(config.BootstrapAdminPassword) < 14 || len(config.BootstrapAdminPassword) > 72) {
+		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must have 14 to 72 bytes")
 	}
 	validationValues := 0
 	for _, value := range []string{config.ValidationUsername, config.ValidationEmail, config.ValidatorToken} {

@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"github.com/e6qu/shauth/internal/observe"
 	"time"
 
 	"github.com/e6qu/shauth/internal/identity"
@@ -66,9 +67,13 @@ func (s *Server) deepHealth(ctx context.Context) (string, []healthCheck) {
 		s.timedCheck(ctx, "managed_app_registration", s.checkManagedAppRegistration),
 		s.timedCheck(ctx, "application_monitoring", s.checkApplicationMonitoring),
 		s.timedCheck(ctx, "validation_queue", s.checkValidationQueue),
-		s.timedCheck(ctx, "invitation_mailer", func(context.Context) (string, string) {
-			if s.config.SESRegion == "" || s.config.InvitationEmailFrom == "" {
-				return healthDegraded, "invitations cannot be sent: no mail region or sender is configured"
+		s.timedCheck(ctx, "invitation_mailer", func(ctx context.Context) (string, string) {
+			if s.mailer == nil {
+				return healthDegraded, "invitations cannot be sent: no mailer is configured"
+			}
+			if err := s.mailer.SendingReady(ctx); err != nil {
+				observe.Warnf("invitation mailer is not ready: %v", err)
+				return healthDegraded, "invitations cannot be sent: the mail service did not confirm the sender"
 			}
 			return healthHealthy, ""
 		}),
