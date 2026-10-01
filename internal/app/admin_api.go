@@ -446,16 +446,19 @@ func (s *Server) deleteOIDCClientAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 type githubRoleMappingRecord struct {
-	ID        string    `json:"id"`
-	Kind      string    `json:"kind"`
-	Target    string    `json:"target"`
-	Role      string    `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Target string `json:"target"`
+	// GitHubUserID is the numeric account a user rule is bound to; absent
+	// for organization and team rules and for a user rule not yet bound.
+	GitHubUserID int64     `json:"github_user_id,omitempty"`
+	Role         string    `json:"role"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 func newGitHubRoleMappingRecord(mapping identity.GitHubRoleMapping) githubRoleMappingRecord {
 	return githubRoleMappingRecord{
-		ID: mapping.ID, Kind: mapping.Kind, Target: mapping.Target,
+		ID: mapping.ID, Kind: mapping.Kind, Target: mapping.Target, GitHubUserID: mapping.GitHubUserID,
 		Role: string(mapping.Role), CreatedAt: mapping.CreatedAt.UTC(),
 	}
 }

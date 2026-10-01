@@ -23,6 +23,7 @@ import (
 	"sort"
 	"time"
 
+	githubapi "github.com/e6qu/shauth/internal/github"
 	"github.com/e6qu/shauth/internal/identity"
 	"github.com/e6qu/shauth/internal/monitoring"
 	"github.com/e6qu/shauth/internal/observe"
@@ -104,6 +105,8 @@ func describeOperationFailure(action string, err error) (int, string) {
 	switch {
 	case errors.As(err, &invalid):
 		return http.StatusBadRequest, invalid.Error()
+	case errors.Is(err, githubapi.ErrAccountNotFound), errors.Is(err, githubapi.ErrInvalidLogin):
+		return http.StatusBadRequest, err.Error()
 	case errors.As(err, &dependency):
 		// The caller sees only the safe message; the cause is what an
 		// operator needs to diagnose the dependency.
@@ -413,15 +416,33 @@ func (s *Server) deleteOIDCClient(ctx context.Context, clientID string, requeste
 }
 
 // createGitHubMapping records a rule granting a role to a GitHub user,
-// organization, or team.
+// organization, or team. A user rule is bound to the account's numeric ID
+// now, while the login names the account the administrator means: a login
+// can later be renamed and claimed by someone else, the ID cannot.
 func (s *Server) createGitHubMapping(ctx context.Context, kind, target, role string, requester actor) (identity.GitHubRoleMapping, error) {
-	mapping, err := s.store.CreateGitHubRoleMapping(ctx, kind, target, identity.Role(role))
+	if err := identity.ValidateGitHubRoleMapping(kind, target, identity.Role(role)); err != nil {
+		return identity.GitHubRoleMapping{}, err
+	}
+	var githubUserID int64
+	if kind == "user" {
+		id, err := s.github.AccountID(ctx, target)
+		if errors.Is(err, githubapi.ErrAccountNotFound) || errors.Is(err, githubapi.ErrInvalidLogin) {
+			return identity.GitHubRoleMapping{}, err
+		}
+		if err != nil {
+			return identity.GitHubRoleMapping{}, dependencyFailure("GitHub could not confirm the account; try again", err)
+		}
+		githubUserID = id
+	}
+	mapping, err := s.store.CreateGitHubRoleMapping(ctx, kind, target, githubUserID, identity.Role(role))
 	if err != nil {
 		return identity.GitHubRoleMapping{}, err
 	}
-	s.record(ctx, requester, identity.AuditGitHubMappingCreated, "", map[string]any{
-		"mapping_id": mapping.ID, "kind": mapping.Kind, "target": mapping.Target, "role": string(mapping.Role),
-	})
+	details := map[string]any{"mapping_id": mapping.ID, "kind": mapping.Kind, "target": mapping.Target, "role": string(mapping.Role)}
+	if mapping.GitHubUserID > 0 {
+		details["github_user_id"] = mapping.GitHubUserID
+	}
+	s.record(ctx, requester, identity.AuditGitHubMappingCreated, "", details)
 	return mapping, nil
 }
 
@@ -429,10 +450,29 @@ func (s *Server) deleteGitHubMapping(ctx context.Context, mappingID string, requ
 	if err := requireUUID(mappingID, identity.ErrGitHubRoleMappingNotFound); err != nil {
 		return err
 	}
-	if err := s.store.DeleteGitHubRoleMapping(ctx, mappingID); err != nil {
+	mapping, err := s.store.DeleteGitHubRoleMapping(ctx, mappingID)
+	if err != nil {
 		return err
 	}
-	s.record(ctx, requester, identity.AuditGitHubMappingDeleted, "", map[string]any{"mapping_id": mappingID})
+	s.record(ctx, requester, identity.AuditGitHubMappingDeleted, "", map[string]any{
+		"mapping_id": mapping.ID, "kind": mapping.Kind, "target": mapping.Target, "role": string(mapping.Role),
+	})
+	// A role granted by a rule that no longer exists must not outlive it in
+	// a browser session or an OAuth token. The accounts it may have granted
+	// are signed out everywhere and re-evaluated at their next sign-in.
+	accounts, err := s.store.GitHubAccountsPossiblyGrantedBy(ctx, mapping)
+	if err != nil {
+		return dependencyFailure("the rule was removed, but the sessions it granted could not be listed; end them from the sessions page", err)
+	}
+	var failures []error
+	for _, userID := range accounts {
+		if _, err := s.revokeUserSessions(ctx, userID, "", requester); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if len(failures) > 0 {
+		return dependencyFailure(fmt.Sprintf("the rule was removed, but %d of %d affected accounts could not be signed out; end their sessions from the sessions page", len(failures), len(accounts)), errors.Join(failures...))
+	}
 	return nil
 }
 

@@ -902,16 +902,39 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowed {
 		s.recordSignIn(r, identity.AuditSignInFailed, "github", profile.Login, "", "no GitHub access rule grants this account a role")
+		// The account may still hold sessions and tokens from when a rule
+		// admitted it. GitHub has just said no rule does any longer, so
+		// those end now rather than when they expire.
+		if userID, err := s.store.GitHubUserID(r.Context(), profile.ID); err == nil {
+			if _, err := s.revokeUserSessions(r.Context(), userID, "", actor{}); err != nil {
+				observe.Errorf("end the sessions of deauthorized GitHub account %s: %v", profile.Login, err)
+			}
+		} else if !errors.Is(err, identity.ErrUserNotFound) {
+			observe.Errorf("look up deauthorized GitHub account %s: %v", profile.Login, err)
+		}
 		s.failPage(w, r, http.StatusForbidden, "This GitHub account is not authorized to use this service. Ask an administrator to grant it access.")
 		return
 	}
-	user, err := s.store.FindOrCreateGitHubUser(r.Context(), profile.ID, profile.Login, profile.Email, role)
-	if err != nil {
-		s.recordSignIn(r, identity.AuditSignInBlocked, "github", profile.Login, "", err.Error())
+	user, demoted, err := s.store.FindOrCreateGitHubUser(r.Context(), profile.ID, profile.Login, profile.Email, role)
+	if errors.Is(err, identity.ErrUserInactive) {
+		s.recordSignIn(r, identity.AuditSignInBlocked, "github", profile.Login, "", identity.SignInReasonDisabled)
+		s.failPage(w, r, http.StatusForbidden, "This account is disabled. Ask an administrator to restore it.")
+		return
 	}
 	if err != nil {
+		s.recordSignIn(r, identity.AuditSignInBlocked, "github", profile.Login, "", err.Error())
 		s.failPage(w, r, http.StatusInternalServerError, "could not establish local account")
 		return
+	}
+	if demoted {
+		// Sessions and tokens issued while the account was an administrator
+		// still carry that role; they end before the new session begins.
+		if _, err := s.revokeUserSessions(r.Context(), user.ID, "", actor{}); err != nil {
+			observe.Errorf("end the administrator sessions of demoted GitHub account %s: %v", profile.Login, err)
+			s.recordSignIn(r, identity.AuditSignInFailed, "github", user.Username, user.ID, "the account's administrator sessions could not be ended")
+			s.failPage(w, r, http.StatusBadGateway, "Your access changed and your previous sessions could not be ended. Try again.")
+			return
+		}
 	}
 	if !s.startSession(w, r, user) {
 		return
@@ -2906,7 +2929,7 @@ func (s *Server) adminDeleteGitHubMapping(w http.ResponseWriter, r *http.Request
 		s.failOperation(w, r, "delete GitHub role mapping", "/admin/github", err)
 		return
 	}
-	s.redirectWithNotice(w, r, "/admin/github", false, "The access rule was removed.")
+	s.redirectWithNotice(w, r, "/admin/github", false, "The access rule was removed. Accounts it may have admitted were signed out and are checked again at their next sign-in.")
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
@@ -3428,6 +3451,34 @@ func hydraEndpointReady(ctx context.Context, client *http.Client, base *url.URL)
 	defer response.Body.Close()
 	return response.StatusCode == http.StatusOK
 }
+
+// githubUserRuleMatches reports whether a user access rule names the signed-in
+// account. A bound rule matches only its numeric account ID, so a login that
+// is renamed and later claimed by someone else gains nothing. A rule recorded
+// before IDs were kept matches its login once, and is bound to that account.
+func (s *Server) githubUserRuleMatches(ctx context.Context, mapping identity.GitHubRoleMapping, profile githubapi.Profile) bool {
+	if mapping.GitHubUserID > 0 {
+		return mapping.GitHubUserID == profile.ID
+	}
+	if profile.ID <= 0 || !strings.EqualFold(mapping.Target, profile.Login) {
+		return false
+	}
+	bound, err := s.store.BindGitHubUserMapping(ctx, mapping.ID, profile.ID)
+	if err != nil {
+		observe.Errorf("bind GitHub user rule %s: %v", mapping.ID, err)
+		return false
+	}
+	if !bound {
+		// Another rule already names this account, or a concurrent sign-in
+		// bound this one; either way the other rule decides.
+		return false
+	}
+	s.record(ctx, actor{}, identity.AuditGitHubMappingBound, "", map[string]any{
+		"mapping_id": mapping.ID, "target": mapping.Target, "github_user_id": profile.ID,
+	})
+	return true
+}
+
 func (s *Server) githubRole(ctx context.Context, accessToken string, profile githubapi.Profile) (identity.Role, bool, error) {
 	mappings, err := s.store.ListGitHubRoleMappings(ctx)
 	if err != nil {
@@ -3461,7 +3512,7 @@ func (s *Server) githubRole(ctx context.Context, accessToken string, profile git
 	role := identity.RoleDeveloper
 	allowed := false
 	for _, mapping := range mappings {
-		matches := (mapping.Kind == "user" && strings.EqualFold(mapping.Target, profile.Login)) ||
+		matches := (mapping.Kind == "user" && s.githubUserRuleMatches(ctx, mapping, profile)) ||
 			(mapping.Kind == "team" && teamTargets[strings.ToLower(mapping.Target)]) ||
 			(mapping.Kind == "organization" && organizationTargets[strings.ToLower(mapping.Target)])
 		if !matches {

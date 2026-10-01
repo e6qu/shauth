@@ -300,7 +300,8 @@ receiving an unbounded array.
 - `GET /api/v1/oidc-clients` — `shauth.oidc-clients/v1`: the Ory Hydra client
   catalog as Shauth manages it (never any client secret).
 - `GET /api/v1/github-mappings` — `shauth.github-role-mappings/v1`: GitHub
-  kind/target/role rules.
+  kind/target/role rules. A user rule also carries `github_user_id`, the
+  numeric GitHub account it is bound to.
 - `GET /api/v1/connectors` — `shauth.connectors/v1`: GitHub and Microsoft
   Entra ID enablement, team names, and tenant.
 - `GET /api/v1/monitoring` — `shauth.monitoring/v1`: active Shauth sessions,
@@ -344,7 +345,11 @@ and answer with a versioned receipt:
   client. Deleting a client still referenced by a managed app answers `409`.
 - `POST /internal/github-mappings` and
   `DELETE /internal/github-mappings/{id}` — manage GitHub role mappings
-  (`shauth.github-role-mapping/v1`).
+  (`shauth.github-role-mapping/v1`). A user rule's login is resolved with
+  GitHub's public API when the rule is added and the rule is bound to that
+  account's numeric ID, so renaming the login, or someone else later claiming
+  it, never changes who the rule admits. A login GitHub does not know answers
+  `400`; if GitHub cannot be reached the rule is not added (`502`).
 - `POST /internal/apps` and `DELETE /internal/apps/{slug}` — register
   (`201`, `shauth.app/v1`) or remove a managed app. Registration enforces the
   same invariants as the form: the OpenID Connect client must already exist,

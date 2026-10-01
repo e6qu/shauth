@@ -1086,10 +1086,22 @@ curl --fail --silent --show-error --cookie "$cookie_jar" "${SHAUTH_PUBLIC_URL}"/
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
   --data-urlencode "_csrf=${csrf_token}" \
   --data-urlencode 'kind=user' \
-  --data-urlencode 'target=integration-github-user' \
+  --data-urlencode 'target=Octocat' \
   --data-urlencode 'role=developer' \
-  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'integration-github-user'
-github_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'user' AND target = 'integration-github-user'")
+  "${SHAUTH_PUBLIC_URL}"/admin/github | grep -q 'GitHub account 583231'
+# A user rule is bound to GitHub's permanent numeric account ID, resolved
+# through GitHub's public API when the rule is added, not to the login alone.
+github_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'user' AND target = 'octocat' AND github_user_id = 583231")
+[ -n "$github_mapping_id" ]
+# A login GitHub does not know is refused rather than stored as a rule that
+# could later admit whoever registers it.
+unknown_login_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 30 --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+  --data-urlencode "_csrf=${csrf_token}" \
+  --data-urlencode 'kind=user' \
+  --data-urlencode 'target=shauth-no-such-account-7f3c9e1a2b' \
+  --data-urlencode 'role=admin' \
+  "${SHAUTH_PUBLIC_URL}"/admin/github)
+[ "$unknown_login_status" = 400 ]
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${github_mapping_id}/delete" | grep -q 'GitHub access rules'
 developer_mapping_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM github_role_mappings WHERE kind = 'team' AND target = 'e6qu-org/e6qu-org-members'")
 curl --fail --silent --show-error --location --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" --data-urlencode "_csrf=${csrf_token}" "${SHAUTH_PUBLIC_URL}/admin/github/${developer_mapping_id}/delete" >/dev/null

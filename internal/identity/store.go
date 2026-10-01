@@ -125,11 +125,15 @@ func invitationState(invitation Invitation, now time.Time) string {
 }
 
 type GitHubRoleMapping struct {
-	ID        string
-	Kind      string
-	Target    string
-	Role      Role
-	CreatedAt time.Time
+	ID     string
+	Kind   string
+	Target string
+	// GitHubUserID is the numeric account a user rule grants a role to. Zero
+	// means a rule recorded before IDs were kept, which the next sign-in
+	// with a matching login binds.
+	GitHubUserID int64
+	Role         Role
+	CreatedAt    time.Time
 }
 type ManagedApp struct {
 	ID               string
@@ -281,24 +285,13 @@ func (s *Store) UpdateSessionPolicy(ctx context.Context, policy SessionPolicy) (
 	return updatedAt.UTC(), nil
 }
 
-func (s *Store) EnsureGitHubRoleMapping(ctx context.Context, kind, target string, role Role) error {
-	if err := validateGitHubRoleMapping(kind, target, role); err != nil {
-		return err
-	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO github_role_mappings (id,kind,target,role,created_at) VALUES ($1::uuid,$2,$3,$4,now()) ON CONFLICT (kind,target) DO NOTHING`, randomUUID(), kind, normalizeGitHubTarget(kind, target), role)
-	if err != nil {
-		return fmt.Errorf("ensure GitHub role mapping: %w", err)
-	}
-	return nil
-}
-
 // EnsureInitialGitHubRoleMappings records the configured defaults exactly once.
 // Administrators may subsequently remove or replace them from the private UI.
 func (s *Store) EnsureInitialGitHubRoleMappings(ctx context.Context, developerTeam, adminTeam string) error {
-	if err := validateGitHubRoleMapping("team", developerTeam, RoleDeveloper); err != nil {
+	if err := ValidateGitHubRoleMapping("team", developerTeam, RoleDeveloper); err != nil {
 		return err
 	}
-	if err := validateGitHubRoleMapping("team", adminTeam, RoleAdmin); err != nil {
+	if err := ValidateGitHubRoleMapping("team", adminTeam, RoleAdmin); err != nil {
 		return err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -329,13 +322,22 @@ func (s *Store) EnsureInitialGitHubRoleMappings(ctx context.Context, developerTe
 	return nil
 }
 
-func (s *Store) CreateGitHubRoleMapping(ctx context.Context, kind, target string, role Role) (GitHubRoleMapping, error) {
-	if err := validateGitHubRoleMapping(kind, target, role); err != nil {
+// CreateGitHubRoleMapping records an access rule. A user rule must carry the
+// account's numeric GitHub ID; organization and team rules carry none.
+func (s *Store) CreateGitHubRoleMapping(ctx context.Context, kind, target string, githubUserID int64, role Role) (GitHubRoleMapping, error) {
+	if err := ValidateGitHubRoleMapping(kind, target, role); err != nil {
 		return GitHubRoleMapping{}, err
 	}
+	if (kind == "user") != (githubUserID > 0) {
+		return GitHubRoleMapping{}, invalidInput("only a GitHub user rule names a GitHub account ID, and it must")
+	}
 	var mapping GitHubRoleMapping
-	err := s.pool.QueryRow(ctx, `INSERT INTO github_role_mappings (id,kind,target,role,created_at) VALUES ($1::uuid,$2,$3,$4,now()) RETURNING id::text,kind,target,role,created_at`, randomUUID(), kind, normalizeGitHubTarget(kind, target), role).
-		Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.Role, &mapping.CreatedAt)
+	var userID *int64
+	if githubUserID > 0 {
+		userID = &githubUserID
+	}
+	err := s.pool.QueryRow(ctx, `INSERT INTO github_role_mappings (id,kind,target,github_user_id,role,created_at) VALUES ($1::uuid,$2,$3,$4,$5,now()) RETURNING id::text,kind,target,COALESCE(github_user_id,0),role,created_at`, randomUUID(), kind, normalizeGitHubTarget(kind, target), userID, role).
+		Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.GitHubUserID, &mapping.Role, &mapping.CreatedAt)
 	if err != nil {
 		return GitHubRoleMapping{}, classifyWriteError("create GitHub role mapping", err)
 	}
@@ -343,7 +345,7 @@ func (s *Store) CreateGitHubRoleMapping(ctx context.Context, kind, target string
 }
 
 func (s *Store) ListGitHubRoleMappings(ctx context.Context) ([]GitHubRoleMapping, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,target,role,created_at FROM github_role_mappings ORDER BY kind,target`)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,target,COALESCE(github_user_id,0),role,created_at FROM github_role_mappings ORDER BY kind,target`)
 	if err != nil {
 		return nil, fmt.Errorf("list GitHub role mappings: %w", err)
 	}
@@ -351,7 +353,7 @@ func (s *Store) ListGitHubRoleMappings(ctx context.Context) ([]GitHubRoleMapping
 	var mappings []GitHubRoleMapping
 	for rows.Next() {
 		var mapping GitHubRoleMapping
-		if err := rows.Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.Role, &mapping.CreatedAt); err != nil {
+		if err := rows.Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.GitHubUserID, &mapping.Role, &mapping.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan GitHub role mapping: %w", err)
 		}
 		mappings = append(mappings, mapping)
@@ -359,19 +361,73 @@ func (s *Store) ListGitHubRoleMappings(ctx context.Context) ([]GitHubRoleMapping
 	return mappings, rows.Err()
 }
 
+// BindGitHubUserMapping records the numeric account ID of a user rule that
+// predates IDs. It reports whether this call bound the rule: a rule already
+// bound, or an account another rule is already bound to, is left alone.
+func (s *Store) BindGitHubUserMapping(ctx context.Context, id string, githubUserID int64) (bool, error) {
+	if githubUserID <= 0 {
+		return false, invalidInput("GitHub account ID must be positive")
+	}
+	command, err := s.pool.Exec(ctx, `UPDATE github_role_mappings SET github_user_id=$2 WHERE id=$1::uuid AND kind='user' AND github_user_id IS NULL AND NOT EXISTS (SELECT 1 FROM github_role_mappings WHERE github_user_id=$2)`, id, githubUserID)
+	if err != nil {
+		return false, classifyWriteError("bind GitHub user rule", err)
+	}
+	return command.RowsAffected() == 1, nil
+}
+
 // ErrGitHubRoleMappingNotFound reports that no GitHub role mapping matches
 // the requested identifier.
 var ErrGitHubRoleMappingNotFound = errors.New("GitHub role mapping not found")
 
-func (s *Store) DeleteGitHubRoleMapping(ctx context.Context, id string) error {
-	command, err := s.pool.Exec(ctx, `DELETE FROM github_role_mappings WHERE id=$1::uuid`, id)
+// DeleteGitHubRoleMapping removes an access rule and returns it, so the caller
+// can end the sessions of the accounts that may have held a role through it.
+func (s *Store) DeleteGitHubRoleMapping(ctx context.Context, id string) (GitHubRoleMapping, error) {
+	var mapping GitHubRoleMapping
+	err := s.pool.QueryRow(ctx, `DELETE FROM github_role_mappings WHERE id=$1::uuid RETURNING id::text,kind,target,COALESCE(github_user_id,0),role,created_at`, id).
+		Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.GitHubUserID, &mapping.Role, &mapping.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return GitHubRoleMapping{}, ErrGitHubRoleMappingNotFound
+	}
 	if err != nil {
-		return fmt.Errorf("delete GitHub role mapping: %w", err)
+		return GitHubRoleMapping{}, fmt.Errorf("delete GitHub role mapping: %w", err)
 	}
-	if command.RowsAffected() != 1 {
-		return ErrGitHubRoleMappingNotFound
+	return mapping, nil
+}
+
+// GitHubAccountsPossiblyGrantedBy lists the active GitHub-federated accounts
+// that may hold a role through an access rule. A user rule names one account.
+// Organization and team membership is only known to GitHub at sign-in, so
+// for those every GitHub account currently holding the rule's role is
+// listed; ending their sessions makes each one sign in again and be
+// re-evaluated against the rules that remain.
+func (s *Store) GitHubAccountsPossiblyGrantedBy(ctx context.Context, mapping GitHubRoleMapping) ([]string, error) {
+	var rows pgx.Rows
+	var err error
+	switch {
+	case mapping.Kind == "user" && mapping.GitHubUserID > 0:
+		rows, err = s.pool.Query(ctx, `SELECT id::text FROM users WHERE github_id=$1 AND disabled_at IS NULL`, mapping.GitHubUserID)
+	case mapping.Kind == "user":
+		rows, err = s.pool.Query(ctx, `SELECT id::text FROM users WHERE lower(github_login)=lower($1) AND disabled_at IS NULL`, mapping.Target)
+	default:
+		rows, err = s.pool.Query(ctx, `SELECT id::text FROM users WHERE github_id IS NOT NULL AND role=$1 AND disabled_at IS NULL`, mapping.Role)
 	}
-	return nil
+	if err != nil {
+		return nil, fmt.Errorf("list accounts granted by a GitHub rule: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// GitHubUserID returns the account federated with a GitHub numeric ID.
+func (s *Store) GitHubUserID(ctx context.Context, githubID int64) (string, error) {
+	var userID string
+	err := s.pool.QueryRow(ctx, `SELECT id::text FROM users WHERE github_id=$1`, githubID).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUserNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("read user by GitHub ID: %w", err)
+	}
+	return userID, nil
 }
 
 func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedApp, error) {
@@ -1125,7 +1181,8 @@ func (s *Store) ExpireAbandonedAppValidation(ctx context.Context, now time.Time)
 	return nil
 }
 
-func validateGitHubRoleMapping(kind, target string, role Role) error {
+// ValidateGitHubRoleMapping checks an access rule before anything acts on it.
+func ValidateGitHubRoleMapping(kind, target string, role Role) error {
 	if kind != "user" && kind != "organization" && kind != "team" {
 		return invalidInput("GitHub mapping kind must be user, organization, or team")
 	}
@@ -1541,7 +1598,7 @@ type rowQuerier interface {
 func insertUser(ctx context.Context, db rowQuerier, id, username, email string, emailVerified bool, hash []byte, githubID *int64, githubLogin string, role Role) (User, error) {
 	var user User
 	err := db.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,github_id,github_login,role,created_at)
-	VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at`, id, username, email, emailVerified, hash, githubID, nullable(githubLogin), role).
+	VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at`, id, username, email, emailVerified, hash, githubID, nullable(githubLogin), role).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err != nil {
 		return User{}, classifyWriteError("create user", err)
@@ -1567,7 +1624,7 @@ const (
 func (s *Store) AuthenticatePassword(ctx context.Context, username, password string) (User, string, error) {
 	var user User
 	var hash []byte
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at,password_hash FROM users WHERE username=$1 AND is_validation=FALSE`, strings.TrimSpace(username)).
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at,password_hash FROM users WHERE username=$1 AND is_validation=FALSE`, strings.TrimSpace(username)).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt, &hash)
 	refused := fmt.Errorf("invalid username or password")
 	switch {
@@ -1636,34 +1693,74 @@ func equalizePasswordTiming(password string) {
 	_ = bcrypt.CompareHashAndPassword(timingReferenceHash(), []byte(password))
 }
 
-func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, login, email string, role Role) (User, error) {
+// FindOrCreateGitHubUser signs a GitHub account in by its numeric ID,
+// bringing the recorded login, verified email and role up to date. It reports
+// whether the account lost its administrator role, so the caller can end the
+// sessions and tokens that still carry it.
+func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, login, email string, role Role) (User, bool, error) {
 	login = strings.TrimSpace(login)
 	email = strings.ToLower(strings.TrimSpace(email))
+	if githubID <= 0 || login == "" {
+		return User{}, false, fmt.Errorf("GitHub account must provide an ID and a login")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return User{}, false, fmt.Errorf("begin GitHub sign-in: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	// GitHub gives a login up when its account is renamed and may hand it to
+	// someone else. The account that now holds it is the one signing in, so
+	// the login is released from whichever account recorded it before.
+	if _, err := tx.Exec(ctx, `UPDATE users SET github_login=NULL WHERE lower(github_login)=lower($1) AND github_id IS DISTINCT FROM $2`, login, githubID); err != nil {
+		return User{}, false, fmt.Errorf("release renamed GitHub login: %w", err)
+	}
 	var user User
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at FROM users WHERE github_id=$1`, githubID).
+	err = tx.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at FROM users WHERE github_id=$1 FOR UPDATE`, githubID).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return User{}, false, fmt.Errorf("find GitHub user: %w", err)
+	}
 	if err == nil {
 		if user.DisabledAt != nil {
-			return User{}, fmt.Errorf("user is disabled")
+			return User{}, false, ErrUserInactive
 		}
-		if user.Role != role || user.Email != email || !user.EmailVerified {
-			_, err = s.pool.Exec(ctx, `UPDATE users SET role=$2,email=$3,email_verified=TRUE WHERE id=$1::uuid`, user.ID, role, email)
-			if err != nil {
-				return User{}, fmt.Errorf("synchronize GitHub user: %w", err)
+		demoted := user.Role == RoleAdmin && role != RoleAdmin
+		if user.Role != role || user.Email != email || !user.EmailVerified || user.GitHubLogin != login {
+			if email == "" {
+				email = user.Email
 			}
-			user.Role = role
-			user.Email = email
-			user.EmailVerified = true
+			if _, err := tx.Exec(ctx, `UPDATE users SET role=$2,email=$3,email_verified=TRUE,github_login=$4 WHERE id=$1::uuid`, user.ID, role, email, login); err != nil {
+				return User{}, false, classifyWriteError("synchronize GitHub user", err)
+			}
+			user.Role, user.Email, user.EmailVerified, user.GitHubLogin = role, email, true, login
 		}
-		return user, nil
+		if err := tx.Commit(ctx); err != nil {
+			return User{}, false, fmt.Errorf("commit GitHub sign-in: %w", err)
+		}
+		return user, demoted, nil
 	}
-	if err != pgx.ErrNoRows {
-		return User{}, fmt.Errorf("find GitHub user: %w", err)
+	if email == "" {
+		return User{}, false, fmt.Errorf("GitHub account must provide a verified email")
 	}
-	if login == "" || email == "" {
-		return User{}, fmt.Errorf("GitHub account must provide login and verified email")
+	// The username starts as the login. A login GitHub reassigned after a
+	// rename can still be another account's username here, so the new
+	// account is named by its permanent ID instead of failing to sign in.
+	username := login
+	var taken bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE username=$1)`, login).Scan(&taken); err != nil {
+		return User{}, false, fmt.Errorf("check GitHub username: %w", err)
 	}
-	return insertUser(ctx, s.pool, randomUUID(), login, email, true, nil, &githubID, login, role)
+	if taken {
+		username = fmt.Sprintf("github-%d", githubID)
+	}
+	user, err = insertUser(ctx, tx, randomUUID(), username, email, true, nil, &githubID, login, role)
+	if err != nil {
+		return User{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, false, fmt.Errorf("commit GitHub sign-in: %w", err)
+	}
+	return user, false, nil
 }
 
 func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, username, email string, emailVerified bool) (User, error) {
@@ -1687,8 +1784,11 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 	// Linking by email trusts the address on both sides: Entra must verify
 	// the claim it sent, and the existing account's address must itself be
 	// verified. A mutable, unverified mail attribute or UPN that happens to
-	// equal another account's address must never inherit that account.
-	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND $4 AND email_verified AND entra_tenant_id IS NULL AND disabled_at IS NULL AND is_validation=FALSE RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
+	// equal another account's address must never inherit that account. A
+	// GitHub account is never linked: its email is whatever GitHub last
+	// reported, and its role follows GitHub's access rules, which an Entra
+	// sign-in would bypass.
+	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND $4 AND email_verified AND entra_tenant_id IS NULL AND github_id IS NULL AND disabled_at IS NULL AND is_validation=FALSE RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		return user, nil
@@ -1784,7 +1884,7 @@ func (s *Store) ListUsers(ctx context.Context, query string, page Page) ([]User,
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%'`, query).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count users: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, query, page.Limit, page.Offset)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, query, page.Limit, page.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
@@ -1804,6 +1904,11 @@ func (s *Store) ListUsers(ctx context.Context, query string, page Page) ([]User,
 func federatedIdentityLabel(source, githubLogin string) string {
 	switch source {
 	case IdentitySourceGitHub:
+		if githubLogin == "" {
+			// The login was renamed and since claimed by another account;
+			// the current one is recorded at this account's next sign-in.
+			return "GitHub"
+		}
 		return "GitHub: " + githubLogin
 	case IdentitySourceEntra:
 		return "Microsoft Entra ID"
@@ -1981,7 +2086,7 @@ func (s *Store) EnableUser(ctx context.Context, userID string, now time.Time) er
 
 func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
 	var user User
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_login IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE id=$1::uuid`, id).
+	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE id=$1::uuid`, id).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrUserNotFound
