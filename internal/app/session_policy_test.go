@@ -76,7 +76,9 @@ func TestHydraClientLifespansChangesRealTokenLifespans(t *testing.T) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result["authorization_code_grant_access_token_lifespan"] != "15m0s" || result["authorization_code_grant_refresh_token_lifespan"] != "720h0m0s" {
-		t.Fatalf("Hydra lifespans = %#v", result)
+	for _, grant := range []string{"authorization_code_grant", "refresh_token_grant"} {
+		if result[grant+"_access_token_lifespan"] != "15m0s" || result[grant+"_id_token_lifespan"] != "15m0s" || result[grant+"_refresh_token_lifespan"] != "720h0m0s" {
+			t.Fatalf("Hydra lifespans for %s = %#v", grant, result)
+		}
 	}
 }

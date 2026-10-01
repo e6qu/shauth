@@ -998,6 +998,8 @@ refresh_refused() {
 	refusal_status=$(printf '%s' "$refusal" | tail -n 1)
 	case "$refusal_status" in
 		400|401) ;;
+		# The token hook refused it: Hydra reports access_denied.
+		403) printf '%s' "$refusal" | grep -q '"error":"access_denied"' || return 1 ;;
 		*) echo "refresh token was not refused with an OAuth error: HTTP ${refusal_status}" >&2; return 1 ;;
 	esac
 	printf '%s' "$refusal" | grep -q '"error":"'
@@ -1209,6 +1211,51 @@ curl --fail --silent --show-error \
 	--data-urlencode "client_secret=${auto_consent_client_secret}" \
 	"${SHAUTH_PUBLIC_URL}"/oauth2/revoke >/dev/null
 refresh_refused "$revocable_refresh_token"
+# Ending one sign-in session ends the tokens issued under it, even though the
+# account stays active: Hydra keeps refresh tokens alive when only its login
+# session is removed, so the token hook refuses them by their sid. A second
+# browser signs in, the application gets tokens through it, and an
+# administrator ends just that session from the first browser.
+printf '%s\n' 'ending one sign-in session stops its refresh tokens'
+single_session_jar=$(mktemp)
+single_session_agent='shauth-stack single-session revocation'
+curl --fail --silent --show-error --output /dev/null --user-agent "$single_session_agent" --cookie-jar "$single_session_jar" "${SHAUTH_PUBLIC_URL}"/login
+single_session_csrf=$(awk '$6 == "shauth_csrf" { print $7 }' "$single_session_jar")
+curl --fail --silent --show-error --output /dev/null --location --user-agent "$single_session_agent" --cookie-jar "$single_session_jar" --cookie "$single_session_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+	--data-urlencode "_csrf=${single_session_csrf}" \
+	--data-urlencode 'username=admin' \
+	--data-urlencode "password=${SHAUTH_BOOTSTRAP_ADMIN_PASSWORD}" \
+	--data-urlencode 'next=/' \
+	"${SHAUTH_PUBLIC_URL}"/login
+single_session_location="${SHAUTH_PUBLIC_URL}/oauth2/auth?client_id=${auto_consent_client_id}&response_type=code&scope=openid%20offline_access&redirect_uri=http%3A%2F%2Flocalhost%3A5570%2Fcallback&state=single-session"
+single_session_hops=0
+while :; do
+	single_session_location=$(curl --fail --silent --show-error --dump-header - --output /dev/null --user-agent "$single_session_agent" --cookie-jar "$single_session_jar" --cookie "$single_session_jar" "$single_session_location" |
+		awk '/^[Ll]ocation:/{sub(/\r$/, "", $2); print $2}')
+	case "$single_session_location" in
+		"${auto_consent_redirect_uri}"?*) break ;;
+		"${SHAUTH_PUBLIC_URL}"/*) ;;
+		*) echo "single-session grant left the expected flow at: ${single_session_location}" >&2; exit 1 ;;
+	esac
+	single_session_hops=$((single_session_hops + 1))
+	[ "$single_session_hops" -le 8 ]
+done
+single_session_code=$(printf '%s' "$single_session_location" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+single_session_refresh_token=$(curl --fail --silent --show-error \
+	--data-urlencode 'grant_type=authorization_code' \
+	--data-urlencode "code=${single_session_code}" \
+	--data-urlencode "redirect_uri=${auto_consent_redirect_uri}" \
+	--data-urlencode "client_id=${auto_consent_client_id}" \
+	--data-urlencode "client_secret=${auto_consent_client_secret}" \
+	"${SHAUTH_PUBLIC_URL}"/oauth2/token | sed -n 's/.*"refresh_token":"\([^"]*\)".*/\1/p')
+[ -n "$single_session_refresh_token" ]
+single_session_id=$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT id FROM sessions WHERE user_agent='${single_session_agent}' AND revoked_at IS NULL")
+[ -n "$single_session_id" ]
+curl --fail --silent --show-error --output /dev/null --cookie "$cookie_jar" --header "Origin: ${SHAUTH_PUBLIC_URL}" \
+	--data-urlencode "_csrf=${csrf_token}" --data-urlencode 'return_to=/admin/sessions' \
+	"${SHAUTH_PUBLIC_URL}/admin/sessions/${single_session_id}/revoke"
+refresh_refused "$single_session_refresh_token"
+rm -f "$single_session_jar"
 # The first grant still refreshes; keep its rotated token for the
 # subject-wide invalidation check below.
 refresh_token=$(curl --fail --silent --show-error \

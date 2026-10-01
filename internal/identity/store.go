@@ -213,6 +213,58 @@ func NewStore(pool *pgxpool.Pool) (*Store, error) {
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
+// database is what the store's queries run against: the pool, or the
+// transaction of an advisory lock the caller holds.
+type database interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+type lockTransactionKey struct{}
+
+// db returns the transaction of the advisory lock held by this call chain,
+// if any, so the work done under the lock uses the lock's own connection.
+// Taking a second pooled connection while holding the first deadlocks the
+// pool once as many callers wait on the lock as the pool has connections.
+// A transaction a store method begins inside it becomes a savepoint.
+func (s *Store) db(ctx context.Context) database {
+	if tx, ok := ctx.Value(lockTransactionKey{}).(pgx.Tx); ok {
+		return tx
+	}
+	return s.pool
+}
+
+// advisoryLockWait bounds how long a caller queues behind another holder of
+// the same lock before giving up with an error.
+const advisoryLockWait = "30s"
+
+// withTransactionLock runs run while holding a transaction-scoped advisory
+// lock. Everything run does through the store joins that transaction, which
+// commits only if run succeeds, and PostgreSQL releases the lock even if this
+// process dies.
+func (s *Store) withTransactionLock(ctx context.Context, what, lockSQL string, run func(context.Context) error, arguments ...any) error {
+	tx, err := s.db(ctx).Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin %s lock: %w", what, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '`+advisoryLockWait+`'`); err != nil {
+		return fmt.Errorf("bound %s lock wait: %w", what, err)
+	}
+	if _, err := tx.Exec(ctx, lockSQL, arguments...); err != nil {
+		return fmt.Errorf("lock %s: %w", what, err)
+	}
+	if err := run(context.WithValue(ctx, lockTransactionKey{}, tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit %s lock: %w", what, err)
+	}
+	return nil
+}
+
 // LockBootstrapManagedApps serializes the cross-system PostgreSQL/Ory Hydra
 // reconciliation performed by every Shauth replica during startup.
 // The wait is bounded: a replica stuck holding the lock must make the others
@@ -240,7 +292,7 @@ func (s *Store) LockBootstrapManagedApps(ctx context.Context) (func(), error) {
 func (s *Store) SessionPolicy(ctx context.Context) (SessionPolicy, error) {
 	var absoluteSeconds, idleSeconds, oidcSeconds, accessSeconds, idSeconds, refreshSeconds int64
 	var updatedAt time.Time
-	err := s.pool.QueryRow(ctx, `SELECT browser_absolute_lifetime_seconds,browser_idle_timeout_seconds,oidc_session_lifetime_seconds,access_token_lifetime_seconds,id_token_lifetime_seconds,refresh_token_lifetime_seconds,updated_at FROM session_policy WHERE singleton=TRUE`).
+	err := s.db(ctx).QueryRow(ctx, `SELECT browser_absolute_lifetime_seconds,browser_idle_timeout_seconds,oidc_session_lifetime_seconds,access_token_lifetime_seconds,id_token_lifetime_seconds,refresh_token_lifetime_seconds,updated_at FROM session_policy WHERE singleton=TRUE`).
 		Scan(&absoluteSeconds, &idleSeconds, &oidcSeconds, &accessSeconds, &idSeconds, &refreshSeconds, &updatedAt)
 	if err != nil {
 		return SessionPolicy{}, fmt.Errorf("read session policy: %w", err)
@@ -268,7 +320,7 @@ func (s *Store) UpdateSessionPolicy(ctx context.Context, policy SessionPolicy) (
 	if err := policy.Validate(); err != nil {
 		return time.Time{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("begin session policy update: %w", err)
 	}
@@ -305,7 +357,7 @@ func (s *Store) EnsureInitialGitHubRoleMappings(ctx context.Context, developerTe
 	if err := ValidateGitHubRoleMapping("team", adminTeam, RoleAdmin); err != nil {
 		return err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin initial GitHub mappings: %w", err)
 	}
@@ -347,7 +399,7 @@ func (s *Store) CreateGitHubRoleMapping(ctx context.Context, kind, target string
 	if githubUserID > 0 {
 		userID = &githubUserID
 	}
-	err := s.pool.QueryRow(ctx, `INSERT INTO github_role_mappings (id,kind,target,github_user_id,role,created_at) VALUES ($1::uuid,$2,$3,$4,$5,now()) RETURNING id::text,kind,target,COALESCE(github_user_id,0),role,created_at`, randomUUID(), kind, normalizeGitHubTarget(kind, target), userID, role).
+	err := s.db(ctx).QueryRow(ctx, `INSERT INTO github_role_mappings (id,kind,target,github_user_id,role,created_at) VALUES ($1::uuid,$2,$3,$4,$5,now()) RETURNING id::text,kind,target,COALESCE(github_user_id,0),role,created_at`, randomUUID(), kind, normalizeGitHubTarget(kind, target), userID, role).
 		Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.GitHubUserID, &mapping.Role, &mapping.CreatedAt)
 	if err != nil {
 		return GitHubRoleMapping{}, classifyWriteError("create GitHub role mapping", err)
@@ -356,7 +408,7 @@ func (s *Store) CreateGitHubRoleMapping(ctx context.Context, kind, target string
 }
 
 func (s *Store) ListGitHubRoleMappings(ctx context.Context) ([]GitHubRoleMapping, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,target,COALESCE(github_user_id,0),role,created_at FROM github_role_mappings ORDER BY kind,target`)
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,kind,target,COALESCE(github_user_id,0),role,created_at FROM github_role_mappings ORDER BY kind,target`)
 	if err != nil {
 		return nil, fmt.Errorf("list GitHub role mappings: %w", err)
 	}
@@ -379,7 +431,7 @@ func (s *Store) BindGitHubUserMapping(ctx context.Context, id string, githubUser
 	if githubUserID <= 0 {
 		return false, invalidInput("GitHub account ID must be positive")
 	}
-	command, err := s.pool.Exec(ctx, `UPDATE github_role_mappings SET github_user_id=$2 WHERE id=$1::uuid AND kind='user' AND github_user_id IS NULL AND NOT EXISTS (SELECT 1 FROM github_role_mappings WHERE github_user_id=$2)`, id, githubUserID)
+	command, err := s.db(ctx).Exec(ctx, `UPDATE github_role_mappings SET github_user_id=$2 WHERE id=$1::uuid AND kind='user' AND github_user_id IS NULL AND NOT EXISTS (SELECT 1 FROM github_role_mappings WHERE github_user_id=$2)`, id, githubUserID)
 	if err != nil {
 		return false, classifyWriteError("bind GitHub user rule", err)
 	}
@@ -394,7 +446,7 @@ var ErrGitHubRoleMappingNotFound = errors.New("GitHub role mapping not found")
 // can end the sessions of the accounts that may have held a role through it.
 func (s *Store) DeleteGitHubRoleMapping(ctx context.Context, id string) (GitHubRoleMapping, error) {
 	var mapping GitHubRoleMapping
-	err := s.pool.QueryRow(ctx, `DELETE FROM github_role_mappings WHERE id=$1::uuid RETURNING id::text,kind,target,COALESCE(github_user_id,0),role,created_at`, id).
+	err := s.db(ctx).QueryRow(ctx, `DELETE FROM github_role_mappings WHERE id=$1::uuid RETURNING id::text,kind,target,COALESCE(github_user_id,0),role,created_at`, id).
 		Scan(&mapping.ID, &mapping.Kind, &mapping.Target, &mapping.GitHubUserID, &mapping.Role, &mapping.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return GitHubRoleMapping{}, ErrGitHubRoleMappingNotFound
@@ -416,11 +468,11 @@ func (s *Store) GitHubAccountsPossiblyGrantedBy(ctx context.Context, mapping Git
 	var err error
 	switch {
 	case mapping.Kind == "user" && mapping.GitHubUserID > 0:
-		rows, err = s.pool.Query(ctx, `SELECT id::text FROM users WHERE github_id=$1 AND disabled_at IS NULL`, mapping.GitHubUserID)
+		rows, err = s.db(ctx).Query(ctx, `SELECT id::text FROM users WHERE github_id=$1 AND disabled_at IS NULL`, mapping.GitHubUserID)
 	case mapping.Kind == "user":
-		rows, err = s.pool.Query(ctx, `SELECT id::text FROM users WHERE lower(github_login)=lower($1) AND disabled_at IS NULL`, mapping.Target)
+		rows, err = s.db(ctx).Query(ctx, `SELECT id::text FROM users WHERE lower(github_login)=lower($1) AND disabled_at IS NULL`, mapping.Target)
 	default:
-		rows, err = s.pool.Query(ctx, `SELECT id::text FROM users WHERE github_id IS NOT NULL AND role=$1 AND disabled_at IS NULL`, mapping.Role)
+		rows, err = s.db(ctx).Query(ctx, `SELECT id::text FROM users WHERE github_id IS NOT NULL AND role=$1 AND disabled_at IS NULL`, mapping.Role)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list accounts granted by a GitHub rule: %w", err)
@@ -431,7 +483,7 @@ func (s *Store) GitHubAccountsPossiblyGrantedBy(ctx context.Context, mapping Git
 // GitHubUserID returns the account federated with a GitHub numeric ID.
 func (s *Store) GitHubUserID(ctx context.Context, githubID int64) (string, error) {
 	var userID string
-	err := s.pool.QueryRow(ctx, `SELECT id::text FROM users WHERE github_id=$1`, githubID).Scan(&userID)
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text FROM users WHERE github_id=$1`, githubID).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrUserNotFound
 	}
@@ -446,7 +498,7 @@ func (s *Store) CreateManagedApp(ctx context.Context, app ManagedApp) (ManagedAp
 	if err := ValidateManagedApp(app); err != nil {
 		return ManagedApp{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("begin create managed app: %w", err)
 	}
@@ -471,7 +523,7 @@ func (s *Store) ReconcileBootstrapManagedApp(ctx context.Context, app ManagedApp
 	if err := ValidateManagedApp(app); err != nil {
 		return ManagedApp{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("begin reconcile bootstrap managed app: %w", err)
 	}
@@ -522,7 +574,7 @@ func (s *Store) ReconcileManagedAppOIDCContract(ctx context.Context, appID, cont
 	if !oidcContractHashPattern.MatchString(contractHash) {
 		return fmt.Errorf("managed app OIDC registration contract hash is invalid")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin managed app OIDC registration reconciliation: %w", err)
 	}
@@ -606,7 +658,7 @@ func managedAppValidationContractHash(app ManagedApp, witness *ManagedApp) strin
 // Either coordinate belonging to a different record is an ownership conflict.
 func (s *Store) ValidateBootstrapManagedAppOwnership(ctx context.Context, app ManagedApp) (bool, error) {
 	app = normalizeManagedApp(app)
-	rows, err := s.pool.Query(ctx, `SELECT slug,oidc_client_id FROM managed_apps WHERE slug=$1 OR oidc_client_id=$2`, app.Slug, app.OIDCClientID)
+	rows, err := s.db(ctx).Query(ctx, `SELECT slug,oidc_client_id FROM managed_apps WHERE slug=$1 OR oidc_client_id=$2`, app.Slug, app.OIDCClientID)
 	if err != nil {
 		return false, fmt.Errorf("query bootstrap managed app ownership: %w", err)
 	}
@@ -644,7 +696,7 @@ func normalizeManagedApp(app ManagedApp) ManagedApp {
 }
 
 func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps ORDER BY name`)
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list managed apps: %w", err)
 	}
@@ -664,7 +716,7 @@ func (s *Store) ListManagedApps(ctx context.Context) ([]ManagedApp, error) {
 // Shauth administrators have explicitly enrolled as an e6qu service.
 func (s *Store) IsManagedOIDCClient(ctx context.Context, clientID string) (bool, error) {
 	var managed bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_apps WHERE oidc_client_id=$1)`, strings.TrimSpace(clientID)).Scan(&managed); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_apps WHERE oidc_client_id=$1)`, strings.TrimSpace(clientID)).Scan(&managed); err != nil {
 		return false, fmt.Errorf("check managed OAuth client: %w", err)
 	}
 	return managed, nil
@@ -672,7 +724,7 @@ func (s *Store) IsManagedOIDCClient(ctx context.Context, clientID string) (bool,
 
 func (s *Store) ManagedApp(ctx context.Context, id string) (ManagedApp, error) {
 	var app ManagedApp
-	err := s.pool.QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text,slug,name,description,launch_url,oidc_client_id,oidc_contract_hash,health_url,COALESCE(monitoring_url,''),validation_url,signed_out_url,release_revision,created_at FROM managed_apps WHERE id=$1::uuid`, id).Scan(&app.ID, &app.Slug, &app.Name, &app.Description, &app.LaunchURL, &app.OIDCClientID, &app.OIDCContractHash, &app.HealthURL, &app.MonitoringURL, &app.ValidationURL, &app.SignedOutURL, &app.ReleaseRevision, &app.CreatedAt)
 	if err != nil {
 		return ManagedApp{}, fmt.Errorf("get managed app: %w", err)
 	}
@@ -694,7 +746,7 @@ func (s *Store) DeleteManagedApp(ctx context.Context, ref ManagedAppRef, deploym
 	if ref.All() {
 		return "", invalidInput("a managed app identifier or slug is required")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("begin delete managed app: %w", err)
 	}
@@ -738,15 +790,7 @@ const oidcClientLockSeed int64 = 0x53484f4944434c49
 // is transaction-scoped, so PostgreSQL releases it even if this process dies
 // mid-operation.
 func (s *Store) WithOIDCClientLock(ctx context.Context, clientID string, run func(context.Context) error) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin OAuth client lock: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,$2))`, strings.TrimSpace(clientID), oidcClientLockSeed); err != nil {
-		return fmt.Errorf("lock OAuth client: %w", err)
-	}
-	return run(ctx)
+	return s.withTransactionLock(ctx, "OAuth client", `SELECT pg_advisory_xact_lock(hashtextextended($1,$2))`, run, strings.TrimSpace(clientID), oidcClientLockSeed)
 }
 
 // sessionPolicyLockID names the advisory lock that serializes changes to the
@@ -757,20 +801,12 @@ const sessionPolicyLockID int64 = 0x5348415554485350
 // writes it into Ory Hydra, or changes it, holding a transaction-scoped
 // lock that PostgreSQL releases even if this process dies.
 func (s *Store) WithSessionPolicyLock(ctx context.Context, run func(context.Context) error) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin session policy lock: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, sessionPolicyLockID); err != nil {
-		return fmt.Errorf("lock session policy: %w", err)
-	}
-	return run(ctx)
+	return s.withTransactionLock(ctx, "session policy", `SELECT pg_advisory_xact_lock($1)`, run, sessionPolicyLockID)
 }
 
 func (s *Store) ManagedAppUsesOIDCClient(ctx context.Context, clientID string) (bool, error) {
 	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_apps WHERE oidc_client_id=$1)`, strings.TrimSpace(clientID)).Scan(&exists); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM managed_apps WHERE oidc_client_id=$1)`, strings.TrimSpace(clientID)).Scan(&exists); err != nil {
 		return false, fmt.Errorf("query managed app OAuth client: %w", err)
 	}
 	return exists, nil
@@ -901,7 +937,7 @@ func (ref ManagedAppRef) All() bool { return ref.ID == "" && ref.Slug == "" }
 // into one queue entry per direction. requestedBy records the operator who
 // asked for the run and is empty for token-authorized callers.
 func (s *Store) EnqueueAppValidations(ctx context.Context, ref ManagedAppRef, requestedBy string, now time.Time) ([]string, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin enqueue application validations: %w", err)
 	}
@@ -936,7 +972,7 @@ func (s *Store) EnqueueAppValidations(ctx context.Context, ref ManagedAppRef, re
 // LatestAppValidationRuns returns the most recent durable result for each app
 // and direction, including queued and running work.
 func (s *Store) LatestAppValidationRuns(ctx context.Context) (map[string]map[string]AppValidationRun, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db(ctx).Query(ctx, `
 		SELECT DISTINCT ON (r.managed_app_id,r.direction)
 			r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.validation_contract_hash,r.status,
 			r.requested_at,r.started_at,r.completed_at,r.duration_milliseconds,r.failure,
@@ -964,7 +1000,7 @@ func (s *Store) LatestAppValidationRuns(ctx context.Context) (map[string]map[str
 // LatestAppValidationRunsForApp returns the most recent durable result for one
 // app in each direction without scanning other app histories.
 func (s *Store) LatestAppValidationRunsForApp(ctx context.Context, appID string) (map[string]AppValidationRun, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db(ctx).Query(ctx, `
 		SELECT DISTINCT ON (r.direction)
 			r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.validation_contract_hash,r.status,
 			r.requested_at,r.started_at,r.completed_at,r.duration_milliseconds,r.failure,
@@ -990,7 +1026,7 @@ func (s *Store) LatestAppValidationRunsForApp(ctx context.Context, appID string)
 // AppValidationRunHistory returns durable validation runs ordered newest
 // first, optionally filtered to one app slug.
 func (s *Store) AppValidationRunHistory(ctx context.Context, slug string, limit int) ([]AppValidationRun, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db(ctx).Query(ctx, `
 		SELECT
 			r.id::text,r.managed_app_id::text,r.app_slug,r.app_name,r.oidc_client_id,r.launch_url,r.validation_url,r.signed_out_url,r.direction,r.release_revision,r.validation_contract_hash,r.status,
 			r.requested_at,r.started_at,r.completed_at,r.duration_milliseconds,r.failure,
@@ -1055,7 +1091,7 @@ const appValidationLeaseDuration = 30 * time.Minute
 // deploy that recreates every container mid-check) is reaped inline here
 // rather than left to block that slot indefinitely.
 func (s *Store) ClaimAppValidation(ctx context.Context, now time.Time) (*AppValidationRun, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim application validation: %w", err)
 	}
@@ -1168,7 +1204,7 @@ func (s *Store) CompleteAppValidation(ctx context.Context, runID, status, failur
 		return fmt.Errorf("application validation result must be passed or failed")
 	}
 	failure = truncateUTF8(failure, 1000)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin complete application validation: %w", err)
 	}
@@ -1192,7 +1228,7 @@ func (s *Store) CompleteAppValidation(ctx context.Context, runID, status, failur
 // ExpireAbandonedAppValidation records a durable failure when a worker did not
 // complete its leased browser check. A later worker can then claim the queue.
 func (s *Store) ExpireAbandonedAppValidation(ctx context.Context, now time.Time) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin expire application validation: %w", err)
 	}
@@ -1325,7 +1361,7 @@ func (s *Store) CreatePasswordUser(ctx context.Context, username, email, passwor
 	if role != RoleDeveloper && role != RoleAdmin {
 		return User{}, invalidInput("invalid role")
 	}
-	return insertUser(ctx, s.pool, randomUUID(), username, email, true, hash, nil, "", role)
+	return insertUser(ctx, s.db(ctx), randomUUID(), username, email, true, hash, nil, "", role)
 }
 
 // passwordCredential validates and hashes a local credential before any
@@ -1367,7 +1403,7 @@ func (s *Store) EnsureBootstrapAdmin(ctx context.Context, email, password string
 	}
 	username := strings.Split(email, "@")[0]
 	var user User
-	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,created_at)
+	err = s.db(ctx).QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,created_at)
 	VALUES ($1::uuid,$2,$3,TRUE,$4,'admin',now())
 	ON CONFLICT (email) DO UPDATE SET password_hash=EXCLUDED.password_hash,email_verified=TRUE,role='admin'
 	WHERE users.is_validation=FALSE
@@ -1401,7 +1437,7 @@ func (s *Store) EnsureValidationUsers(ctx context.Context, username, email strin
 	if atSign < 1 {
 		return nil, fmt.Errorf("validation email is invalid")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin validation user provisioning: %w", err)
 	}
@@ -1449,7 +1485,7 @@ func (s *Store) CreateValidationBrowserBootstraps(ctx context.Context, runID str
 	if len(nextPaths) == 0 || len(nextPaths) > 3 {
 		return nil, fmt.Errorf("one to three validation browser bootstraps are required")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin validation browser bootstrap creation: %w", err)
 	}
@@ -1493,7 +1529,7 @@ func (s *Store) ConsumeValidationBrowserBootstrap(ctx context.Context, raw strin
 	hash := sha256.Sum256([]byte(raw))
 	var user User
 	var nextPath string
-	err := s.pool.QueryRow(ctx, `UPDATE validation_browser_bootstraps bootstrap
+	err := s.db(ctx).QueryRow(ctx, `UPDATE validation_browser_bootstraps bootstrap
 		SET consumed_at=$2
 		FROM users
 		WHERE bootstrap.token_hash=$1
@@ -1525,7 +1561,7 @@ func (s *Store) CreateInvitation(ctx context.Context, email string, role Role, i
 	}
 	hash := sha256.Sum256([]byte(raw))
 	invitation := Invitation{ID: randomUUID(), Email: email, Role: role, State: InvitationPending, CreatedAt: now.UTC(), ExpiresAt: now.UTC().Add(7 * 24 * time.Hour), InvitedBy: invitedBy}
-	err = s.pool.QueryRow(ctx, `INSERT INTO invitations (id,email,role,token_hash,invited_by,created_at,expires_at) VALUES ($1::uuid,$2,$3,$4,$5::uuid,$6,$7) RETURNING id::text`, invitation.ID, email, role, hash[:], nullable(invitedBy), now.UTC(), invitation.ExpiresAt).Scan(&invitation.ID)
+	err = s.db(ctx).QueryRow(ctx, `INSERT INTO invitations (id,email,role,token_hash,invited_by,created_at,expires_at) VALUES ($1::uuid,$2,$3,$4,$5::uuid,$6,$7) RETURNING id::text`, invitation.ID, email, role, hash[:], nullable(invitedBy), now.UTC(), invitation.ExpiresAt).Scan(&invitation.ID)
 	if err != nil {
 		return "", Invitation{}, classifyWriteError("create invitation", err)
 	}
@@ -1546,7 +1582,7 @@ func (s *Store) AcceptInvitation(ctx context.Context, raw, username, password st
 		return User{}, err
 	}
 	tokenHash := sha256.Sum256([]byte(raw))
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return User{}, fmt.Errorf("begin invitation acceptance: %w", err)
 	}
@@ -1575,7 +1611,7 @@ func (s *Store) AcceptInvitation(ctx context.Context, raw, username, password st
 var ErrInvitationNotRevocable = errors.New("active invitation not found")
 
 func (s *Store) RevokeInvitation(ctx context.Context, id string, now time.Time) error {
-	command, err := s.pool.Exec(ctx, `UPDATE invitations SET revoked_at=$2 WHERE id=$1::uuid AND accepted_at IS NULL AND revoked_at IS NULL`, id, now.UTC())
+	command, err := s.db(ctx).Exec(ctx, `UPDATE invitations SET revoked_at=$2 WHERE id=$1::uuid AND accepted_at IS NULL AND revoked_at IS NULL`, id, now.UTC())
 	if err != nil {
 		return fmt.Errorf("revoke invitation: %w", err)
 	}
@@ -1595,7 +1631,7 @@ func (s *Store) InvitationState(ctx context.Context, raw string, now time.Time) 
 	}
 	hash := sha256.Sum256([]byte(raw))
 	var invitation Invitation
-	err := s.pool.QueryRow(ctx, `SELECT expires_at,accepted_at,revoked_at FROM invitations WHERE token_hash=$1`, hash[:]).
+	err := s.db(ctx).QueryRow(ctx, `SELECT expires_at,accepted_at,revoked_at FROM invitations WHERE token_hash=$1`, hash[:]).
 		Scan(&invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InvitationExpired, nil
@@ -1612,10 +1648,10 @@ func (s *Store) InvitationState(ctx context.Context, raw string, now time.Time) 
 func (s *Store) ListInvitations(ctx context.Context, now time.Time, page Page) ([]Invitation, int, error) {
 	page = page.normalized()
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM invitations`).Scan(&total); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM invitations`).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count invitations: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,email,role,created_at,expires_at,accepted_at,revoked_at,COALESCE(invited_by::text,'') FROM invitations ORDER BY created_at DESC, id LIMIT $1 OFFSET $2`, page.Limit, page.Offset)
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,email,role,created_at,expires_at,accepted_at,revoked_at,COALESCE(invited_by::text,'') FROM invitations ORDER BY created_at DESC, id LIMIT $1 OFFSET $2`, page.Limit, page.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list invitations: %w", err)
 	}
@@ -1668,7 +1704,7 @@ const (
 func (s *Store) AuthenticatePassword(ctx context.Context, username, password string) (User, string, error) {
 	var user User
 	var hash []byte
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at,password_hash FROM users WHERE username=$1 AND is_validation=FALSE`, strings.TrimSpace(username)).
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at,password_hash FROM users WHERE username=$1 AND is_validation=FALSE`, strings.TrimSpace(username)).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt, &hash)
 	refused := fmt.Errorf("invalid username or password")
 	switch {
@@ -1706,7 +1742,7 @@ const (
 func (s *Store) PasswordSignInThrottled(ctx context.Context, username string, address net.IP, now time.Time) (bool, error) {
 	since := now.UTC().Add(-PasswordFailureWindow)
 	var byUsername, byAddress int
-	if err := s.pool.QueryRow(ctx, `SELECT
+	if err := s.db(ctx).QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM audit_events WHERE event_type='sign_in.failed' AND details->>'method'='password' AND details->>'username'=$1 AND created_at>$3),
 		(SELECT count(*) FROM audit_events WHERE event_type='sign_in.failed' AND details->>'method'='password' AND $2::inet IS NOT NULL AND remote_address=$2::inet AND created_at>$3)`,
 		strings.TrimSpace(username), addressParameter(address), since).Scan(&byUsername, &byAddress); err != nil {
@@ -1747,7 +1783,7 @@ func (s *Store) FindOrCreateGitHubUser(ctx context.Context, githubID int64, logi
 	if githubID <= 0 || login == "" {
 		return User{}, false, fmt.Errorf("GitHub account must provide an ID and a login")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return User{}, false, fmt.Errorf("begin GitHub sign-in: %w", err)
 	}
@@ -1814,7 +1850,7 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 		return User{}, fmt.Errorf("Microsoft Entra ID account must provide tenant, object, username, and email claims")
 	}
 	var user User
-	err := s.pool.QueryRow(ctx, `UPDATE users SET email_verified=CASE WHEN email=$3 THEN email_verified OR $4 ELSE $4 END,email=$3 WHERE entra_tenant_id=$1::uuid AND entra_object_id=$2::uuid RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, tenantID, objectID, email, emailVerified).
+	err := s.db(ctx).QueryRow(ctx, `UPDATE users SET email_verified=CASE WHEN email=$3 THEN email_verified OR $4 ELSE $4 END,email=$3 WHERE entra_tenant_id=$1::uuid AND entra_object_id=$2::uuid RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, tenantID, objectID, email, emailVerified).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		if user.DisabledAt != nil {
@@ -1832,7 +1868,7 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 	// GitHub account is never linked: its email is whatever GitHub last
 	// reported, and its role follows GitHub's access rules, which an Entra
 	// sign-in would bypass.
-	err = s.pool.QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND $4 AND email_verified AND entra_tenant_id IS NULL AND github_id IS NULL AND disabled_at IS NULL AND is_validation=FALSE RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
+	err = s.db(ctx).QueryRow(ctx, `UPDATE users SET entra_tenant_id=$2::uuid,entra_object_id=$3::uuid,email_verified=email_verified OR $4 WHERE email=$1 AND $4 AND email_verified AND entra_tenant_id IS NULL AND github_id IS NULL AND disabled_at IS NULL AND is_validation=FALSE RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, email, tenantID, objectID, emailVerified).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err == nil {
 		return user, nil
@@ -1841,7 +1877,7 @@ func (s *Store) FindOrCreateEntraUser(ctx context.Context, tenantID, objectID, u
 		return User{}, fmt.Errorf("link Microsoft Entra ID user: %w", err)
 	}
 	id := randomUUID()
-	err = s.pool.QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,entra_tenant_id,entra_object_id,created_at) VALUES ($1::uuid,$2,$3,$4,NULL,'developer',$5::uuid,$6::uuid,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, emailVerified, tenantID, objectID).
+	err = s.db(ctx).QueryRow(ctx, `INSERT INTO users (id,username,email,email_verified,password_hash,role,entra_tenant_id,entra_object_id,created_at) VALUES ($1::uuid,$2,$3,$4,NULL,'developer',$5::uuid,$6::uuid,now()) RETURNING id::text,username,email,email_verified,COALESCE(github_login,''),role,disabled_at,created_at`, id, username, email, emailVerified, tenantID, objectID).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if err != nil {
 		return User{}, fmt.Errorf("create Microsoft Entra ID user: %w", err)
@@ -1862,7 +1898,7 @@ func (s *Store) CreateSession(ctx context.Context, userID, userAgent string, rem
 	id := randomUUID()
 	expiry := now.UTC().Add(policy.BrowserAbsoluteLifetime)
 	var session Session
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return "", Session{}, fmt.Errorf("begin session creation: %w", err)
 	}
@@ -1902,7 +1938,7 @@ func (s *Store) currentUser(ctx context.Context, raw string, now time.Time, touc
 	hash := sha256.Sum256([]byte(raw))
 	var user User
 	var session Session
-	err = s.pool.QueryRow(ctx, `SELECT u.id::text,u.username,u.email,u.email_verified,COALESCE(u.github_login,''),u.role,u.disabled_at,u.created_at,s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address
+	err = s.db(ctx).QueryRow(ctx, `SELECT u.id::text,u.username,u.email,u.email_verified,COALESCE(u.github_login,''),u.role,u.disabled_at,u.created_at,s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address
 	FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.browser_token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>$2 AND s.last_seen_at>$3 AND u.disabled_at IS NULL`, hash[:], now.UTC(), now.UTC().Add(-policy.BrowserIdleTimeout)).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.Role, &user.DisabledAt, &user.CreatedAt, &session.ID, &session.UserID, &session.CreatedAt, &session.LastSeen, &session.ExpiresAt, &session.RevokedAt, &session.UserAgent, &session.RemoteIP)
 	if err != nil {
@@ -1911,7 +1947,7 @@ func (s *Store) currentUser(ctx context.Context, raw string, now time.Time, touc
 	if !touch {
 		return user, session, nil
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE sessions SET last_seen_at=$2 WHERE id=$1::uuid`, session.ID, now.UTC())
+	_, err = s.db(ctx).Exec(ctx, `UPDATE sessions SET last_seen_at=$2 WHERE id=$1::uuid`, session.ID, now.UTC())
 	if err != nil {
 		return User{}, Session{}, fmt.Errorf("touch session: %w", err)
 	}
@@ -1925,10 +1961,10 @@ func (s *Store) ListUsers(ctx context.Context, query string, page Page) ([]User,
 	page = page.normalized()
 	query = strings.TrimSpace(query)
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%'`, query).Scan(&total); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%'`, query).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count users: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, query, page.Limit, page.Offset)
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE username ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR COALESCE(github_login,'') ILIKE '%' || $1 || '%' ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, query, page.Limit, page.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list users: %w", err)
 	}
@@ -2047,7 +2083,7 @@ var ErrValidationUserProtected = errors.New("the validation identity cannot be d
 // reports the remaining provider sessions, so a failed revocation can be
 // retried safely.
 func (s *Store) DisableUser(ctx context.Context, userID string, now time.Time) ([]string, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin account disable: %w", err)
 	}
@@ -2118,7 +2154,7 @@ func (s *Store) DisableUser(ctx context.Context, userID string, now time.Time) (
 // EnableUser restores a disabled account. It grants no session; the account
 // holder must authenticate again.
 func (s *Store) EnableUser(ctx context.Context, userID string, now time.Time) error {
-	command, err := s.pool.Exec(ctx, `UPDATE users SET disabled_at=NULL WHERE id=$1::uuid`, userID)
+	command, err := s.db(ctx).Exec(ctx, `UPDATE users SET disabled_at=NULL WHERE id=$1::uuid`, userID)
 	if err != nil {
 		return fmt.Errorf("enable account: %w", err)
 	}
@@ -2130,7 +2166,7 @@ func (s *Store) EnableUser(ctx context.Context, userID string, now time.Time) er
 
 func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
 	var user User
-	err := s.pool.QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE id=$1::uuid`, id).
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text,username,email,email_verified,COALESCE(github_login,''),CASE WHEN github_id IS NOT NULL THEN 'github' WHEN entra_object_id IS NOT NULL THEN 'entra' ELSE 'local' END,role,disabled_at,created_at FROM users WHERE id=$1::uuid`, id).
 		Scan(&user.ID, &user.Username, &user.Email, &user.EmailVerified, &user.GitHubLogin, &user.IdentitySource, &user.Role, &user.DisabledAt, &user.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrUserNotFound
@@ -2151,10 +2187,10 @@ func (s *Store) ListSessions(ctx context.Context, userID string, page Page) ([]S
 	}
 	page = page.normalized()
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE user_id=$1::uuid`, userID).Scan(&total); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM sessions WHERE user_id=$1::uuid`, userID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count sessions: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address FROM sessions WHERE user_id=$1::uuid ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, userID, page.Limit, page.Offset)
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address FROM sessions WHERE user_id=$1::uuid ORDER BY created_at DESC, id LIMIT $2 OFFSET $3`, userID, page.Limit, page.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list sessions: %w", err)
 	}
@@ -2220,10 +2256,10 @@ func (s *Store) ListAllSessions(ctx context.Context, filter SessionFilter, page 
 		since = filter.Since.UTC()
 	}
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions s `+where, user, since, filter.ActiveOnly, now, idleFrom).Scan(&total); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM sessions s `+where, user, since, filter.ActiveOnly, now, idleFrom).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count sessions: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address,u.username,u.email,u.role
+	rows, err := s.db(ctx).Query(ctx, `SELECT s.id::text,s.user_id::text,s.created_at,s.last_seen_at,s.expires_at,s.revoked_at,s.user_agent,s.remote_address,u.username,u.email,u.role
 		FROM sessions s JOIN users u ON u.id=s.user_id `+where+`
 		ORDER BY s.created_at DESC, s.id LIMIT $6 OFFSET $7`, user, since, filter.ActiveOnly, now, idleFrom, page.Limit, page.Offset)
 	if err != nil {
@@ -2252,7 +2288,7 @@ func (s *Store) RecordHydraLoginSession(ctx context.Context, browserSessionID, h
 	if err != nil {
 		return err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin Ory Hydra session recording: %w", err)
 	}
@@ -2308,6 +2344,27 @@ func (s *Store) RecordHydraLoginSession(ctx context.Context, browserSessionID, h
 	return nil
 }
 
+// ProviderSessionAccount reports the account behind an Ory Hydra login
+// session and whether the Shauth browser session it is correlated with is
+// still in force. A session ended by its owner, an administrator or a logout
+// is no longer in force even though Hydra may still hold tokens issued under
+// it; a session that merely aged out of the browser's idle or absolute limit
+// still is, because applications keep their own sessions after the person
+// stops visiting Shauth. ErrSessionNotFound means no browser session was ever
+// correlated with this provider session.
+func (s *Store) ProviderSessionAccount(ctx context.Context, hydraSessionID string) (string, bool, error) {
+	var userID string
+	var revokedAt *time.Time
+	err := s.db(ctx).QueryRow(ctx, `SELECT s.user_id::text,s.revoked_at FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id WHERE h.hydra_session_id=$1`, hydraSessionID).Scan(&userID, &revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, ErrSessionNotFound
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read provider session correlation: %w", err)
+	}
+	return userID, revokedAt == nil, nil
+}
+
 // RevalidateSession fences an accepted provider operation against concurrent
 // browser logout. It takes the same user-row lock as session creation and
 // logout snapshotting, then verifies the exact browser session remains active.
@@ -2316,7 +2373,7 @@ func (s *Store) RevalidateSession(ctx context.Context, userID, browserSessionID 
 	if err != nil {
 		return err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin browser session revalidation: %w", err)
 	}
@@ -2352,7 +2409,7 @@ func (s *Store) CreateLogoutCorrelationGrant(ctx context.Context, subjectID, bro
 	hash := sha256.Sum256([]byte(raw))
 	created := now.UTC()
 	grantID := randomUUID()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return "", LogoutCorrelationGrant{}, fmt.Errorf("begin logout correlation grant: %w", err)
 	}
@@ -2490,7 +2547,7 @@ func (s *Store) ConsumeLogoutCorrelationGrant(ctx context.Context, raw, subjectI
 	}
 	hash := sha256.Sum256([]byte(raw))
 	var grant LogoutCorrelationGrant
-	err := s.pool.QueryRow(ctx, `UPDATE logout_correlation_grants
+	err := s.db(ctx).QueryRow(ctx, `UPDATE logout_correlation_grants
 		SET consumed_at=$3,cleanup_after=$3+make_interval(secs => $4)
 		WHERE token_hash=$1
 		  AND subject_id=$2::uuid
@@ -2514,7 +2571,7 @@ func (s *Store) ConsumeLogoutCorrelationGrant(ctx context.Context, raw, subjectI
 func (s *Store) ClaimAbandonedLogoutCorrelationGrant(ctx context.Context, now time.Time) (*LogoutCorrelationGrant, error) {
 	observed := now.UTC()
 	var grant LogoutCorrelationGrant
-	err := s.pool.QueryRow(ctx, `WITH candidate AS (
+	err := s.db(ctx).QueryRow(ctx, `WITH candidate AS (
 		SELECT id FROM logout_correlation_grants
 		WHERE completed_at IS NULL
 		  AND cleanup_after<=$1
@@ -2547,7 +2604,7 @@ func (s *Store) ClaimConsumedLogoutCorrelationGrant(ctx context.Context, raw str
 	hash := sha256.Sum256([]byte(raw))
 	observed := now.UTC()
 	var grant LogoutCorrelationGrant
-	err := s.pool.QueryRow(ctx, `UPDATE logout_correlation_grants
+	err := s.db(ctx).QueryRow(ctx, `UPDATE logout_correlation_grants
 		SET cleanup_claimed_until=$2+make_interval(secs => $3),cleanup_attempts=cleanup_attempts+1
 		WHERE token_hash=$1
 		  AND consumed_at IS NOT NULL
@@ -2565,7 +2622,7 @@ func (s *Store) ClaimConsumedLogoutCorrelationGrant(ctx context.Context, raw str
 }
 
 func (s *Store) CompleteLogoutCorrelationGrant(ctx context.Context, id string, now time.Time) error {
-	command, err := s.pool.Exec(ctx, `UPDATE logout_correlation_grants
+	command, err := s.db(ctx).Exec(ctx, `UPDATE logout_correlation_grants
 		SET completed_at=$2,cleanup_claimed_until=NULL,last_error=''
 		WHERE id=$1::uuid AND completed_at IS NULL`, id, now.UTC())
 	if err != nil {
@@ -2581,7 +2638,7 @@ func (s *Store) FailLogoutCorrelationGrant(ctx context.Context, id, failure stri
 	if strings.TrimSpace(failure) == "" {
 		failure = "provider logout did not complete"
 	}
-	command, err := s.pool.Exec(ctx, `UPDATE logout_correlation_grants
+	command, err := s.db(ctx).Exec(ctx, `UPDATE logout_correlation_grants
 		SET cleanup_after=$2,cleanup_claimed_until=NULL,last_error=$3
 		WHERE id=$1::uuid AND completed_at IS NULL`, id, retryAt.UTC(), failure)
 	if err != nil {
@@ -2600,7 +2657,7 @@ func (s *Store) DeleteCompletedLogoutCorrelationGrants(ctx context.Context, cuto
 	if limit < 1 || limit > 1000 {
 		return 0, fmt.Errorf("logout correlation cleanup limit must be between 1 and 1000")
 	}
-	command, err := s.pool.Exec(ctx, `WITH expired AS (
+	command, err := s.db(ctx).Exec(ctx, `WITH expired AS (
 		SELECT id FROM logout_correlation_grants
 		WHERE completed_at<$1
 		ORDER BY completed_at,id
@@ -2615,7 +2672,7 @@ func (s *Store) DeleteCompletedLogoutCorrelationGrants(ctx context.Context, cuto
 
 func (s *Store) BrowserSessionIDForHydraSession(ctx context.Context, subjectID, hydraSessionID string) (string, error) {
 	var browserSessionID string
-	err := s.pool.QueryRow(ctx, `SELECT h.browser_session_id::text
+	err := s.db(ctx).QueryRow(ctx, `SELECT h.browser_session_id::text
 		FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
 		WHERE h.hydra_session_id=$1 AND s.user_id=$2::uuid`, hydraSessionID, subjectID).Scan(&browserSessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -2652,7 +2709,7 @@ func normalizedOptionalSessionIDs(sessionIDs []string) ([]string, error) {
 }
 
 func (s *Store) HydraLoginSessionIDs(ctx context.Context, browserSessionID string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT hydra_session_id FROM hydra_login_sessions WHERE browser_session_id=$1::uuid ORDER BY created_at,hydra_session_id`, browserSessionID)
+	rows, err := s.db(ctx).Query(ctx, `SELECT hydra_session_id FROM hydra_login_sessions WHERE browser_session_id=$1::uuid ORDER BY created_at,hydra_session_id`, browserSessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list Ory Hydra login sessions: %w", err)
 	}
@@ -2672,7 +2729,7 @@ func (s *Store) HydraLoginSessionIDs(ctx context.Context, browserSessionID strin
 }
 
 func (s *Store) UserHydraLoginSessionIDs(ctx context.Context, userID string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT h.hydra_session_id
+	rows, err := s.db(ctx).Query(ctx, `SELECT DISTINCT h.hydra_session_id
 	FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
 	WHERE s.user_id=$1::uuid ORDER BY h.hydra_session_id`, userID)
 	if err != nil {
@@ -2694,7 +2751,7 @@ func (s *Store) UserHydraLoginSessionIDs(ctx context.Context, userID string) ([]
 }
 
 func (s *Store) ActiveUserHydraLoginSessionIDs(ctx context.Context, userID string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT h.hydra_session_id
+	rows, err := s.db(ctx).Query(ctx, `SELECT DISTINCT h.hydra_session_id
 	FROM hydra_login_sessions h JOIN sessions s ON s.id=h.browser_session_id
 	WHERE s.user_id=$1::uuid AND s.revoked_at IS NULL
 	ORDER BY h.hydra_session_id`, userID)
@@ -2721,7 +2778,7 @@ func (s *Store) ActiveUserHydraLoginSessionIDs(ctx context.Context, userID strin
 var ErrActiveSessionNotFound = errors.New("active session not found")
 
 func (s *Store) RevokeSession(ctx context.Context, id string, now time.Time) error {
-	command, err := s.pool.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL`, id, now.UTC())
+	command, err := s.db(ctx).Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=$1::uuid AND revoked_at IS NULL`, id, now.UTC())
 	if err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
@@ -2742,7 +2799,7 @@ func (s *Store) RevokeSessions(ctx context.Context, sessionIDs []string, now tim
 	if len(ids) == 0 {
 		return nil
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL`, ids, now.UTC()); err != nil {
+	if _, err := s.db(ctx).Exec(ctx, `UPDATE sessions SET revoked_at=$2 WHERE id=ANY($1::uuid[]) AND revoked_at IS NULL`, ids, now.UTC()); err != nil {
 		return fmt.Errorf("revoke browser session snapshot: %w", err)
 	}
 	return nil
@@ -2754,7 +2811,7 @@ var ErrSessionNotFound = errors.New("session not found")
 
 func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 	var userID string
-	err := s.pool.QueryRow(ctx, `SELECT user_id::text FROM sessions WHERE id=$1::uuid`, id).Scan(&userID)
+	err := s.db(ctx).QueryRow(ctx, `SELECT user_id::text FROM sessions WHERE id=$1::uuid`, id).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrSessionNotFound
 	}
@@ -2770,7 +2827,7 @@ func (s *Store) SessionUserID(ctx context.Context, id string) (string, error) {
 func (s *Store) UserIDByEmail(ctx context.Context, email string) (string, error) {
 	var userID string
 	// Addresses are stored lowercase, so the unique index answers this.
-	err := s.pool.QueryRow(ctx, `SELECT id::text FROM users WHERE email=lower(btrim($1))`, email).Scan(&userID)
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text FROM users WHERE email=lower(btrim($1))`, email).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrUserNotFound
 	}
@@ -2780,7 +2837,7 @@ func (s *Store) UserIDByEmail(ctx context.Context, email string) (string, error)
 	return userID, nil
 }
 func (s *Store) RevokeUserSessions(ctx context.Context, userID string, now time.Time) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db(ctx).Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin user session revocation: %w", err)
 	}
@@ -2819,7 +2876,7 @@ func (s *Store) CountActiveSessions(ctx context.Context, now time.Time) (int, er
 		return 0, err
 	}
 	var n int
-	err = s.pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE revoked_at IS NULL AND expires_at>$1 AND last_seen_at>$2`, now.UTC(), now.UTC().Add(-policy.BrowserIdleTimeout)).Scan(&n)
+	err = s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM sessions WHERE revoked_at IS NULL AND expires_at>$1 AND last_seen_at>$2`, now.UTC(), now.UTC().Add(-policy.BrowserIdleTimeout)).Scan(&n)
 	return n, err
 }
 func nullable(v string) any {

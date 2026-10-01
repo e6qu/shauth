@@ -91,12 +91,22 @@ func (s *Store) RecordAuditEvent(ctx context.Context, entry AuditEntry, now time
 	if entry.RemoteAddress != nil {
 		address = entry.RemoteAddress.String()
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO audit_events (id,actor_user_id,subject_user_id,session_id,event_type,remote_address,created_at,details)
+	// Under an advisory lock this is a savepoint, so a failed audit write
+	// cannot abort the change it describes; the change commits with it.
+	tx, err := s.db(ctx).Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin audit event: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `INSERT INTO audit_events (id,actor_user_id,subject_user_id,session_id,event_type,remote_address,created_at,details)
 	VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8)`,
 		randomUUID(), nullableUUID(entry.ActorUserID), nullableUUID(entry.SubjectUserID), nullableUUID(entry.SessionID),
 		entry.EventType, address, now.UTC(), encoded)
 	if err != nil {
 		return fmt.Errorf("record audit event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit audit event: %w", err)
 	}
 	return nil
 }
@@ -145,10 +155,10 @@ func (s *Store) ListAuditEvents(ctx context.Context, filter AuditFilter, page Pa
 	}
 	where := strings.Join(conditions, " AND ")
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE `+where, arguments...).Scan(&total); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE `+where, arguments...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count audit events: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,event_type,COALESCE(actor_user_id::text,''),COALESCE(subject_user_id::text,''),COALESCE(session_id::text,''),remote_address,created_at,details
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,event_type,COALESCE(actor_user_id::text,''),COALESCE(subject_user_id::text,''),COALESCE(session_id::text,''),remote_address,created_at,details
 	FROM audit_events WHERE `+where+fmt.Sprintf(` ORDER BY created_at DESC, id LIMIT $%d OFFSET $%d`, len(arguments)+1, len(arguments)+2),
 		append(arguments, page.Limit, page.Offset)...)
 	if err != nil {
@@ -179,7 +189,7 @@ var ErrAuditEventNotFound = errors.New("audit event not found")
 func (s *Store) AuditEvent(ctx context.Context, id string) (AuditEvent, error) {
 	var event AuditEvent
 	var details []byte
-	err := s.pool.QueryRow(ctx, `SELECT id::text,event_type,COALESCE(actor_user_id::text,''),COALESCE(subject_user_id::text,''),COALESCE(session_id::text,''),remote_address,created_at,details FROM audit_events WHERE id=$1::uuid`, id).
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text,event_type,COALESCE(actor_user_id::text,''),COALESCE(subject_user_id::text,''),COALESCE(session_id::text,''),remote_address,created_at,details FROM audit_events WHERE id=$1::uuid`, id).
 		Scan(&event.ID, &event.EventType, &event.ActorUserID, &event.SubjectUserID, &event.SessionID, &event.RemoteAddress, &event.CreatedAt, &details)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuditEvent{}, ErrAuditEventNotFound
@@ -220,10 +230,10 @@ func (s *Store) ListLogoutGrants(ctx context.Context, onlyOutstanding bool, page
 		where = "completed_at IS NULL"
 	}
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM logout_correlation_grants WHERE `+where).Scan(&total); err != nil {
+	if err := s.db(ctx).QueryRow(ctx, `SELECT count(*) FROM logout_correlation_grants WHERE `+where).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count logout grants: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,subject_id::text,COALESCE(managed_client_id,''),created_at,consumed_at,completed_at,cleanup_after,cleanup_attempts,COALESCE(last_error,'')
+	rows, err := s.db(ctx).Query(ctx, `SELECT id::text,subject_id::text,COALESCE(managed_client_id,''),created_at,consumed_at,completed_at,cleanup_after,cleanup_attempts,COALESCE(last_error,'')
 	FROM logout_correlation_grants WHERE `+where+` ORDER BY created_at DESC, id LIMIT $1 OFFSET $2`, page.Limit, page.Offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list logout grants: %w", err)
@@ -253,7 +263,7 @@ type SessionDetail struct {
 // SessionByID reads one session with its account and provider correlation.
 func (s *Store) SessionByID(ctx context.Context, sessionID string) (SessionDetail, error) {
 	var detail SessionDetail
-	err := s.pool.QueryRow(ctx, `SELECT id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address FROM sessions WHERE id=$1::uuid`, sessionID).
+	err := s.db(ctx).QueryRow(ctx, `SELECT id::text,user_id::text,created_at,last_seen_at,expires_at,revoked_at,user_agent,remote_address FROM sessions WHERE id=$1::uuid`, sessionID).
 		Scan(&detail.Session.ID, &detail.Session.UserID, &detail.Session.CreatedAt, &detail.Session.LastSeen,
 			&detail.Session.ExpiresAt, &detail.Session.RevokedAt, &detail.Session.UserAgent, &detail.Session.RemoteIP)
 	if errors.Is(err, pgx.ErrNoRows) {

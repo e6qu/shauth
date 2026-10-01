@@ -110,9 +110,15 @@ and refresh tokens.
 
 Ory Hydra asks Shauth's token hook (`POST /internal/hydra/token-hook`) before
 it issues any token, including every refresh. Shauth reads the account again:
-a disabled or deleted account gets no new token, and new tokens carry the
-account's current role and email rather than those accepted at consent. If
-Shauth cannot answer, Hydra issues nothing. Access tokens are JWTs in every
+a disabled or deleted account gets no new token, a token whose sign-in session
+was ended (from the account page, by an administrator, or by logging out of
+an application) gets no new token, and new tokens carry the account's current
+role and email rather than those accepted at consent. If Shauth cannot
+answer, Hydra issues nothing. A client-credentials token, which acts for the
+client rather than a person, is issued unchanged; any other grant that names
+a person is refused. A role that depends on GitHub team or organization
+membership is re-evaluated when the person next signs in with GitHub; Shauth
+does not hold their GitHub token between sign-ins. Access tokens are JWTs in every
 environment, which a relying party verifies against Hydra's published keys
 without calling back; a JWT already issued therefore stays valid until it
 expires, at most the configured access token lifetime (15 minutes by

@@ -1035,9 +1035,13 @@ func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 		if userID, err := s.store.GitHubUserID(r.Context(), profile.ID); err == nil {
 			if _, err := s.revokeUserSessions(r.Context(), userID, "", actor{}); err != nil {
 				observe.Errorf("end the sessions of deauthorized GitHub account %s: %v", profile.Login, err)
+				s.failPage(w, r, http.StatusBadGateway, "This GitHub account no longer has access, but its existing sessions could not all be ended. Try again, or ask an administrator to end them.")
+				return
 			}
 		} else if !errors.Is(err, identity.ErrUserNotFound) {
 			observe.Errorf("look up deauthorized GitHub account %s: %v", profile.Login, err)
+			s.failPage(w, r, http.StatusBadGateway, "This GitHub account no longer has access, and its existing sessions could not be checked. Try again shortly.")
+			return
 		}
 		s.failPage(w, r, http.StatusForbidden, "This GitHub account is not authorized to use this service. Ask an administrator to grant it access.")
 		return
@@ -2524,7 +2528,7 @@ func (s *Server) adminDeleteOIDCClient(w http.ResponseWriter, r *http.Request) {
 var errHydraClientNotFound = errors.New("OAuth client not found")
 
 func (s *Server) deleteHydraClient(ctx context.Context, clientID string) error {
-	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + url.PathEscape(clientID)})
+	endpoint := s.hydraClientURL(clientID, "")
 	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
 	if err != nil {
 		return err
@@ -2624,12 +2628,30 @@ func parseSessionPolicyForm(values url.Values) (sessionPolicyRecord, error) {
 	return record, nil
 }
 
+// hydraClientLifespans sets the policy's token lifetimes for both grants an
+// application uses. Hydra applies a client's authorization-code lifespans only
+// to the first tokens; every refresh uses the refresh-token-grant lifespans and
+// otherwise falls back to Hydra's global defaults, which would quietly undo
+// the policy from the first refresh on.
+// hydraClientURL addresses one client in Hydra's administration API. The
+// identifier is one escaped path segment: escaping it into Path alone would
+// be escaped a second time, and leaving it raw would let a "/" or ".." in a
+// client registered directly in Hydra address a different resource.
+func (s *Server) hydraClientURL(clientID, suffix string) *url.URL {
+	return s.config.HydraAdminURL.ResolveReference(&url.URL{
+		Path:    "/admin/clients/" + clientID + suffix,
+		RawPath: "/admin/clients/" + url.PathEscape(clientID) + suffix,
+	})
+}
+
 func hydraClientLifespans(policy identity.SessionPolicy) map[string]string {
-	return map[string]string{
-		"authorization_code_grant_access_token_lifespan":  policy.AccessTokenLifetime.String(),
-		"authorization_code_grant_id_token_lifespan":      policy.IDTokenLifetime.String(),
-		"authorization_code_grant_refresh_token_lifespan": policy.RefreshTokenLifetime.String(),
+	lifespans := map[string]string{}
+	for _, grant := range []string{"authorization_code_grant", "refresh_token_grant"} {
+		lifespans[grant+"_access_token_lifespan"] = policy.AccessTokenLifetime.String()
+		lifespans[grant+"_id_token_lifespan"] = policy.IDTokenLifetime.String()
+		lifespans[grant+"_refresh_token_lifespan"] = policy.RefreshTokenLifetime.String()
 	}
+	return lifespans
 }
 
 func (s *Server) applyHydraSessionPolicy(ctx context.Context, policy identity.SessionPolicy) error {
@@ -2645,7 +2667,7 @@ func (s *Server) applyHydraSessionPolicy(ctx context.Context, policy identity.Se
 		if client.ID == "" {
 			return fmt.Errorf("Hydra returned a client without an ID")
 		}
-		clientEndpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + url.PathEscape(client.ID) + "/lifespans"})
+		clientEndpoint := s.hydraClientURL(client.ID, "/lifespans")
 		update, err := http.NewRequestWithContext(ctx, http.MethodPut, clientEndpoint.String(), bytes.NewReader(body))
 		if err != nil {
 			return err
@@ -2802,9 +2824,9 @@ func marshalHydraClient(input oidcClientInput, policy identity.SessionPolicy) ([
 		"backchannel_logout_uri":               input.BackChannelLogoutURI,
 		"frontchannel_logout_session_required": input.FrontChannelLogoutURI != "",
 		"backchannel_logout_session_required":  true,
-		"authorization_code_grant_access_token_lifespan":  policy.AccessTokenLifetime.String(),
-		"authorization_code_grant_id_token_lifespan":      policy.IDTokenLifetime.String(),
-		"authorization_code_grant_refresh_token_lifespan": policy.RefreshTokenLifetime.String(),
+	}
+	for name, lifespan := range hydraClientLifespans(policy) {
+		payload[name] = lifespan
 	}
 	if input.Secret == "" {
 		delete(payload, "client_secret")
@@ -2880,7 +2902,7 @@ func (s *Server) rewriteHydraClient(ctx context.Context, input oidcClientInput) 
 	if err != nil {
 		return err
 	}
-	endpoint := s.config.HydraAdminURL.ResolveReference(&url.URL{Path: "/admin/clients/" + input.ID})
+	endpoint := s.hydraClientURL(input.ID, "")
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
 		return err
