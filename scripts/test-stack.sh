@@ -49,7 +49,7 @@ stack_parent=$$
 	kill -TERM "$stack_parent" 2>/dev/null || true
 ) &
 stack_watchdog_pid=$!
-trap 'kill -KILL "$stack_watchdog_pid" 2>/dev/null || true' EXIT
+trap 'kill -KILL "$stack_watchdog_pid" 2>/dev/null || true; wait "$stack_watchdog_pid" 2>/dev/null || true' EXIT
 
 # Every HTTP request and every Compose command is bounded; a later
 # --max-time on a call overrides the default.
@@ -205,6 +205,7 @@ cleanup() {
 	fi
 	compose down --volumes --remove-orphans
 	kill -KILL "$stack_watchdog_pid" 2>/dev/null || true
+	wait "$stack_watchdog_pid" 2>/dev/null || true
 	rm -f "$cookie_jar" "$validation_cookie_jar" "$gateway_binary" "$validator_binary"
 	rm -rf "$validator_coordination_directory"
 	return "$status"
