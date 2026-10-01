@@ -20,13 +20,13 @@ func TestLoadReadsBootstrapApps(t *testing.T) {
 		"DATABASE_URL": "postgres://shauth:password@postgres/shauth", "GITHUB_CLIENT_ID": "client-id", "GITHUB_CLIENT_SECRET": "client-secret",
 		"GITHUB_DEVELOPER_TEAM": "e6qu-org/e6qu-org-members", "GITHUB_ADMIN_TEAM": "e6qu-org/e6qu-org-admins", "SHAUTH_SES_REGION": "eu-west-1", "SHAUTH_INVITATION_EMAIL_FROM": "no-reply@auth.example.com",
 		"SHAUTH_TOKEN_HOOK_TOKEN":    strings.Repeat("h", 48),
-		"SHAUTH_BOOTSTRAP_APPS_JSON": `[{"slug":"intraktible","name":"Intraktible","description":"Decision platform","launch_url":"https://intraktible.example.com","health_url":"https://intraktible.example.com/health","oidc_client_id":"intraktible-dev","oidc_client_secret":"0123456789abcdef0123456789abcdef","redirect_uris":["https://intraktible.example.com/v1/auth/oidc/shauth/callback"],"post_logout_redirect_uris":["https://intraktible.example.com/"],"frontchannel_logout_uri":"https://intraktible.example.com/v1/auth/oidc/shauth/frontchannel-logout","backchannel_logout_uri":"https://intraktible.example.com/v1/auth/oidc/shauth/backchannel-logout","release_revision":"0123456789ab"}]`,
+		"SHAUTH_BOOTSTRAP_APPS_JSON": `[{"slug":"planner","name":"Planner","description":"Decision platform","launch_url":"https://planner.example.com","health_url":"https://planner.example.com/health","oidc_client_id":"planner-dev","oidc_client_secret":"0123456789abcdef0123456789abcdef","redirect_uris":["https://planner.example.com/v1/auth/oidc/shauth/callback"],"post_logout_redirect_uris":["https://planner.example.com/"],"frontchannel_logout_uri":"https://planner.example.com/v1/auth/oidc/shauth/frontchannel-logout","backchannel_logout_uri":"https://planner.example.com/v1/auth/oidc/shauth/backchannel-logout","release_revision":"0123456789ab"}]`,
 	}
 	config, err := Load(func(key string) string { return values[key] })
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if len(config.BootstrapApps) != 1 || config.BootstrapApps[0].OIDCClientID != "intraktible-dev" || config.BootstrapApps[0].BackChannelLogoutURI == "" {
+	if len(config.BootstrapApps) != 1 || config.BootstrapApps[0].OIDCClientID != "planner-dev" || config.BootstrapApps[0].BackChannelLogoutURI == "" {
 		t.Fatalf("BootstrapApps = %#v", config.BootstrapApps)
 	}
 }

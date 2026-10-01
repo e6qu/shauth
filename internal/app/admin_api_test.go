@@ -168,7 +168,7 @@ func TestAdminAPIPathIdentifiersAreValidatedBeforeStorageAccess(t *testing.T) {
 func TestDeletableOIDCClientIDAcceptsForeignIdentifiersButNotPathSegments(t *testing.T) {
 	// A client registered outside Shauth's naming policy must still be
 	// removable, or it stays listed forever with no way to delete it.
-	for _, accepted := range []string{"bleephub", "Legacy-Client", "9lives", strings.Repeat("c", 128)} {
+	for _, accepted := range []string{"workshop", "Legacy-Client", "9lives", strings.Repeat("c", 128)} {
 		if !deletableOIDCClientID(accepted) {
 			t.Fatalf("deletableOIDCClientID(%q) rejected a removable client", accepted)
 		}

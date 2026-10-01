@@ -8,16 +8,16 @@ const testOIDCContractHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 func TestValidateManagedApp(t *testing.T) {
 	valid := ManagedApp{
-		Slug:             "bleephub-dev",
-		Name:             "Bleephub",
+		Slug:             "workshop-dev",
+		Name:             "Workshop",
 		Description:      "A real deployed service.",
-		LaunchURL:        "https://bleephub.example.com",
-		OIDCClientID:     "bleephub-dev",
+		LaunchURL:        "https://workshop.example.com",
+		OIDCClientID:     "workshop-dev",
 		OIDCContractHash: testOIDCContractHash,
-		HealthURL:        "https://bleephub.example.com/health",
-		MonitoringURL:    "https://bleephub.example.com/monitoring",
-		ValidationURL:    "https://bleephub.example.com/ui/",
-		SignedOutURL:     "https://bleephub.example.com/ui/signed-out",
+		HealthURL:        "https://workshop.example.com/health",
+		MonitoringURL:    "https://workshop.example.com/monitoring",
+		ValidationURL:    "https://workshop.example.com/ui/",
+		SignedOutURL:     "https://workshop.example.com/ui/signed-out",
 		ReleaseRevision:  "0123456789ab",
 	}
 	if err := ValidateManagedApp(valid); err != nil {
@@ -25,11 +25,11 @@ func TestValidateManagedApp(t *testing.T) {
 	}
 
 	for name, app := range map[string]ManagedApp{
-		"uppercase slug":             withManagedApp(valid, func(app *ManagedApp) { app.Slug = "Bleephub" }),
+		"uppercase slug":             withManagedApp(valid, func(app *ManagedApp) { app.Slug = "Workshop" }),
 		"missing OIDC contract hash": withManagedApp(valid, func(app *ManagedApp) { app.OIDCContractHash = "" }),
 		"invalid OIDC contract hash": withManagedApp(valid, func(app *ManagedApp) { app.OIDCContractHash = "ABC" }),
-		"invalid launch URL":         withManagedApp(valid, func(app *ManagedApp) { app.LaunchURL = "http://bleephub.example.com" }),
-		"invalid health URL":         withManagedApp(valid, func(app *ManagedApp) { app.HealthURL = "http://bleephub.example.com/health" }),
+		"invalid launch URL":         withManagedApp(valid, func(app *ManagedApp) { app.LaunchURL = "http://workshop.example.com" }),
+		"invalid health URL":         withManagedApp(valid, func(app *ManagedApp) { app.HealthURL = "http://workshop.example.com/health" }),
 		"health origin mismatch": withManagedApp(valid, func(app *ManagedApp) {
 			app.HealthURL = "https://health.example.test/health"
 		}),
@@ -80,17 +80,17 @@ func TestValidateManagedAppAllowsLoopbackHTTPForLocalIntegration(t *testing.T) {
 
 func TestManagedAppValidationContractDetectsEveryMaterialUpdate(t *testing.T) {
 	base := ManagedApp{
-		Name: "Bleephub", Description: "Git hosting", LaunchURL: "https://bleephub.example.test/",
-		OIDCClientID: "bleephub", HealthURL: "https://bleephub.example.test/health",
+		Name: "Workshop", Description: "Git hosting", LaunchURL: "https://workshop.example.test/",
+		OIDCClientID: "workshop", HealthURL: "https://workshop.example.test/health",
 		OIDCContractHash: testOIDCContractHash,
-		MonitoringURL:    "https://bleephub.example.test/monitoring", ValidationURL: "https://bleephub.example.test/me",
-		SignedOutURL: "https://bleephub.example.test/signed-out", ReleaseRevision: "0123456789ab",
+		MonitoringURL:    "https://workshop.example.test/monitoring", ValidationURL: "https://workshop.example.test/me",
+		SignedOutURL: "https://workshop.example.test/signed-out", ReleaseRevision: "0123456789ab",
 	}
 	if !sameManagedAppValidationContract(base, base) {
 		t.Fatal("identical validation contracts differed")
 	}
 	for name, mutate := range map[string]func(*ManagedApp){
-		"name":        func(app *ManagedApp) { app.Name = "Bleephub renamed" },
+		"name":        func(app *ManagedApp) { app.Name = "Workshop renamed" },
 		"description": func(app *ManagedApp) { app.Description = "Updated" },
 		"launch URL":  func(app *ManagedApp) { app.LaunchURL += "ui" },
 		"OIDC client": func(app *ManagedApp) { app.OIDCClientID += "-v2" },
