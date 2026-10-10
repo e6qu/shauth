@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-FROM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS build
+# The Go image comes from the Amazon ECR Public copy of Docker's official images,
+# pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
+# pulls per address, and the shared CI runners exhaust it.
+FROM public.ecr.aws/docker/library/golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS build
 # The revision this image was built from, stamped into the binaries so every
 # page and contract can report exactly which build is serving it.
 ARG SHAUTH_REVISION=unknown
@@ -12,7 +15,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth-healthcheck ./cmd/shauth-healthcheck
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6qu/shauth/internal/version.revision=${SHAUTH_REVISION}" -o /out/shauth-gateway ./cmd/shauth-gateway
 
-FROM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS hydra-build
+# The Go image comes from the Amazon ECR Public copy of Docker's official images,
+# pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
+# pulls per address, and the shared CI runners exhaust it.
+FROM public.ecr.aws/docker/library/golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS hydra-build
 ARG HYDRA_COMMIT=0b84568fffccf151dc5e6c7955fdfb738555bf4b
 ARG HYDRA_SOURCE_SHA256=7ceaae3299780959e8390925732629931f63f20300464d2822d49628eeb3332e
 RUN apk add --no-cache patch

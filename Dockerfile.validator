@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS build
+# The Go image comes from the Amazon ECR Public copy of Docker's official images,
+# pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
+# pulls per address, and the shared CI runners exhaust it.
+FROM public.ecr.aws/docker/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -10,7 +13,10 @@ COPY internal/observe ./internal/observe
 COPY cmd/shauth-validator ./cmd/shauth-validator
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shauth-validator ./cmd/shauth-validator
 
-FROM node:26.10.0-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2
+# The Node image comes from the Amazon ECR Public copy of Docker's official images,
+# pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
+# pulls per address, and the shared CI runners exhaust it.
+FROM public.ecr.aws/docker/library/node:26.10.0-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2
 WORKDIR /opt/shauth-validator
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY package.json package-lock.json ./
