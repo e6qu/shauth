@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Image pins
+
+# Every pinned image is a Docker Hub copy on public.ecr.aws or mirror.gcr.io.
+# This compares each pin with what Docker Hub serves for its tag, so a stale pin
+# shows up on pull requests and, through the daily run, on main.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image-pins:
+    name: Image pins match Docker Hub
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26'
+      - run: node --test scripts/image-pins.test.mjs
+      - run: node scripts/image-pins.mjs

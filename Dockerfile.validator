@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shauth-validator .
 # The Node image comes from the Amazon ECR Public copy of Docker's official images,
 # pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
 # pulls per address, and the shared CI runners exhaust it.
-FROM public.ecr.aws/docker/library/node:26.10.0-bookworm-slim@sha256:3ffc19ea878019d9e9ae8971732ad4a03cda44f167107173174b60ed7c65bed3
+FROM public.ecr.aws/docker/library/node:26.11.1-bookworm-slim@sha256:86f07bc9c5dce4578cf37e5a418b7bfc7f817cda25cde66e2b66e95ed86c4567
 WORKDIR /opt/shauth-validator
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY package.json package-lock.json ./
