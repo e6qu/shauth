@@ -47,7 +47,16 @@ RUN go get \
     golang.org/x/text@v0.44.0 \
     google.golang.org/grpc@v1.85.0 \
     && go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/hydra .
+COPY third_party/hydra-v26.2.0/go-jose-v3-security.patch /tmp/go-jose-v3-security.patch
+COPY third_party/hydra-v26.2.0/pgproto3-v2-security.patch /tmp/pgproto3-v2-security.patch
+# These legacy major versions have no upstream security release. Keep their
+# module identities and backport the reviewed fixes into the build's vendor
+# tree; regression tests exercise the exact code linked into Hydra.
+RUN go mod vendor \
+    && patch --forward --fuzz=0 -d vendor/github.com/go-jose/go-jose/v3 -p1 < /tmp/go-jose-v3-security.patch \
+    && patch --forward --fuzz=0 -d vendor/github.com/jackc/pgproto3/v2 -p1 < /tmp/pgproto3-v2-security.patch \
+    && go test -mod=vendor -timeout=120s github.com/go-jose/go-jose/v3 github.com/jackc/pgproto3/v2
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/hydra .
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/shauth /shauth

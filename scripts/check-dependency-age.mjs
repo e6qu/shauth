@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Check changed dependency selections before accepting version or security PRs.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const base = process.argv[2] ?? 'origin/main';
 if (!/^[a-zA-Z0-9_./-]+$/.test(base) || base.startsWith('-')) throw new Error('Invalid base ref');
@@ -21,6 +21,7 @@ function previous(file) {
 }
 const files = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], { encoding: 'utf8' }).trim().split('\n');
 for (const file of new Set(files)) {
+  if (!existsSync(file)) continue; // A removed recipe selects no dependencies.
   if (!/(package-lock\.json|go\.mod|\.terraform\.lock\.hcl|Dockerfile[^/]*|\.github\/workflows\/[^/]+\.ya?ml|compose\.ya?ml|main\.tf|terragrunt\.hcl)$/.test(file)) continue;
   const text = readFileSync(file, 'utf8');
   const old = previous(file);

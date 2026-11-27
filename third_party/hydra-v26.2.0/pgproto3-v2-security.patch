@@ -1,0 +1,30 @@
+--- a/data_row.go
++++ b/data_row.go
+@@ -52,7 +52,7 @@
+ 		if msgSize == -1 {
+ 			dst.Values[i] = nil
+ 		} else {
+-			if len(src[rp:]) < msgSize {
++			if msgSize < 0 || len(src[rp:]) < msgSize {
+ 				return &invalidMessageFormatErr{messageType: "DataRow"}
+ 			}
+ 
+--- /dev/null
++++ b/security_backport_test.go
+@@ -0,0 +1,16 @@
++package pgproto3
++
++import "testing"
++
++func TestSecurityBackportNegativeFieldLength(t *testing.T) {
++	for _, data := range [][]byte{{0, 1, 255, 255, 255, 254}, {0, 1, 128, 0, 0, 0}} {
++		var row DataRow
++		if err := row.Decode(data); err == nil {
++			t.Fatal("negative non-null field length accepted")
++		}
++	}
++	var row DataRow
++	if err := row.Decode([]byte{0, 1, 255, 255, 255, 255}); err != nil || len(row.Values) != 1 || row.Values[0] != nil {
++		t.Fatalf("SQL NULL rejected: %v", err)
++	}
++}
