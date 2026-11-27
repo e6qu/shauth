@@ -20,32 +20,33 @@ var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0
 // administration application. Secrets are supplied solely through the runtime
 // environment, normally from AWS Secrets Manager.
 type Config struct {
-	Address                string
-	PublicURL              *url.URL
-	DatabaseURL            string
-	HydraAdminURL          *url.URL
-	HydraPublicURL         *url.URL
-	GitHubClientID         string
-	GitHubClientSecret     string
-	GitHubDeveloperTeam    string
-	GitHubAdminTeam        string
-	EntraTenantID          string
-	EntraClientID          string
-	EntraClientSecret      string
-	BootstrapAdminEmail    string
-	BootstrapAdminPassword string
-	ValidationUsername     string
-	ValidationEmail        string
-	AllowInsecureCookies   bool
-	SESRegion              string
-	InvitationEmailFrom    string
-	BootstrapApps          []BootstrapApp
-	MonitoringSources      []monitoring.Source
-	ValidatorToken         string
-	ValidationStatusToken  string
-	SessionResetToken      string
-	AdminAPIReadToken      string
-	AdminAPIWriteToken     string
+	Address                  string
+	PublicURL                *url.URL
+	DatabaseURL              string
+	HydraAdminURL            *url.URL
+	HydraPublicURL           *url.URL
+	GitHubClientID           string
+	GitHubClientSecret       string
+	GitHubAccountLookupToken string
+	GitHubDeveloperTeam      string
+	GitHubAdminTeam          string
+	EntraTenantID            string
+	EntraClientID            string
+	EntraClientSecret        string
+	BootstrapAdminEmail      string
+	BootstrapAdminPassword   string
+	ValidationUsername       string
+	ValidationEmail          string
+	AllowInsecureCookies     bool
+	SESRegion                string
+	InvitationEmailFrom      string
+	BootstrapApps            []BootstrapApp
+	MonitoringSources        []monitoring.Source
+	ValidatorToken           string
+	ValidationStatusToken    string
+	SessionResetToken        string
+	AdminAPIReadToken        string
+	AdminAPIWriteToken       string
 	// TokenHookToken authenticates Ory Hydra's call to the token hook, which
 	// re-reads the account behind every token Hydra issues or refreshes.
 	TokenHookToken string
@@ -93,31 +94,32 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	config := Config{
-		Address:                getenv("SHAUTH_LISTEN_ADDRESS"),
-		PublicURL:              publicURL,
-		DatabaseURL:            getenv("DATABASE_URL"),
-		HydraAdminURL:          hydraAdminURL,
-		HydraPublicURL:         hydraPublicURL,
-		GitHubClientID:         getenv("GITHUB_CLIENT_ID"),
-		GitHubClientSecret:     getenv("GITHUB_CLIENT_SECRET"),
-		GitHubDeveloperTeam:    getenv("GITHUB_DEVELOPER_TEAM"),
-		GitHubAdminTeam:        getenv("GITHUB_ADMIN_TEAM"),
-		EntraTenantID:          getenv("ENTRA_TENANT_ID"),
-		EntraClientID:          getenv("ENTRA_CLIENT_ID"),
-		EntraClientSecret:      getenv("ENTRA_CLIENT_SECRET"),
-		BootstrapAdminEmail:    getenv("SHAUTH_BOOTSTRAP_ADMIN_EMAIL"),
-		BootstrapAdminPassword: getenv("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"),
-		ValidationUsername:     getenv("SHAUTH_VALIDATION_USERNAME"),
-		ValidationEmail:        getenv("SHAUTH_VALIDATION_EMAIL"),
-		AllowInsecureCookies:   getenv("SHAUTH_ALLOW_INSECURE_COOKIES") == "true",
-		SESRegion:              getenv("SHAUTH_SES_REGION"),
-		InvitationEmailFrom:    getenv("SHAUTH_INVITATION_EMAIL_FROM"),
-		ValidatorToken:         getenv("SHAUTH_VALIDATOR_TOKEN"),
-		ValidationStatusToken:  getenv("SHAUTH_VALIDATION_STATUS_TOKEN"),
-		SessionResetToken:      getenv("SHAUTH_SESSION_RESET_TOKEN"),
-		AdminAPIReadToken:      getenv("SHAUTH_ADMIN_API_READ_TOKEN"),
-		AdminAPIWriteToken:     getenv("SHAUTH_ADMIN_API_WRITE_TOKEN"),
-		TokenHookToken:         getenv("SHAUTH_TOKEN_HOOK_TOKEN"),
+		Address:                  getenv("SHAUTH_LISTEN_ADDRESS"),
+		PublicURL:                publicURL,
+		DatabaseURL:              getenv("DATABASE_URL"),
+		HydraAdminURL:            hydraAdminURL,
+		HydraPublicURL:           hydraPublicURL,
+		GitHubClientID:           getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret:       getenv("GITHUB_CLIENT_SECRET"),
+		GitHubAccountLookupToken: getenv("SHAUTH_GITHUB_ACCOUNT_LOOKUP_TOKEN"),
+		GitHubDeveloperTeam:      getenv("GITHUB_DEVELOPER_TEAM"),
+		GitHubAdminTeam:          getenv("GITHUB_ADMIN_TEAM"),
+		EntraTenantID:            getenv("ENTRA_TENANT_ID"),
+		EntraClientID:            getenv("ENTRA_CLIENT_ID"),
+		EntraClientSecret:        getenv("ENTRA_CLIENT_SECRET"),
+		BootstrapAdminEmail:      getenv("SHAUTH_BOOTSTRAP_ADMIN_EMAIL"),
+		BootstrapAdminPassword:   getenv("SHAUTH_BOOTSTRAP_ADMIN_PASSWORD"),
+		ValidationUsername:       getenv("SHAUTH_VALIDATION_USERNAME"),
+		ValidationEmail:          getenv("SHAUTH_VALIDATION_EMAIL"),
+		AllowInsecureCookies:     getenv("SHAUTH_ALLOW_INSECURE_COOKIES") == "true",
+		SESRegion:                getenv("SHAUTH_SES_REGION"),
+		InvitationEmailFrom:      getenv("SHAUTH_INVITATION_EMAIL_FROM"),
+		ValidatorToken:           getenv("SHAUTH_VALIDATOR_TOKEN"),
+		ValidationStatusToken:    getenv("SHAUTH_VALIDATION_STATUS_TOKEN"),
+		SessionResetToken:        getenv("SHAUTH_SESSION_RESET_TOKEN"),
+		AdminAPIReadToken:        getenv("SHAUTH_ADMIN_API_READ_TOKEN"),
+		AdminAPIWriteToken:       getenv("SHAUTH_ADMIN_API_WRITE_TOKEN"),
+		TokenHookToken:           getenv("SHAUTH_TOKEN_HOOK_TOKEN"),
 	}
 	if (config.BootstrapAdminEmail == "") != (config.BootstrapAdminPassword == "") {
 		return Config{}, fmt.Errorf("SHAUTH_BOOTSTRAP_ADMIN_EMAIL and SHAUTH_BOOTSTRAP_ADMIN_PASSWORD must be set together")

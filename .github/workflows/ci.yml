@@ -53,6 +53,8 @@ jobs:
       - run: ./scripts/check-container-publication.sh
       - run: ./scripts/test-docs-coverage.sh
       - run: ./scripts/test-stack.sh
+        env:
+          SHAUTH_GITHUB_ACCOUNT_LOOKUP_TOKEN: ${{ github.token }}
 
   iac-security:
     needs: dependency-age

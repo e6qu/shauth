@@ -77,7 +77,7 @@ func TestCSRFPostsAllowsSameOriginBrowserPost(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/logout", nil)
 	request.Header.Set("Origin", "https://auth.example.test")
-	request.AddCookie(&http.Cookie{Name: csrfCookie, Value: "token"})
+	request.AddCookie(&http.Cookie{Name: protectedCookieName(csrfCookie, true), Value: "token"})
 	request.Form = url.Values{"_csrf": {"token"}}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -98,7 +98,7 @@ func TestCSRFPostsAllowsNullOriginBrowserPost(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "https://auth.example.test/login", nil)
 	request.Header.Set("Origin", "null")
-	request.AddCookie(&http.Cookie{Name: csrfCookie, Value: "token"})
+	request.AddCookie(&http.Cookie{Name: protectedCookieName(csrfCookie, true), Value: "token"})
 	request.Form = url.Values{"_csrf": {"token"}}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

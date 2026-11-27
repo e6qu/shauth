@@ -1,5 +1,12 @@
 # Operations
 
+HTTPS deployments use `__Host-` cookies for browser sessions, CSRF, upstream
+OAuth transactions, and logout correlation. They are Secure, have path `/`,
+and never carry a Domain attribute, so sibling applications cannot plant them
+through parent-domain cookies. Unprefixed cookies are accepted only in explicit
+loopback development mode. Upgrading from an unprefixed deployment requires a
+new browser sign-in; existing cookies are not migrated across this boundary.
+
 ## Configuration
 
 Shauth reads its environment once, at start-up. It refuses to start if a value
@@ -15,6 +22,7 @@ come from the runtime's secret injection.
 | `HYDRA_ADMIN_URL` | yes | Hydra's admin API. Never publish it. |
 | `HYDRA_PUBLIC_INTERNAL_URL` | yes | Hydra's public API, as Shauth reaches it internally. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth app. Its only callback is `<public URL>/oauth/github/callback`. |
+| `SHAUTH_GITHUB_ACCOUNT_LOOKUP_TOKEN` | no | Runtime-injected, read-only GitHub API credential for resolving public account names to permanent IDs when adding access rules. It is used only for account lookup, never for user sign-in or membership. CI supplies its short-lived job token to avoid shared anonymous API rate limits. Lookup failures still reject the new rule. |
 | `GITHUB_ADMIN_TEAM`, `GITHUB_DEVELOPER_TEAM` | yes | `org/team`. Seeds the first access rules. |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` | all or none | Enables Microsoft Entra ID for one tenant, given as a UUID. `common` and `organizations` are rejected. |
 | `SHAUTH_SES_REGION`, `SHAUTH_INVITATION_EMAIL_FROM` | yes | Amazon SES region and verified sender, used for invitations. |

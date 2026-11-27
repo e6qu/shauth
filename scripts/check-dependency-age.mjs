@@ -21,10 +21,20 @@ function previous(file) {
 }
 const files = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], { encoding: 'utf8' }).trim().split('\n');
 for (const file of new Set(files)) {
-  if (!/(package-lock\.json|go\.mod|\.terraform\.lock\.hcl|Dockerfile[^/]*|\.github\/workflows\/[^/]+\.ya?ml|compose\.ya?ml|main\.tf)$/.test(file)) continue;
+  if (!/(package-lock\.json|go\.mod|\.terraform\.lock\.hcl|Dockerfile[^/]*|\.github\/workflows\/[^/]+\.ya?ml|compose\.ya?ml|main\.tf|terragrunt\.hcl)$/.test(file)) continue;
   const text = readFileSync(file, 'utf8');
   const old = previous(file);
   if (text === old) continue;
+  // A changed action without a release annotation must not silently evade
+  // timestamp verification. Local actions have no external release to check.
+  const actionLines = /^\s*-?\s*uses:\s*([^\s#]+)([^\n]*)/gm;
+  const oldActions = new Set([...old.matchAll(actionLines)].map(m => m[0].trim()));
+  for (const match of text.matchAll(actionLines)) {
+    if (oldActions.has(match[0].trim()) || match[1].startsWith('./')) continue;
+    if (!/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/.test(match[1]) || !/^\s*#\s*v\d+\.\d+\.\d+\s*$/.test(match[2])) {
+      throw new Error(`${file}: changed external actions require an immutable SHA and a stable # vX.Y.Z release annotation`);
+    }
+  }
   if (file.endsWith('package-lock.json')) {
     const oldPackages = old ? JSON.parse(old).packages ?? {} : {};
     const oldVersions = new Set(Object.entries(oldPackages).filter(([path]) => path).map(([path,p]) => `${p.name ?? path.split('node_modules/').at(-1)}@${p.version}`));

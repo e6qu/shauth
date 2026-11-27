@@ -323,7 +323,7 @@ type Server struct {
 
 func New(cfg config.Config, store *identity.Store) (*Server, error) {
 	outboundClient := &http.Client{Timeout: outboundRequestTimeout}
-	client, err := githubapi.NewClient(outboundClient)
+	client, err := githubapi.NewClient(outboundClient, githubapi.WithAccountLookupToken(cfg.GitHubAccountLookupToken))
 	if err != nil {
 		return nil, err
 	}
@@ -641,7 +641,7 @@ if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded"
 	_, _ = w.Write([]byte(`document.addEventListener("submit",function(event){var form=event.target;if(!(form instanceof HTMLFormElement))return;var question=form.getAttribute("data-confirm");if(question&&!window.confirm(question)){event.preventDefault();event.stopPropagation()}},true);`))
 	// Forms rendered by the server already carry their CSRF token; this
 	// covers any form inserted into the page after it loaded.
-	_, _ = w.Write([]byte(`document.addEventListener("submit",function(event){var form=event.target;if(!(form instanceof HTMLFormElement)||form.method.toLowerCase()!=="post")return;var input=form.querySelector('input[name="_csrf"]');if(!input){input=document.createElement("input");input.type="hidden";input.name="_csrf";form.appendChild(input)}if(!input.value){var match=document.cookie.match(/(?:^|; )shauth_csrf=([^;]*)/);input.value=match?decodeURIComponent(match[1]):""}},true);`))
+	_, _ = w.Write([]byte(`document.addEventListener("submit",function(event){var form=event.target;if(!(form instanceof HTMLFormElement)||form.method.toLowerCase()!=="post")return;var input=form.querySelector('input[name="_csrf"]');if(!input){input=document.createElement("input");input.type="hidden";input.name="_csrf";form.appendChild(input)}if(!input.value){var match=document.cookie.match(/(?:^|; )(?:__Host-)?shauth_csrf=([^;]*)/);input.value=match?decodeURIComponent(match[1]):""}},true);`))
 	// A page that arrives with an error moves focus to it, so a screen
 	// reader announces why the submission was refused and keyboard users
 	// start from the explanation.
@@ -685,15 +685,19 @@ func csrfToken(r *http.Request) string {
 }
 
 func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
+	cookieName := protectedCookieName(csrfCookie, publicURL.Scheme == "https")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cookie, err := r.Cookie(cookieName); err == nil {
+			r = r.WithContext(context.WithValue(r.Context(), csrfTokenKey{}, cookie.Value))
+		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
-			if _, err := r.Cookie(csrfCookie); err != nil {
+			if _, err := r.Cookie(cookieName); err != nil {
 				token, tokenErr := newState()
 				if tokenErr != nil {
 					http.Error(w, "could not create CSRF token", http.StatusInternalServerError)
 					return
 				}
-				http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: token, Path: "/", Secure: publicURL.Scheme == "https", SameSite: http.SameSiteLaxMode})
+				http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", Secure: publicURL.Scheme == "https", SameSite: http.SameSiteLaxMode})
 				r = r.WithContext(context.WithValue(r.Context(), csrfTokenKey{}, token))
 			}
 		}
@@ -711,7 +715,7 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 				http.Error(w, "invalid form", http.StatusBadRequest)
 				return
 			}
-			cookie, err := r.Cookie(csrfCookie)
+			cookie, err := r.Cookie(cookieName)
 			if err != nil || cookie.Value == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(r.Form.Get("_csrf"))) != 1 {
 				http.Error(w, "CSRF token is invalid", http.StatusForbidden)
 				return
@@ -961,7 +965,7 @@ func (s *Server) providerLogoutStart(w http.ResponseWriter, r *http.Request) {
 const logoutReturnCookie = "shauth_logout_return"
 
 func (s *Server) signedOut(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(logoutReturnCookie); err == nil {
+	if cookie, err := r.Cookie(s.cookieName(logoutReturnCookie)); err == nil {
 		s.expireCookieAtPath(w, logoutReturnCookie, "/signed-out")
 		if _, _, err := s.peekCurrent(r); err != nil && oidcClientIDPattern.MatchString(cookie.Value) {
 			if app, err := s.store.ManagedAppByClientID(r.Context(), cookie.Value); err == nil {
@@ -976,7 +980,7 @@ func (s *Server) signedOut(w http.ResponseWriter, r *http.Request) {
 func (s *Server) logoutComplete(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	destination := "/signed-out"
-	if cookie, err := r.Cookie(logoutCompletionCookie); err == nil {
+	if cookie, err := r.Cookie(s.cookieName(logoutCompletionCookie)); err == nil {
 		s.expireCookieAtPath(w, logoutCompletionCookie, logoutCompletionPath)
 		grant, claimErr := s.store.ClaimConsumedLogoutCorrelationGrant(r.Context(), cookie.Value, time.Now())
 		if claimErr != nil {
@@ -1051,7 +1055,7 @@ func (s *Server) upstreamSignInCancelled(w http.ResponseWriter, r *http.Request,
 func (s *Server) githubCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	cookieName, validState := validGitHubStateCookieName(state)
-	cookie, err := r.Cookie(cookieName)
+	cookie, err := r.Cookie(s.cookieName(cookieName))
 	if !validState || err != nil {
 		s.failPage(w, r, http.StatusBadRequest, "This GitHub sign-in link has expired or was already used. Sign in again.")
 		return
@@ -1180,7 +1184,7 @@ func (s *Server) entraCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	state := r.URL.Query().Get("state")
 	cookieName, validState := validEntraStateCookieName(state)
-	cookie, err := r.Cookie(cookieName)
+	cookie, err := r.Cookie(s.cookieName(cookieName))
 	if !validState || err != nil {
 		s.failPage(w, r, http.StatusBadRequest, "This Microsoft Entra ID sign-in link has expired or was already used. Sign in again.")
 		return
@@ -1309,7 +1313,7 @@ func (s *Server) hydraLogin(w http.ResponseWriter, r *http.Request) {
 		promptLogin, maxAge := reauthenticationDemand(loginRequest.RequestURL)
 		satisfied := true
 		if promptLogin {
-			cookie, cookieErr := r.Cookie(reauthenticationCookie)
+			cookie, cookieErr := r.Cookie(s.cookieName(reauthenticationCookie))
 			satisfied = cookieErr == nil && reauthenticatedSince(cookie.Value, challenge, session.CreatedAt)
 		}
 		if maxAge >= 0 && time.Since(session.CreatedAt) > maxAge {
@@ -1538,7 +1542,7 @@ func (s *Server) hydraLogout(w http.ResponseWriter, r *http.Request) {
 		s.failPage(w, r, http.StatusBadGateway, "could not load OAuth logout request")
 		return
 	}
-	correlationCookie, err := r.Cookie(logoutCorrelationCookie)
+	correlationCookie, err := r.Cookie(s.cookieName(logoutCorrelationCookie))
 	if err != nil {
 		if !request.RPInitiated {
 			if rejectErr := s.hydraRejectLogout(r.Context(), challenge); rejectErr != nil {
@@ -3893,7 +3897,7 @@ func (s *Server) doProvider(request *http.Request) (*http.Response, error) {
 
 // peekCurrent identifies the signed-in person without recording activity.
 func (s *Server) peekCurrent(r *http.Request) (identity.User, identity.Session, error) {
-	cookie, err := r.Cookie(browserSessionCookie)
+	cookie, err := r.Cookie(s.cookieName(browserSessionCookie))
 	if err != nil {
 		return identity.User{}, identity.Session{}, err
 	}
@@ -3901,7 +3905,7 @@ func (s *Server) peekCurrent(r *http.Request) (identity.User, identity.Session, 
 }
 
 func (s *Server) current(r *http.Request) (identity.User, identity.Session, error) {
-	cookie, err := r.Cookie(browserSessionCookie)
+	cookie, err := r.Cookie(s.cookieName(browserSessionCookie))
 	if err != nil {
 		return identity.User{}, identity.Session{}, err
 	}
@@ -4005,7 +4009,7 @@ func (s *Server) redirectWithNotice(w http.ResponseWriter, r *http.Request, dest
 // was written for, so it is shown exactly once.
 func (s *Server) notices(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(noticeCookie)
+		cookie, err := r.Cookie(s.cookieName(noticeCookie))
 		if err != nil || r.Method != http.MethodGet || r.Header.Get("HX-Request") != "" {
 			next.ServeHTTP(w, r)
 			return
@@ -4041,7 +4045,26 @@ func noticeError(r *http.Request) string {
 	return ""
 }
 
-func (s *Server) setCookie(w http.ResponseWriter, cookie *http.Cookie) { http.SetCookie(w, cookie) }
+// HTTPS cookies cannot be supplied by a sibling host through a parent-domain
+// Domain cookie. Never accept the unprefixed legacy name in secure mode.
+func protectedCookieName(name string, secure bool) string {
+	if secure {
+		return "__Host-" + name
+	}
+	return name
+}
+func (s *Server) cookieName(name string) string {
+	return protectedCookieName(name, !s.config.AllowInsecureCookies)
+}
+func (s *Server) setCookie(w http.ResponseWriter, cookie *http.Cookie) {
+	cookie.Name = s.cookieName(cookie.Name)
+	if !s.config.AllowInsecureCookies {
+		cookie.Secure = true
+		cookie.Path = "/"
+		cookie.Domain = ""
+	}
+	http.SetCookie(w, cookie)
+}
 func (s *Server) expireCookie(w http.ResponseWriter, name string) {
 	s.expireCookieAtPath(w, name, "/")
 }

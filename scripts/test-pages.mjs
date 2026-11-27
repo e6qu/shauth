@@ -42,22 +42,28 @@ try {
   await page.getByRole('button', { name: 'Signed-out screen', exact: true }).focus();
   await page.keyboard.press('Enter');
   await page.locator('#screen-image[src$="signedout-light.png"]').waitFor();
+  await page.locator('#screen-image').evaluate(image => image.decode());
   assert.equal(await page.getByRole('button', { name: 'Signed-out screen', exact: true }).getAttribute('aria-pressed'), 'true');
   assert.match(await page.locator('#screen-caption').innerText(), /A clear place to finish/);
   await page.locator('#theme-toggle').click(); // system -> light
   await page.locator('#theme-toggle').click(); // light -> dark
   await page.locator('#screen-image[src$="signedout-dark.png"]').waitFor();
+  await page.locator('#screen-image').evaluate(image => image.decode());
   await page.reload({ waitUntil: 'networkidle' });
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
   await page.locator('#screen-image[src$="signin-dark.png"]').waitFor();
+  await page.locator('#screen-image').evaluate(image => image.decode());
   await page.locator('#theme-toggle').click(); // dark -> system
   await page.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
   await page.locator('#screen-image[src$="signin-light.png"]').waitFor();
+  await page.locator('#screen-image').evaluate(image => image.decode());
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.locator('#screen-image[src$="signin-dark.png"]').waitFor();
+  await page.locator('#screen-image').evaluate(image => image.decode());
 
   for (const theme of ['light', 'dark']) {
     await page.emulateMedia({ colorScheme: theme });
+    await page.locator('#screen-image').evaluate(image => image.decode());
     for (const width of [320, 390, 768, 1440]) {
       await page.setViewportSize({ width, height: 1000 });
       for (const screen of ['Sign-in screen', 'Signed-out screen']) {
