@@ -50,13 +50,14 @@ for (const file of new Set(files)) {
     ['terraform', /provider "registry\.terraform\.io\/([^"]+)"\s*\{\s*version\s*=\s*"([^"]+)"/g],
     ['action', /uses:\s*([\w.-]+\/[\w.-]+)@([0-9a-f]{40})[^\n]*?#[ \t]*(v\d+\.\d+\.\d+)/g],
     ['docker', /(?:public\.ecr\.aws\/docker\/library|docker\.io\/library|mirror\.gcr\.io\/library)\/([\w.-]+):([\w.-]+)@(sha256:[0-9a-f]{64})/g],
+    ['distroless', /gcr\.io\/distroless\/([\w.-]+):([\w.-]+)@(sha256:[0-9a-f]{64})/g],
   ];
   for (const [kind, pattern] of patterns) {
     const identity = m => `${m[1]}@${m[2]}${m[3] ? ':'+m[3] : ''}`;
     const prior = new Set([...old.matchAll(pattern)].map(identity));
     for (const match of text.matchAll(pattern)) {
       if (prior.has(identity(match))) continue;
-      add(kind, match[1], kind === 'action' ? `${match[3]}:${match[2]}` : kind === 'docker' ? `${match[2]}@${match[3]}` : match[2], file);
+      add(kind, match[1], kind === 'action' ? `${match[3]}:${match[2]}` : ['docker', 'distroless'].includes(kind) ? `${match[2]}@${match[3]}` : match[2], file);
     }
   }
 }
@@ -101,6 +102,15 @@ async function timestamp(item) {
     const data = await metadata(`https://hub.docker.com/v2/repositories/library/${name}/tags/${encodeURIComponent(tag)}`);
     if (data.digest !== digest) throw new Error('Image digest does not match the timestamped Docker Hub tag');
     return data.tag_last_pushed;
+  }
+  if (kind === 'distroless') {
+    const [tag, digest] = version.split('@');
+    const data = await metadata(`https://gcr.io/v2/distroless/${name}/tags/list`);
+    const manifest = data.manifest?.[digest];
+    if (!manifest?.tag?.includes(tag)) throw new Error('Image digest does not match the timestamped Distroless tag');
+    const uploaded = Number(manifest.timeUploadedMs);
+    if (!Number.isFinite(uploaded) || uploaded <= 0) throw new Error('No registry upload timestamp is available');
+    return new Date(uploaded).toISOString();
   }
   throw new Error('Unknown dependency ecosystem');
 }

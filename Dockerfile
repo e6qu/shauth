@@ -58,7 +58,7 @@ RUN go mod vendor \
     && go test -mod=vendor -timeout=120s github.com/go-jose/go-jose/v3 github.com/jackc/pgproto3/v2
 RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/hydra .
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 COPY --from=build /out/shauth /shauth
 COPY --from=build /out/shauth-migrate /shauth-migrate
 COPY --from=build /out/shauth-healthcheck /shauth-healthcheck
