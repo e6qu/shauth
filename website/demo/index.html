@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Try Shauth's administration interface with synthetic users, invitations, applications, and sessions. All demo changes stay in your browser.">
+  <title>Interactive demo · Shauth</title>
+  <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../assets/shauth.css">
+  <link rel="stylesheet" href="demo.css">
+  <script src="../assets/theme.js"></script>
+  <script type="module" src="demo.js"></script>
+</head>
+<body class="demo">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="demo-banner"><strong>Interactive demo</strong><span>Synthetic data. Changes stay in this browser.</span><button type="button" data-action="reset" class="demo-reset">Reset demo</button></div>
+  <header class="site-header"><div class="header-inner"><a class="brand" href="../"><img src="../assets/favicon.svg" width="32" height="32" alt="">Shauth</a><nav class="nav" aria-label="Project navigation"><a href="../">Overview</a><a href="../docs/">Docs</a><a href="../storybook/">Storybook</a><button class="theme-button" id="theme-toggle" type="button">Theme</button></nav></div></header>
+  <div class="demo-layout">
+    <aside class="demo-sidebar"><nav aria-label="Demo administration" id="demo-nav"></nav><div class="demo-identity"><span class="demo-avatar" aria-hidden="true">ML</span><div><strong>Morgan Lee</strong><span>Demo administrator</span></div></div><a class="demo-about" href="../docs/demo.html">How this demo works</a></aside>
+    <main id="main-content" class="demo-content" tabindex="-1"><noscript><section class="card"><h1>Enable JavaScript to try the demo</h1><p>The interactive demo runs entirely in your browser. You can still read the <a href="../docs/">documentation</a> and view the <a href="../">product tour</a> without JavaScript.</p></section></noscript></main>
+  </div>
+  <dialog id="demo-dialog" aria-labelledby="dialog-title"><form id="dialog-form"><div id="dialog-content"></div><p class="field-error" id="dialog-error" role="alert"></p><div class="actions demo-dialog-actions"><button class="button button-secondary" type="button" data-action="cancel-dialog">Cancel</button><button class="button" id="dialog-submit" type="submit">Save</button></div></form></dialog>
+</body>
+</html>

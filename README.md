@@ -4,9 +4,14 @@ Shauth is an OpenID Connect identity provider for a group of web applications.
 One sign-in to Shauth signs a person in to every registered application, and
 signing out of any one of them signs them out of all of them.
 
-[Explore the public demo](https://e6qu.github.io/shauth/) for a tour of the real
-interface and the sign-in and logout flows. The demo is a static website; it
-does not collect credentials or connect to a live administration service.
+[Product website](https://e6qu.github.io/shauth/) ·
+[Interactive demo](https://e6qu.github.io/shauth/demo/) ·
+[Documentation](https://e6qu.github.io/shauth/docs/) ·
+[Storybook](https://e6qu.github.io/shauth/storybook/) ·
+[OpenAPI](https://e6qu.github.io/shauth/openapi.json)
+
+The demo uses synthetic data stored only in your browser. Explore users,
+invitations, shared sessions, and global logout without a live account.
 
 - **Sign-in sources:** GitHub, an optional single Microsoft Entra ID tenant, and
   local accounts created by an administrator or by invitation.

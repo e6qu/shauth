@@ -16,12 +16,12 @@ try {
       if (response.status() !== 200 || await page.locator('h1').innerText() !== title) throw new Error(`Unexpected public ${screen} screen`);
       if (await page.locator('input[name="username"]').count() && await page.locator('input[name="username"]').inputValue()) throw new Error('Capture contains a username');
       const card = page.locator('main > .card');
-      await card.screenshot({ path: new URL(`../docs/demo-assets/${screen}-${theme}.png`, import.meta.url).pathname, animations: 'disabled' });
+      await card.screenshot({ path: new URL(`../website/assets/${screen}-${theme}.png`, import.meta.url).pathname, animations: 'disabled' });
       const box = await card.boundingBox();
       captures.push({ file: `${screen}-${theme}.png`, width: Math.ceil(box.width), height: Math.ceil(box.height) });
     }
     await context.close();
   }
-  await writeFile(new URL('../docs/demo-assets/captures.json', import.meta.url), `${JSON.stringify({ captured_at: new Date().toISOString(), kind: 'Public, unauthenticated Shauth pages; no altered content or seeded accounts.', captures }, null, 2)}\n`);
+  await writeFile(new URL('../website/assets/captures.json', import.meta.url), `${JSON.stringify({ captured_at: new Date().toISOString(), kind: 'Public, unauthenticated Shauth pages; no altered content or seeded accounts.', captures }, null, 2)}\n`);
 } finally { await browser.close(); }
 console.log('Captured four real public interface views');

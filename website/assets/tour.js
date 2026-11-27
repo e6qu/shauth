@@ -23,7 +23,7 @@ function render() {
   const theme = root.dataset.theme === 'system' ? (systemTheme.matches ? 'dark' : 'light') : root.dataset.theme;
   const screen = screens[selected];
   picture.querySelector('source')?.remove();
-  image.src = `demo-assets/${selected}-${theme}.png`;
+  image.src = `assets/${selected}-${theme}.png`;
   image.alt = screen.alt;
   const title = document.createElement('strong');
   title.textContent = screen.title;
