@@ -432,6 +432,7 @@ compose exec -T postgres psql -U shauth -d shauth -v ON_ERROR_STOP=1 \
   -c "UPDATE users SET email_verified=FALSE WHERE username='unverified-oidc'" >/dev/null
 [ "$(compose exec -T postgres psql -U shauth -d shauth -Atc "SELECT email_verified FROM users WHERE username='unverified-oidc'")" = f ]
 npm run test:browser
+node scripts/test-oauth-security.mjs
 npm run test:oidc-unverified
 
 echo 'Starting the three-relying-party Shauth gateway matrix.'

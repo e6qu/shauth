@@ -56,6 +56,26 @@ jobs:
         env:
           SHAUTH_GITHUB_ACCOUNT_LOOKUP_TOKEN: ${{ github.token }}
 
+  dependency-security:
+    needs: dependency-age
+    name: Dependency and secret security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+      - name: Check reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.76.2
+      - name: Check locked dependencies and source secrets
+        run: |
+          trivy fs --scanners vuln,secret --include-dev-deps --severity HIGH,CRITICAL \
+            --exit-code 1 --format json --output "$RUNNER_TEMP/security-scan.json" .
+
   iac-security:
     needs: dependency-age
     name: IaC security
@@ -65,7 +85,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
-          version: v0.74.0
+          version: v0.76.2
       - name: Scan Terraform configuration
         run: trivy config --skip-version-check --skip-dirs terraform/tests --exit-code 1 --severity HIGH,CRITICAL terraform
 

@@ -65,7 +65,7 @@ async function metadata(url) {
     const headers = { 'user-agent': 'dependency-release-age' };
     if (url.startsWith('https://api.github.com/') && process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
     const response = await fetch(url, { headers, signal: AbortSignal.timeout(20000) });
-    if (!response.ok) throw new Error(`${new URL(url).host}: HTTP ${response.status}`);
+    if (!response.ok) throw Object.assign(new Error(`${new URL(url).host}: HTTP ${response.status}`), { status: response.status });
     return response.json();
   })());
   return cache.get(url);
@@ -74,8 +74,18 @@ async function timestamp(item) {
   const { kind, name, version } = item;
   if (kind === 'npm') return (await metadata(`https://registry.npmjs.org/${encodeURIComponent(name)}`)).time?.[version];
   if (kind === 'go') {
-    const escaped = name.replace(/[A-Z]/g, c => '!'+c.toLowerCase());
-    return (await metadata(`https://proxy.golang.org/${escaped}/@v/${version}.info`)).Time;
+    // go run/install select a package, which may be below its module root.
+    // Only a genuine 404 permits trying its parent; outages fail closed.
+    let module = name;
+    while (module.includes('/')) {
+      const escaped = module.replace(/[A-Z]/g, c => '!'+c.toLowerCase());
+      try { return (await metadata(`https://proxy.golang.org/${escaped}/@v/${version}.info`)).Time; }
+      catch (error) {
+        if (error.status !== 404) throw error;
+        module = module.slice(0, module.lastIndexOf('/'));
+      }
+    }
+    throw new Error('No published Go module contains this versioned package');
   }
   if (kind === 'terraform') return (await metadata(`https://registry.terraform.io/v1/providers/${name}/${version}`)).published_at;
   if (kind === 'action') {

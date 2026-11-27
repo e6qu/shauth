@@ -413,9 +413,15 @@ func withdrawFormPostResponseMode(response *http.Response) error {
 			return err
 		}
 		document["response_modes_supported"] = encoded
-		if body, err = json.Marshal(document); err != nil {
-			return err
-		}
+	}
+	// The pinned Hydra/Fosite configuration rejects plain challenges. Its
+	// discovery document nevertheless advertises plain; publish only the
+	// method that the real authorization endpoint accepts.
+	if _, ok := document["code_challenge_methods_supported"]; ok {
+		document["code_challenge_methods_supported"] = json.RawMessage(`["S256"]`)
+	}
+	if body, err = json.Marshal(document); err != nil {
+		return err
 	}
 	response.Body = io.NopCloser(bytes.NewReader(body))
 	response.ContentLength = int64(len(body))
@@ -618,6 +624,7 @@ func securityHeaders(publicURL *url.URL, next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()")
+		noStore(w)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -690,7 +697,7 @@ func csrfPosts(publicURL *url.URL, next http.Handler) http.Handler {
 		if cookie, err := r.Cookie(cookieName); err == nil {
 			r = r.WithContext(context.WithValue(r.Context(), csrfTokenKey{}, cookie.Value))
 		}
-		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && !strings.HasPrefix(r.URL.Path, "/assets/") {
 			if _, err := r.Cookie(cookieName); err != nil {
 				token, tokenErr := newState()
 				if tokenErr != nil {

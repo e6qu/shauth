@@ -54,6 +54,7 @@ services:
       STRATEGIES_ACCESS_TOKEN: jwt
       SERVE_COOKIES_SAME_SITE_MODE: Lax
       OAUTH2_TOKEN_HOOK_URL: http://shauth:8080/internal/hydra/token-hook
+      OAUTH2_PKCE_ENFORCED_FOR_PUBLIC_CLIENTS: "true"
       OAUTH2_TOKEN_HOOK_AUTH_TYPE: api_key
       OAUTH2_TOKEN_HOOK_AUTH_CONFIG_IN: header
       OAUTH2_TOKEN_HOOK_AUTH_CONFIG_NAME: Authorization
