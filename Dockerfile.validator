@@ -2,7 +2,7 @@
 # The Go image comes from the Amazon ECR Public copy of Docker's official images,
 # pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
 # pulls per address, and the shared CI runners exhaust it.
-FROM public.ecr.aws/docker/library/golang:1.27.4-bookworm@sha256:ce59b41415e2524ae99926fe1f37ce48ba8c194dcbd2a56a65436cdcefa2bd34 AS build
+FROM public.ecr.aws/docker/library/golang:1.27.4-trixie@sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/shauth-validator .
 # The Node image comes from the Amazon ECR Public copy of Docker's official images,
 # pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
 # pulls per address, and the shared CI runners exhaust it.
-FROM public.ecr.aws/docker/library/node:26.13.1-bookworm-slim@sha256:0042e17d232a87a2cd485be1da7900fca4d10a4ad11b29e9285da1d2e54798c9
+FROM public.ecr.aws/docker/library/node:26.13.1-trixie-slim@sha256:abe7e5a82b61a8ef67b315b85497c9e65173387ccf2f4a029248184b8e020be5
 WORKDIR /opt/shauth-validator
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY package.json package-lock.json ./
@@ -26,10 +26,18 @@ COPY package.json package-lock.json ./
 RUN printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-bounded-downloads
 # The Go worker uses the system trust store. Node's bundled roots and
 # Chromium's dependencies do not supply it in the slim runtime image.
+# Signed snapshot metadata freezes OS package resolution beyond the 24-hour
+# release cooldown. HTTP bootstraps CA roots; apt still verifies signatures.
+ARG DEBIAN_SNAPSHOT=20261126T000000Z
+RUN printf 'Types: deb\nURIs: http://snapshot.debian.org/archive/debian/%s\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\nCheck-Valid-Until: no\n\nTypes: deb\nURIs: http://snapshot.debian.org/archive/debian-security/%s\nSuites: trixie-security\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\nCheck-Valid-Until: no\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SNAPSHOT" > /etc/apt/sources.list.d/debian.sources
 RUN timeout 180 apt-get update \
+    && timeout 180 apt-get upgrade -y \
     && timeout 120 apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN npm ci && timeout 600 npx playwright install --with-deps chromium && npm cache clean --force
+RUN npm ci --ignore-scripts && timeout 600 npx playwright install --with-deps chromium \
+    && rm -rf /root/.npm /usr/local/lib/node_modules/npm \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx
+# npm and its dependency tree are build tools, not part of the running validator.
 COPY validator/validate.mjs validator/application-ui.mjs validator/security.mjs validator/readiness.mjs ./
 COPY --from=build /out/shauth-validator /usr/local/bin/shauth-validator
 ENV SHAUTH_VALIDATOR_SCRIPT=/opt/shauth-validator/validate.mjs
