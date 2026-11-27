@@ -1,5 +1,46 @@
 # Operations
 
+HTTPS deployments use `__Host-` cookies for browser sessions, CSRF, upstream
+OAuth transactions, and logout correlation. They are Secure, have path `/`,
+and never carry a Domain attribute, so sibling applications cannot plant them
+through parent-domain cookies. Unprefixed cookies are accepted only in explicit
+loopback development mode. Upgrading from an unprefixed deployment requires a
+new browser sign-in; existing cookies are not migrated across this boundary.
+
+## Security verification
+
+Authentication responses default to `Cache-Control: no-store`. Public static
+assets do not create CSRF cookies. Hydra must set
+`OAUTH2_PKCE_ENFORCED_FOR_PUBLIC_CLIENTS=true`; discovery advertises only S256.
+The full stack gate uses real PostgreSQL, Hydra, and Chromium to verify missing
+or plain PKCE rejection, successful S256 exchange, wrong-verifier rejection,
+and authorization-code replay rejection, alongside the existing login, session,
+administration, and global logout suites.
+
+CI also runs reachable Go vulnerability analysis and scans locked dependencies
+(including development dependencies), source secrets, and Terraform. Release-age
+checks reject dependency updates published less than 24 hours earlier. A clean
+source scan is not a container or deployment verdict: Hydra is built separately,
+and operating-system packages and other deployed applications need their own
+scans and live acceptance tests.
+
+The November 2026 review reproduced and repaired the public-host insecure-cookie
+configuration bypass and parent-domain cookie injection boundary. The dependency
+review also required [Hydra security backports](../third_party/hydra-v26.2.0/README.md)
+for legacy JOSE and PostgreSQL protocol modules without fixed releases. Their
+original version numbers remain visible to scanners; retain the patch and test
+evidence instead of suppressing their advisory IDs globally.
+
+The source review used Trivy 0.76.2, govulncheck 1.10.0, Semgrep 1.187.0, and
+Gitleaks 8.30.1. The scanned Shauth source and locked development dependencies
+had no reported vulnerabilities or secrets after dependency updates. Historical
+Gitleaks findings were reviewed as test/example values and public identifiers.
+Semgrep's conditional cookie flags, intentionally script-readable CSRF cookie,
+validated redirects, and test strings were reviewed manually; the reported SQL
+injection location did not contain a SQL sink. These results do not establish
+that every possible vulnerability has been found or that unmerged changes are
+already deployed.
+
 ## Configuration
 
 Shauth reads its environment once, at start-up. It refuses to start if a value
@@ -15,6 +56,7 @@ come from the runtime's secret injection.
 | `HYDRA_ADMIN_URL` | yes | Hydra's admin API. Never publish it. |
 | `HYDRA_PUBLIC_INTERNAL_URL` | yes | Hydra's public API, as Shauth reaches it internally. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | yes | GitHub OAuth app. Its only callback is `<public URL>/oauth/github/callback`. |
+| `SHAUTH_GITHUB_ACCOUNT_LOOKUP_TOKEN` | no | Runtime-injected, read-only GitHub API credential for resolving public account names to permanent IDs when adding access rules. It is used only for account lookup, never for user sign-in or membership. CI supplies its short-lived job token to avoid shared anonymous API rate limits. Lookup failures still reject the new rule. |
 | `GITHUB_ADMIN_TEAM`, `GITHUB_DEVELOPER_TEAM` | yes | `org/team`. Seeds the first access rules. |
 | `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET` | all or none | Enables Microsoft Entra ID for one tenant, given as a UUID. `common` and `organizations` are rejected. |
 | `SHAUTH_SES_REGION`, `SHAUTH_INVITATION_EMAIL_FROM` | yes | Amazon SES region and verified sender, used for invitations. |

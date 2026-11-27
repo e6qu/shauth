@@ -114,7 +114,7 @@ func TestGitHubCallbackRecordsAFailedSignInWhenGitHubRejectsTheRequest(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AddCookie(&http.Cookie{Name: githubStateCookieName(state), Value: transaction})
+	request.AddCookie(&http.Cookie{Name: server.cookieName(githubStateCookieName(state)), Value: transaction})
 	recorder := httptest.NewRecorder()
 
 	server.githubCallback(recorder, request)
@@ -193,7 +193,7 @@ func TestCancelledGitHubSignInReturnsToSignInWithItsDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/oauth/github/callback?state="+state+"&error=access_denied", http.NoBody)
-	request.AddCookie(&http.Cookie{Name: githubStateCookieName(state), Value: transaction})
+	request.AddCookie(&http.Cookie{Name: server.cookieName(githubStateCookieName(state)), Value: transaction})
 	recorder := httptest.NewRecorder()
 	server.githubCallback(recorder, request)
 

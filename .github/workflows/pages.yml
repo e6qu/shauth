@@ -21,7 +21,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Check dependency release age before installing packages
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEPENDENCY_BASE: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/check-dependency-age.mjs "$DEPENDENCY_BASE"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: npm
@@ -33,7 +41,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run build:pages
       - run: npm run test:pages
-      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: .pages
 
@@ -54,4 +62,4 @@ jobs:
     steps:
       - name: Publish the verified static site
         id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -79,6 +79,7 @@ locals {
     { name = "SERVE_COOKIES_SAME_SITE_MODE", value = "Lax" },
     { name = "SQA_OPT_OUT", value = "true" },
     { name = "OAUTH2_TOKEN_HOOK_URL", value = "http://localhost:8080/internal/hydra/token-hook" },
+    { name = "OAUTH2_PKCE_ENFORCED_FOR_PUBLIC_CLIENTS", value = "true" },
     { name = "OAUTH2_TOKEN_HOOK_AUTH_TYPE", value = "api_key" },
     { name = "OAUTH2_TOKEN_HOOK_AUTH_CONFIG_IN", value = "header" },
     { name = "OAUTH2_TOKEN_HOOK_AUTH_CONFIG_NAME", value = "Authorization" },
@@ -172,6 +173,7 @@ resource "aws_security_group" "task" {
   description = "Limits Shauth task ingress to the VPC Link and egress to HTTPS and DNS"
   vpc_id      = var.vpc_id
   ingress {
+    description     = "HTTP from the API Gateway VPC Link"
     from_port       = 8080
     to_port         = 8080
     protocol        = "tcp"

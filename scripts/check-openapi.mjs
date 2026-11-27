@@ -99,7 +99,7 @@ assert.deepEqual([...declared].sort(), [...routes.keys()].sort(), 'OpenAPI must 
 for (const [name, scheme] of Object.entries(securitySchemes)) {
   if (name === 'BrowserSession') {
     assert.equal(scheme.in, 'cookie');
-    assert.equal(scheme.name, 'shauth_session');
+    assert.equal(scheme.name, '__Host-shauth_session');
   } else {
     assert.equal(scheme.type, 'http');
     assert.equal(scheme.scheme, 'bearer');

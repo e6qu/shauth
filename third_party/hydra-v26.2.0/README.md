@@ -14,6 +14,23 @@ patches are applied:
 The `Dockerfile` also pins patched versions of vulnerable transitive Go
 modules before it compiles Hydra.
 
+Two legacy dependencies have no fixed release on their existing major version.
+After resolving the module graph, the build vendors it and applies these
+backports without changing module identities:
+
+| Patch | Change | Upstream evidence |
+|---|---|---|
+| `go-jose-v3-security.patch` | Bounds RSA modulus size and prime consistency before validation; rejects private parameters in JWS/JWE headers; initializes general JWS unprotected headers before sanitizing. | [GHSA-mgcc-cww5-fp2q](https://github.com/go-jose/go-jose/security/advisories/GHSA-mgcc-cww5-fp2q), adapted from [a0111f8](https://github.com/go-jose/go-jose/commit/a0111f82742fa92bceec9ede40845e73319e6230). |
+| `pgproto3-v2-security.patch` | Rejects negative, non-null DataRow field lengths before slicing. | [jackc/pgx#2507](https://github.com/jackc/pgx/issues/2507); v2 is end-of-life, while v5 already contains the guard. |
+
+Both patches include regression tests that fail against the original modules.
+The image build runs them against the vendored code before linking Hydra.
+Dependency scanners still see the original module versions, so their advisory
+findings require this patch evidence; do not globally ignore the advisories.
+The JOSE backport limits parsed RSA keys to 4096 bits, matching upstream's fix.
+Migrate to maintained dependency majors when Hydra supports them, then remove
+these backports only after the full real integration suite passes.
+
 Drop each patch, and the module pins, once a Hydra release includes the fix
 and `./scripts/test-stack.sh` passes without it.
 

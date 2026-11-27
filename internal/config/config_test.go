@@ -107,9 +107,11 @@ func TestLoadPermitsInsecureCookiesOnlyForLoopbackDevelopment(t *testing.T) {
 	if _, err := Load(func(key string) string { return values[key] }); err != nil {
 		t.Fatalf("Load() rejected loopback development configuration: %v", err)
 	}
-	values["SHAUTH_PUBLIC_URL"] = "http://auth.example.test"
-	if _, err := Load(func(key string) string { return values[key] }); err == nil {
-		t.Fatal("Load() accepted insecure cookies for a non-loopback public URL")
+	for _, publicURL := range []string{"http://auth.example.test", "https://auth.example.test", "https://localhost.attacker.test"} {
+		values["SHAUTH_PUBLIC_URL"] = publicURL
+		if _, err := Load(func(key string) string { return values[key] }); err == nil {
+			t.Errorf("Load() accepted insecure cookies for non-loopback URL %q", publicURL)
+		}
 	}
 }
 

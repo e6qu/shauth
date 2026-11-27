@@ -54,13 +54,13 @@ var loginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-[A-Za-z0-9]){
 
 // AccountID resolves a login to GitHub's numeric account ID, which stays the
 // same when the account is renamed and is never given to another account.
-// It uses GitHub's public API without credentials.
+// An optional read-only API token gives account lookups their own rate limit.
 func (client *Client) AccountID(ctx context.Context, login string) (int64, error) {
 	login = strings.TrimSpace(login)
 	if !loginPattern.MatchString(login) {
 		return 0, ErrInvalidLogin
 	}
-	request, err := newRequest(ctx, http.MethodGet, client.baseURL+"/users/"+url.PathEscape(login), "")
+	request, err := newRequest(ctx, http.MethodGet, client.baseURL+"/users/"+url.PathEscape(login), client.accountLookupToken)
 	if err != nil {
 		return 0, err
 	}
@@ -152,12 +152,19 @@ func (client *Client) primaryVerifiedEmail(ctx context.Context, accessToken stri
 }
 
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
+	httpClient         *http.Client
+	baseURL            string
+	accountLookupToken string
 }
 
 // Option configures a Client beyond its required HTTP client.
 type Option func(*Client)
+
+// WithAccountLookupToken authenticates only public account-ID lookups. It
+// never substitutes for a user's OAuth token or grants organization access.
+func WithAccountLookupToken(token string) Option {
+	return func(client *Client) { client.accountLookupToken = token }
+}
 
 // WithBaseURL points the client at a GitHub REST API root other than
 // https://api.github.com, such as a GitHub Enterprise Server instance or,

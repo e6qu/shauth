@@ -37,19 +37,28 @@ RUN patch --forward --fuzz=0 -p1 < /tmp/logout-token-exp.patch \
 # final OAuth server does not retain known vulnerable implementations.
 RUN go get \
     github.com/go-jose/go-jose/v3@v3.0.5 \
-    github.com/jackc/pgx/v5@v5.11.0 \
-    go.opentelemetry.io/otel@v1.46.0 \
-    go.opentelemetry.io/otel/sdk@v1.46.0 \
-    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.46.0 \
-    golang.org/x/crypto@v0.57.0 \
-    golang.org/x/net@v0.59.0 \
-    golang.org/x/sys@v0.48.0 \
-    golang.org/x/text@v0.42.0 \
-    google.golang.org/grpc@v1.84.0 \
+    github.com/jackc/pgx/v5@v5.13.0 \
+    go.opentelemetry.io/otel@v1.47.0 \
+    go.opentelemetry.io/otel/sdk@v1.47.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.47.0 \
+    golang.org/x/crypto@v0.59.0 \
+    golang.org/x/net@v0.63.0 \
+    golang.org/x/sys@v0.50.0 \
+    golang.org/x/text@v0.44.0 \
+    google.golang.org/grpc@v1.85.0 \
     && go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/hydra .
+COPY third_party/hydra-v26.2.0/go-jose-v3-security.patch /tmp/go-jose-v3-security.patch
+COPY third_party/hydra-v26.2.0/pgproto3-v2-security.patch /tmp/pgproto3-v2-security.patch
+# These legacy major versions have no upstream security release. Keep their
+# module identities and backport the reviewed fixes into the build's vendor
+# tree; regression tests exercise the exact code linked into Hydra.
+RUN go mod vendor \
+    && patch --forward --fuzz=0 -d vendor/github.com/go-jose/go-jose/v3 -p1 < /tmp/go-jose-v3-security.patch \
+    && patch --forward --fuzz=0 -d vendor/github.com/jackc/pgproto3/v2 -p1 < /tmp/pgproto3-v2-security.patch \
+    && go test -mod=vendor -timeout=120s github.com/go-jose/go-jose/v3 github.com/jackc/pgproto3/v2
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/hydra .
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 COPY --from=build /out/shauth /shauth
 COPY --from=build /out/shauth-migrate /shauth-migrate
 COPY --from=build /out/shauth-healthcheck /shauth-healthcheck

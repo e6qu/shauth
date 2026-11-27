@@ -2650,8 +2650,8 @@
       "BrowserSession": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "shauth_session",
-        "description": "Existing authenticated browser session. Self-service is limited to the signed-in account; these operations do not accept administration bearer tokens."
+        "name": "__Host-shauth_session",
+        "description": "Existing authenticated HTTPS browser session. Loopback-only insecure development uses shauth_session. Self-service is limited to the signed-in account; these operations do not accept administration bearer tokens."
       }
     },
     "schemas": {

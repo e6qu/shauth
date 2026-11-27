@@ -72,3 +72,16 @@ See [docs/development.md](docs/development.md) for requirements and details.
 | [Public demo](docs/demo.md) | GitHub Pages publication, interface captures, and browser checks. |
 | [Terraform module](terraform/README.md) | An Amazon ECS deployment of Shauth. |
 | [Agent guidelines](AGENTS.md) | Rules for anyone, human or agent, changing this repository. |
+
+## Dependency release policy
+
+Dependency updates wait at least 24 hours after their registry release timestamp.
+Dependabot applies a one-day cooldown and groups eligible updates by ecosystem,
+including the website and Storybook packages. `node scripts/check-dependency-age.mjs
+origin/main` checks changed Go modules, npm lock entries, Terraform providers,
+pinned GitHub Actions, and official container-image selections. CI runs this
+check before the integration jobs; it also covers security-update PRs, which
+Dependabot's own cooldown excludes. Registry failures and missing timestamps fail
+the check. Go uses the version timestamp returned by the public module proxy;
+a delay reduces exposure to newly published packages but does not establish trust
+in their contents. Keep immutable image/action pins and checksum verification.
