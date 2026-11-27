@@ -1,0 +1,78 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* Components and colors come from the application's generated shauth.css. */
+.tour { background: var(--bg); }
+.tour .site-header { background: var(--bg); backdrop-filter: none; }
+.tour .header-inner, .tour-main, .tour-footer { width: min(100% - 4rem, 76rem); margin-inline: auto; }
+.tour .header-inner { min-height: 6rem; }
+.tour .brand { font-size: 1.4rem; }
+.tour .nav { gap: .6rem; }
+.tour .nav a, .tour .theme-button { font-size: .95rem; }
+.theme-symbol { padding-right: .3rem; }
+.tour-intro { display: grid; grid-template-columns: 1.1fr 1fr; gap: clamp(2rem, 5vw, 5rem); align-items: center; padding: 5rem 0 6rem; }
+.tour-thesis h1 { margin: 1.25rem 0 1.75rem; font-size: clamp(3.3rem, 6.4vw, 5.6rem); line-height: 1.02; letter-spacing: -.06em; font-weight: 750; }
+.tour-thesis h1 em { color: var(--brand); font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; font-weight: 500; letter-spacing: -.055em; }
+.tour-lede { max-width: 31rem; margin: 0 0 1.7rem; font-size: 1.2rem; color: var(--muted); line-height: 1.65; }
+.tour-foundation { display: flex; gap: .65rem; flex-wrap: wrap; margin: 2rem 0 0; color: var(--muted); font-size: .875rem; }
+.tour-foundation span { color: var(--border); }
+.tour-screen { min-width: 0; margin: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-strong); overflow: hidden; }
+.tour-screen-heading { display: flex; justify-content: space-between; gap: 1rem; padding: 1.1rem 1.4rem; border-bottom: 1px solid var(--border); }
+.tour-utility { font: 500 .8125rem/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; color: var(--muted); }
+.tour-screen-controls { display: flex; padding: 1rem 1.4rem 0; gap: .5rem; flex-wrap: wrap; }
+.tour-screen-controls[hidden] { display: none; }
+.tour-screen-button { background: transparent; color: var(--muted); border: 1px solid transparent; border-radius: .65rem; padding: .45rem .65rem; font-size: .875rem; font-weight: 650; }
+.tour-screen-button[aria-pressed="true"] { color: var(--text); border-color: var(--border); background: var(--surface); }
+.tour-screen-stage { margin: 1.2rem 1.4rem; min-height: 20rem; display: grid; align-items: center; }
+.tour-screen picture { display: block; width: 100%; }
+.tour-screen img { display: block; width: 100%; height: auto; border-radius: 1rem; }
+.tour-screen figcaption { margin: 0 1.4rem; color: var(--muted); font-size: .95rem; }
+.tour-screen figcaption strong { display: block; color: var(--text); margin-bottom: .3rem; }
+.tour-capture-note { padding: .9rem 1.4rem 1.2rem; margin: 0; color: var(--muted); font-size: .8125rem; }
+.tour-flow, .tour-operations, .tour-contract { padding: 4.5rem 0; border-top: 1px solid var(--border); scroll-margin-top: 1rem; }
+.tour-section-heading { max-width: 38rem; }
+.tour-section-heading h2, .tour-contract h2, .tour-next h2 { font-size: clamp(2rem, 3.5vw, 3rem); line-height: 1.12; font-weight: 700; letter-spacing: -.045em; }
+.tour-section-heading > p:last-of-type, .tour-contract p, .tour-next p { color: var(--muted); max-width: 36rem; }
+.tour-journey { list-style: none; padding: 0; margin: 3rem 0 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 2.5rem; }
+.tour-journey li { border-top: 3px solid var(--brand); padding-top: 1.4rem; }
+.tour-step-label { color: var(--accent); font: 600 .875rem/1.5 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.tour-journey h3 { margin-top: .7rem; font-size: 1.3rem; letter-spacing: -.025em; }
+.tour-journey p { color: var(--muted); }
+.tour-journey a { font-size: .95rem; }
+.tour-operations { display: grid; grid-template-columns: 1fr 1.1fr; gap: 5rem; }
+.tour-operations .button { margin-top: 1rem; }
+.tour-capabilities { margin: 0; }
+.tour-capabilities > div { padding: 1.25rem 0; border-bottom: 1px solid var(--border); }
+.tour-capabilities > div:first-child { padding-top: 0; }
+.tour-capabilities dt { font-size: 1.2rem; font-weight: 750; }
+.tour-capabilities dd { margin: .4rem 0 0; color: var(--muted); }
+.tour-contract { display: grid; grid-template-columns: 1fr 1.1fr; gap: 5rem; align-items: center; }
+.tour-discovery { padding: 2rem; background: var(--surface-strong); border-radius: var(--radius); border: 1px solid var(--border); }
+.tour-discovery code { display: block; overflow-wrap: anywhere; margin: 1rem 0; font-size: 1.05rem; color: var(--brand); }
+.tour-next { padding: 3rem; margin: 1rem 0 4rem; border-radius: var(--radius); background: var(--brand-soft); display: grid; grid-template-columns: 1fr; gap: 1rem; }
+.tour-next h2 { max-width: 40rem; }
+.tour-footer { border-top: 1px solid var(--border); padding: 1.5rem 0 2rem; display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; }
+.tour-footer p, .tour-footer > a:last-child { font-size: .875rem; }
+.tour-footer p { color: var(--muted); }
+@media (min-width: 1000px) { .tour-screen-stage { min-height: 25rem; } }
+@media (max-width: 850px) {
+  .tour-intro { gap: 2rem; }
+  .tour-thesis h1 { font-size: clamp(3rem, 7vw, 4.5rem); }
+  .tour-operations, .tour-contract { gap: 2rem; }
+  .tour-journey { gap: 1.5rem; }
+}
+@media (max-width: 650px) {
+  .tour .header-inner, .tour-main, .tour-footer { width: min(100% - 2rem, 36rem); }
+  .tour .header-inner { padding: 1rem 0; min-height: 5rem; flex-wrap: wrap; }
+  .tour .nav { gap: .1rem; }
+  .tour .nav a, .tour .theme-button { padding: .45rem; font-size: .875rem; }
+  .tour-intro { grid-template-columns: 1fr; padding: 3rem 0; gap: 2.5rem; }
+  .tour-thesis h1 { font-size: clamp(3.4rem, 13vw, 5rem); }
+  .tour-lede { font-size: 1.1rem; }
+  .tour-flow, .tour-operations, .tour-contract { padding: 3rem 0; }
+  .tour-journey, .tour-operations, .tour-contract { grid-template-columns: 1fr; }
+  .tour-journey { gap: 2rem; margin-top: 2rem; }
+  .tour-screen-stage { min-height: 18rem; }
+  .tour-discovery, .tour-next { padding: 1.5rem; }
+  .tour-footer { align-items: flex-start; flex-direction: column; gap: .5rem; }
+  .tour-footer p { margin: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .tour *, .tour *::before, .tour *::after { scroll-behavior: auto; transition: none; } }

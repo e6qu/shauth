@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Explore Shauth: one sign-in for your applications, standard OpenID Connect, and logout that reaches every connected session.">
+  <meta name="theme-color" content="#6d28d9">
+  <title>Shauth — One sign-in. Every app.</title>
+  <link rel="icon" href="demo-assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="demo-assets/shauth.css">
+  <link rel="stylesheet" href="demo-assets/tour.css">
+  <script src="demo-assets/theme.js"></script>
+  <script src="demo-assets/tour.js" defer></script>
+</head>
+<body class="tour">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="./" aria-label="Shauth home"><img src="demo-assets/favicon.svg" width="36" height="36" alt="">Shauth</a>
+      <nav class="nav" aria-label="Main navigation">
+        <a href="#how-it-works">How it works</a>
+        <a href="https://github.com/e6qu/shauth#documentation">Docs</a>
+        <a href="https://github.com/e6qu/shauth">GitHub</a>
+        <button class="theme-button" id="theme-toggle" type="button" hidden><span class="theme-symbol" aria-hidden="true">◐</span> Theme</button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main-content" class="tour-main">
+    <section class="tour-intro" aria-labelledby="intro-title">
+      <div class="tour-thesis">
+        <p class="eyebrow">Identity for your applications</p>
+        <h1 id="intro-title">One sign-in.<br><em>Every app.</em><br>One sign-out.</h1>
+        <p class="tour-lede">Give your applications a shared front door. Shauth brings sign-in, access, and sessions together through standard OpenID Connect.</p>
+        <div class="actions">
+          <a class="button" href="#how-it-works">Explore the flow</a>
+          <a class="button button-secondary" href="https://github.com/e6qu/shauth/blob/main/docs/integrating-apps.md">Connect an application</a>
+        </div>
+        <p class="tour-foundation">OpenID Connect <span aria-hidden="true">/</span> Ory Hydra <span aria-hidden="true">/</span> PostgreSQL</p>
+      </div>
+
+      <figure class="tour-screen" aria-labelledby="screen-caption">
+        <div class="tour-screen-heading"><span class="tour-utility">Inside Shauth</span><span class="tour-utility">Actual interface</span></div>
+        <div class="tour-screen-controls" aria-label="Choose an interface screenshot" hidden>
+          <button type="button" class="tour-screen-button" data-screen="signin" aria-pressed="true">Sign-in screen</button>
+          <button type="button" class="tour-screen-button" data-screen="signedout" aria-pressed="false">Signed-out screen</button>
+        </div>
+        <div class="tour-screen-stage">
+          <picture id="screen-picture">
+            <source media="(prefers-color-scheme: dark)" srcset="demo-assets/signin-dark.png">
+            <img id="screen-image" src="demo-assets/signin-light.png" width="544" height="551" alt="Shauth’s sign-in screen, with GitHub sign-in and a local username and password form." fetchpriority="high">
+          </picture>
+        </div>
+        <figcaption id="screen-caption"><strong>A familiar place to begin.</strong> GitHub and local accounts share one sign-in page. Microsoft Entra ID can also be enabled.</figcaption>
+        <p class="tour-capture-note">A capture of the real interface, not a sign-in form. No account is needed to explore this tour.</p>
+      </figure>
+    </section>
+
+    <section class="tour-flow" id="how-it-works" aria-labelledby="flow-title">
+      <div class="tour-section-heading"><p class="eyebrow">The session lifecycle</p><h2 id="flow-title">Connected at sign-in.<br>Connected at sign-out.</h2><p>Each application owns its experience. Shauth connects their identity and session lifecycles.</p></div>
+      <ol class="tour-journey">
+        <li><span class="tour-step-label">Sign in</span><h3>Start where you work.</h3><p>Open an application directly, or choose it from Shauth’s app catalog. Shauth handles authentication and returns you to that application.</p><a href="https://github.com/e6qu/shauth/blob/main/docs/architecture.md">Read about sign-in</a></li>
+        <li><span class="tour-step-label">Single sign-on</span><h3>Take your identity with you.</h3><p>Open another registered app using the same Shauth browser session. Each app receives tokens for its own OpenID Connect client.</p><a href="https://github.com/e6qu/shauth/blob/main/docs/integrating-apps.md">See the OIDC contract</a></li>
+        <li><span class="tour-step-label">Global logout</span><h3>Leave every session behind.</h3><p>Sign out from a connected app. Shauth ends the shared session, propagates logout, and returns you to that app’s registered signed-out page.</p><a href="https://github.com/e6qu/shauth/blob/main/docs/architecture.md">Read about global logout</a></li>
+      </ol>
+    </section>
+
+    <section class="tour-operations" aria-labelledby="operations-title">
+      <div class="tour-section-heading"><p class="eyebrow">For the people running it</p><h2 id="operations-title">Access you can see.<br>Sessions you can end.</h2><p>The administration interface brings the work of running identity into one place.</p><a class="button button-secondary" href="https://github.com/e6qu/shauth/blob/main/docs/api.md">Explore the administration API</a></div>
+      <dl class="tour-capabilities">
+        <div><dt>People &amp; access</dt><dd>Manage local accounts, invitations, roles, and GitHub access rules.</dd></div>
+        <div><dt>Browser sessions</dt><dd>Inspect active sessions and revoke access across connected applications.</dd></div>
+        <div><dt>Application catalog</dt><dd>Register app endpoints and inspect browser checks for both direct and catalog entry.</dd></div>
+        <div><dt>Operational evidence</dt><dd>Read dependency health, application observations, service logs, and the audit record.</dd></div>
+      </dl>
+    </section>
+
+    <section class="tour-contract" aria-labelledby="contract-title">
+      <div><p class="eyebrow">A standard integration</p><h2 id="contract-title">Your app speaks OIDC.<br>Shauth handles the identity providers.</h2><p>Applications integrate with one issuer. GitHub and optional Microsoft Entra ID stay behind Shauth’s identity boundary.</p></div>
+      <div class="tour-discovery"><span class="tour-utility">Discovery endpoint</span><code>/.well-known/openid-configuration</code><p>Authorization code flow, confidential clients, exact issuer and audience checks, and PKCE where applicable.</p><a href="https://github.com/e6qu/shauth/blob/main/docs/integrating-apps.md">Read the integration guide</a></div>
+    </section>
+
+    <section class="tour-next" aria-labelledby="next-title"><div><p class="eyebrow">Explore the project</p><h2 id="next-title">Make one sign-in work everywhere.</h2><p>Read the source, run the complete stack, or connect your first application.</p></div><div class="actions"><a class="button" href="https://github.com/e6qu/shauth">View Shauth on GitHub</a><a class="button button-secondary" href="https://github.com/e6qu/shauth/blob/main/docs/development.md">Run it yourself</a></div></section>
+  </main>
+  <footer class="tour-footer"><a class="brand" href="./">Shauth</a><p>A static product tour. Authentication runs in your Shauth deployment.</p><a href="https://github.com/e6qu/shauth#documentation">Documentation</a></footer>
+</body>
+</html>

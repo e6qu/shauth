@@ -4,6 +4,10 @@ Shauth is an OpenID Connect identity provider for a group of web applications.
 One sign-in to Shauth signs a person in to every registered application, and
 signing out of any one of them signs them out of all of them.
 
+[Explore the public demo](https://e6qu.github.io/shauth/) for a tour of the real
+interface and the sign-in and logout flows. The demo is a static website; it
+does not collect credentials or connect to a live administration service.
+
 - **Sign-in sources:** GitHub, an optional single Microsoft Entra ID tenant, and
   local accounts created by an administrator or by invitation.
 - **Issuer:** [Ory Hydra](https://www.ory.sh/hydra/) v26.2.0, with two patches
@@ -60,5 +64,6 @@ See [docs/development.md](docs/development.md) for requirements and details.
 | [API](docs/api.md) | The JSON administration, catalog and observability endpoints. |
 | [Operations](docs/operations.md) | Configuration, monitoring sources, images and deployment. |
 | [Development](docs/development.md) | Repository layout, tests and CI. |
+| [Public demo](docs/demo.md) | GitHub Pages publication, interface captures, and browser checks. |
 | [Terraform module](terraform/README.md) | An Amazon ECS deployment of Shauth. |
 | [Agent guidelines](AGENTS.md) | Rules for anyone, human or agent, changing this repository. |

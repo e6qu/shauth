@@ -1,0 +1,26 @@
+{
+  "captured_at": "2026-11-27T16:20:08.026Z",
+  "kind": "Public, unauthenticated Shauth pages; no altered content or seeded accounts.",
+  "captures": [
+    {
+      "file": "signin-light.png",
+      "width": 544,
+      "height": 551
+    },
+    {
+      "file": "signedout-light.png",
+      "width": 544,
+      "height": 279
+    },
+    {
+      "file": "signin-dark.png",
+      "width": 544,
+      "height": 551
+    },
+    {
+      "file": "signedout-dark.png",
+      "width": 544,
+      "height": 279
+    }
+  ]
+}
