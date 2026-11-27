@@ -146,6 +146,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if config.EntraTenantID != "" && !tenantIDPattern.MatchString(config.EntraTenantID) {
 		return Config{}, fmt.Errorf("ENTRA_TENANT_ID must be a specific Microsoft Entra ID tenant UUID")
 	}
+	if config.AllowInsecureCookies && !loopbackHost(publicURL.Hostname()) {
+		return Config{}, fmt.Errorf("SHAUTH_ALLOW_INSECURE_COOKIES=true is permitted only for a loopback development URL")
+	}
 	if publicURL.Scheme != "https" && (!config.AllowInsecureCookies || !loopbackHost(publicURL.Hostname())) {
 		return Config{}, fmt.Errorf("SHAUTH_PUBLIC_URL must use HTTPS; SHAUTH_ALLOW_INSECURE_COOKIES=true is permitted only for a loopback development URL")
 	}

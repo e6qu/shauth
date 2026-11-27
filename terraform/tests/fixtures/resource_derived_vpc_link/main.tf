@@ -11,13 +11,15 @@ terraform {
 
 resource "aws_security_group" "shared" {
   name_prefix = "shauth-test-shared-link-"
+  description = "Shared VPC Link for the resource-derived module contract"
   vpc_id      = "vpc-0123456789abcdef0"
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTP to private test VPC workloads"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
   }
 }
 

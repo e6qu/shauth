@@ -172,6 +172,7 @@ resource "aws_security_group" "task" {
   description = "Limits Shauth task ingress to the VPC Link and egress to HTTPS and DNS"
   vpc_id      = var.vpc_id
   ingress {
+    description     = "HTTP from the API Gateway VPC Link"
     from_port       = 8080
     to_port         = 8080
     protocol        = "tcp"
