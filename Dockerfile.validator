@@ -24,6 +24,11 @@ COPY package.json package-lock.json ./
 # connection is retried and the whole install is bounded, so a slow mirror
 # fails the build with a clear error instead of exhausting the CI job.
 RUN printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-bounded-downloads
+# The Go worker uses the system trust store. Node's bundled roots and
+# Chromium's dependencies do not supply it in the slim runtime image.
+RUN timeout 180 apt-get update \
+    && timeout 120 apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN npm ci && timeout 600 npx playwright install --with-deps chromium && npm cache clean --force
 COPY validator/validate.mjs validator/application-ui.mjs validator/security.mjs validator/readiness.mjs ./
 COPY --from=build /out/shauth-validator /usr/local/bin/shauth-validator
