@@ -88,6 +88,16 @@ jobs:
           test "$(docker image inspect shauth-validator:pr --format '{{.Config.User}}')" = node
           docker run --rm --entrypoint node shauth-validator:pr --input-type=module --eval \
             'import { chromium } from "playwright"; const browser = await chromium.launch({headless:true}); await browser.close();'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+      - name: Verify Go HTTPS trust inside the runtime image
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.architecture }} \
+            go build -o "$RUNNER_TEMP/container-tls-probe" ./scripts/container-tls-probe
+          docker run --rm --entrypoint /container-tls-probe \
+            --mount "type=bind,src=$RUNNER_TEMP/container-tls-probe,dst=/container-tls-probe,readonly" \
+            shauth-validator:pr https://example.com/
       - name: Verify the validator's module graph resolves in the image
         # validate.mjs runs a browser flow when imported, so its local
         # modules are loaded individually; a module missing from the image
