@@ -1,0 +1,19 @@
+{
+  "name": "shauth-website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:storybook": "storybook build --output-dir ../.pages/storybook --disable-telemetry",
+    "storybook": "storybook dev -p 6006 --no-open --disable-telemetry"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  },
+  "devDependencies": {
+    "@apidevtools/swagger-parser": "13.1.0",
+    "@storybook/html-vite": "10.6.9",
+    "marked": "18.3.0",
+    "storybook": "10.6.9",
+    "vite": "8.4.0"
+  }
+}

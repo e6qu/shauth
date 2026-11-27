@@ -2,7 +2,7 @@
 # The Go image comes from the Amazon ECR Public copy of Docker's official images,
 # pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
 # pulls per address, and the shared CI runners exhaust it.
-FROM public.ecr.aws/docker/library/golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
+FROM public.ecr.aws/docker/library/golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 # The revision this image was built from, stamped into the binaries so every
 # page and contract can report exactly which build is serving it.
 ARG SHAUTH_REVISION=unknown
@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/e6
 # The Go image comes from the Amazon ECR Public copy of Docker's official images,
 # pinned to the same index digest Docker Hub serves: Docker Hub limits anonymous
 # pulls per address, and the shared CI runners exhaust it.
-FROM public.ecr.aws/docker/library/golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS hydra-build
+FROM public.ecr.aws/docker/library/golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS hydra-build
 ARG HYDRA_COMMIT=0b84568fffccf151dc5e6c7955fdfb738555bf4b
 ARG HYDRA_SOURCE_SHA256=7ceaae3299780959e8390925732629931f63f20300464d2822d49628eeb3332e
 RUN apk add --no-cache patch

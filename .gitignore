@@ -3,3 +3,7 @@
 *.tfstate
 *.tfstate.*
 node_modules/
+
+# Static website and Storybook build outputs
+.pages/
+.storybook-cache/

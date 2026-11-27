@@ -5,5 +5,7 @@ terraform/.terraform
 *.tfstate
 *.tfstate.*
 node_modules
+website
+.pages
 .github
 .claude

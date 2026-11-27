@@ -1,5 +1,9 @@
 # API
 
+The [OpenAPI 3.1 specification](../openapi.json) describes the implemented
+JSON administration and internal APIs, their credentials, and the health check.
+Use OIDC discovery for the standard identity-provider endpoints.
+
 Every endpoint returns JSON. Each response names its contract in
 `schema_version`, for example `shauth.users/v1`; the tables below leave out the
 `shauth.` prefix. Reads also carry `observed_at`. Times are UTC.

@@ -1,0 +1,5326 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Shauth API",
+    "version": "1.0.0",
+    "description": "Deployment-neutral identity administration, observability, self-service, and internal caller contracts. Paths are relative to the Shauth service origin, not the GitHub Pages documentation site. Most success responses carry an explicit schema_version and observed_at; health and internal worker/hook responses use the shapes documented per operation. Tokens are distinct runtime-injected bearer credentials. No credentials or deployment URLs are embedded here."
+  },
+  "tags": [
+    {
+      "name": "Administration"
+    },
+    {
+      "name": "Self-service"
+    },
+    {
+      "name": "Validator"
+    },
+    {
+      "name": "Health"
+    }
+  ],
+  "paths": {
+    "/api/v1/apps": {
+      "get": {
+        "operationId": "getApiV1Apps",
+        "summary": "List registered applications",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          },
+          {
+            "CatalogRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{slug}": {
+      "get": {
+        "operationId": "getApiV1AppsSlug",
+        "summary": "Read an application",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          },
+          {
+            "CatalogRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Slug",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/apps/validations": {
+      "get": {
+        "operationId": "getApiV1AppsValidations",
+        "summary": "Read latest validation results",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          },
+          {
+            "CatalogRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppValidationsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        }
+      }
+    },
+    "/api/v1/apps/validations/history": {
+      "get": {
+        "operationId": "getApiV1AppsValidationsHistory",
+        "summary": "Read validation history",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          },
+          {
+            "CatalogRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppValidationHistoryObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "query",
+            "required": false,
+            "description": "Optional application slug.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/users": {
+      "get": {
+        "operationId": "getApiV1Users",
+        "summary": "Search accounts",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsersObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Match username, email, or GitHub login.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{id}": {
+      "get": {
+        "operationId": "getApiV1UsersId",
+        "summary": "Read an account",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{id}/sessions": {
+      "get": {
+        "operationId": "getApiV1UsersIdSessions",
+        "summary": "List an account’s browser sessions",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserSessionsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/session-policy": {
+      "get": {
+        "operationId": "getApiV1SessionPolicy",
+        "summary": "Read durable session lifetimes",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPolicyObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        }
+      }
+    },
+    "/api/v1/oidc-clients": {
+      "get": {
+        "operationId": "getApiV1OidcClients",
+        "summary": "List OIDC clients without secrets",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcClientsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        }
+      }
+    },
+    "/api/v1/github-mappings": {
+      "get": {
+        "operationId": "getApiV1GithubMappings",
+        "summary": "List GitHub access rules",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubRoleMappingsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        }
+      }
+    },
+    "/api/v1/connectors": {
+      "get": {
+        "operationId": "getApiV1Connectors",
+        "summary": "Read upstream connector configuration",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          }
+        }
+      }
+    },
+    "/api/v1/invitations": {
+      "get": {
+        "operationId": "getApiV1Invitations",
+        "summary": "List invitations without redemption tokens",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/sessions": {
+      "get": {
+        "operationId": "getApiV1Sessions",
+        "summary": "List browser sessions across accounts",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "State",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "all"
+              ],
+              "default": "all"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "description": "Optional account identifier.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/sessions/{id}": {
+      "get": {
+        "operationId": "getApiV1SessionsId",
+        "summary": "Read a browser session and its Hydra correlations",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/logout-grants": {
+      "get": {
+        "operationId": "getApiV1LogoutGrants",
+        "summary": "List global logout correlation and retry state",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutGrantsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "State",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "outstanding",
+                "all"
+              ],
+              "default": "outstanding"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/audit-events": {
+      "get": {
+        "operationId": "getApiV1AuditEvents",
+        "summary": "Read the durable security audit record",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "description": "Subject account filter; the account path takes precedence.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "required": false,
+            "description": "Actor",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "description": "Event type",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "Until",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{id}/audit-events": {
+      "get": {
+        "operationId": "getApiV1UsersIdAuditEvents",
+        "summary": "Read the durable security audit record",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "subject",
+            "in": "query",
+            "required": false,
+            "description": "Subject account filter; the account path takes precedence.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "required": false,
+            "description": "Actor",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "description": "Event type",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "Until",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/monitoring": {
+      "get": {
+        "operationId": "getApiV1Monitoring",
+        "summary": "Read dependency health and configured monitoring sources",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonitoringObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          }
+        },
+        "description": "Reports failed source/dependency checks in the response instead of failing the entire read."
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "operationId": "getApiV1Metrics",
+        "summary": "Read durable counts from PostgreSQL",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        }
+      }
+    },
+    "/api/v1/metrics/requests": {
+      "get": {
+        "operationId": "getApiV1MetricsRequests",
+        "summary": "Read this process’s observed request traffic",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestMetricsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          }
+        }
+      }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "operationId": "getApiV1Logs",
+        "summary": "Read recent log lines from this process",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          }
+        },
+        "parameters": [
+          {
+            "name": "level",
+            "in": "query",
+            "required": false,
+            "description": "Minimum severity; omitted or all includes every level.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "error",
+                "warn",
+                "info",
+                "all"
+              ]
+            }
+          },
+          {
+            "name": "contains",
+            "in": "query",
+            "required": false,
+            "description": "Case-insensitive substring of the log message.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum lines, newest first; defaults to 200.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000,
+              "default": 200
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/health/deep": {
+      "get": {
+        "operationId": "getApiV1HealthDeep",
+        "summary": "Check dependencies and startup invariants",
+        "tags": [
+          "Health"
+        ],
+        "security": [
+          {
+            "AdminRead": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeepHealthObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "description": "Unhealthy dependencies, or administration reads are not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/DeepHealthObservedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "getHealthz",
+        "summary": "Probe PostgreSQL and the OAuth provider",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Both dependencies are ready; body is ok followed by a newline.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Database or OAuth provider is unavailable.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/sessions": {
+      "get": {
+        "operationId": "getApiV1MeSessions",
+        "summary": "List the signed-in account’s sessions",
+        "tags": [
+          "Self-service"
+        ],
+        "security": [
+          {
+            "BrowserSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MySessionsObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A current browser sign-in is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum records to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Records to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ]
+      }
+    },
+    "/internal/me/sessions/{id}/revoke": {
+      "post": {
+        "operationId": "postInternalMeSessionsIdRevoke",
+        "summary": "End one of the signed-in account’s own sessions",
+        "tags": [
+          "Self-service"
+        ],
+        "security": [
+          {
+            "BrowserSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRevokeObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A current browser sign-in is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          },
+          "403": {
+            "description": "Cross-origin cookie-authenticated request refused.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The browser session already ended. Correlated OAuth-session revocation is retried before reporting the conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Cookie-authenticated self-service. Without an Authorization header, a supplied Origin must match Shauth’s configured public origin; cross-origin requests are refused. The /internal namespace does not require a double-submit _csrf token. Returns 404 for another account’s session.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "description": "Browser-supplied origin; when present on a cookie-authenticated request it must match the public origin.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/users/{id}/disable": {
+      "post": {
+        "operationId": "postInternalUsersIdDisable",
+        "summary": "Disable an account and revoke its sessions",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/users/{id}/enable": {
+      "post": {
+        "operationId": "postInternalUsersIdEnable",
+        "summary": "Enable an account without restoring ended sessions",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/users": {
+      "post": {
+        "operationId": "postInternalUsers",
+        "summary": "Create a local account",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUser"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 4 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/invitations": {
+      "post": {
+        "operationId": "postInternalInvitations",
+        "summary": "Create and email an invitation",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "description": "The redemption link is sent only by email. If sending fails, the invitation is revoked and the call returns 502.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInvitation"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 4 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/invitations/{id}/revoke": {
+      "post": {
+        "operationId": "postInternalInvitationsIdRevoke",
+        "summary": "Revoke a pending invitation",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationRevokeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/sessions/{id}/revoke": {
+      "post": {
+        "operationId": "postInternalSessionsIdRevoke",
+        "summary": "End a browser session and its correlated provider sessions",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRevokeObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          },
+          "409": {
+            "description": "The browser session already ended. Correlated OAuth-session revocation is retried before reporting the conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/users/{id}/sessions/revoke": {
+      "post": {
+        "operationId": "postInternalUsersIdSessionsRevoke",
+        "summary": "End every session for an account",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRevocationObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/session-policy": {
+      "put": {
+        "operationId": "putInternalSessionPolicy",
+        "summary": "Update browser and provider session lifetimes",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionPolicyObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "description": "Applies lifetimes to registered clients and durable policy, restoring the previous policy on failure. updated_at is ignored if supplied.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionPolicy"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 4 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/oidc-clients": {
+      "post": {
+        "operationId": "postInternalOidcClients",
+        "summary": "Register a confidential OIDC client",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcClientResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOIDCClient"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 16 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/oidc-clients/{id}": {
+      "delete": {
+        "operationId": "deleteInternalOidcClientsId",
+        "summary": "Delete an unused OIDC client",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcClientDeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "description": "Refuses clients still used by an app or owned by bootstrap configuration.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/github-mappings": {
+      "post": {
+        "operationId": "postInternalGithubMappings",
+        "summary": "Create a GitHub access rule",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubRoleMappingResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGitHubMapping"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 4 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/github-mappings/{id}": {
+      "delete": {
+        "operationId": "deleteInternalGithubMappingsId",
+        "summary": "Delete a GitHub access rule and revoke affected sessions",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubRoleMappingDeleteResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/apps": {
+      "post": {
+        "operationId": "postInternalApps",
+        "summary": "Register an application in the catalog",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApp"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 16 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/apps/{slug}": {
+      "delete": {
+        "operationId": "deleteInternalAppsSlug",
+        "summary": "Remove a catalog application",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppDeleteObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "description": "Slug",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/internal/apps/validations/enqueue": {
+      "post": {
+        "operationId": "postInternalAppsValidationsEnqueue",
+        "summary": "Queue both real browser validation directions",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "AdminWrite": []
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppValidationEnqueueObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "description": "An empty body, {}, or omitted/null slug queues all registered apps; a named slug queues one. This triggers real sign-ins and global logouts.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidationEnqueue"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 4 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/sessions/reset": {
+      "post": {
+        "operationId": "postInternalSessionsReset",
+        "summary": "End all browser and OAuth sessions for an account",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "SessionReset": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResetObservedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "502": {
+            "$ref": "#/components/responses/502"
+          }
+        },
+        "description": "Select the account by user_id or email in JSON or form data. Legacy query parameters are also read for non-JSON requests. A user_id takes precedence over email.",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "description": "Legacy non-JSON selector; prefer the request body.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "email",
+            "in": "query",
+            "required": false,
+            "description": "Legacy non-JSON selector; prefer the request body to keep email out of access logs.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionReset"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionReset"
+              }
+            }
+          },
+          "description": "JSON requests are limited to 4 KiB. Form and legacy query selectors are also supported."
+        }
+      }
+    },
+    "/internal/validator/jobs/claim": {
+      "post": {
+        "operationId": "postInternalValidatorJobsClaim",
+        "summary": "Claim the next queued browser-validation job",
+        "tags": [
+          "Validator"
+        ],
+        "security": [
+          {
+            "Validator": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidatorJob"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "204": {
+            "description": "No job is available."
+          }
+        }
+      }
+    },
+    "/internal/validator/browser-bootstraps": {
+      "post": {
+        "operationId": "postInternalValidatorBrowserBootstraps",
+        "summary": "Issue short-lived browser sign-in links for a claimed run",
+        "tags": [
+          "Validator"
+        ],
+        "security": [
+          {
+            "Validator": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "urls": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "urls"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          }
+        },
+        "description": "Creates one link per local destination for the validation identity. Links contain one-time credentials in their fragments and must not be logged or shared.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidatorBootstrapRequest"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 4 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/validator/jobs/{id}/complete": {
+      "post": {
+        "operationId": "postInternalValidatorJobsIdComplete",
+        "summary": "Record the claimed validation’s result",
+        "tags": [
+          "Validator"
+        ],
+        "security": [
+          {
+            "Validator": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful response; no body."
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "503": {
+            "$ref": "#/components/responses/503"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidatorResult"
+              }
+            }
+          },
+          "description": "Maximum JSON body size: 16 KiB. Unknown fields and trailing JSON values are rejected."
+        }
+      }
+    },
+    "/internal/hydra/token-hook": {
+      "post": {
+        "operationId": "postInternalHydraTokenHook",
+        "summary": "Revalidate account and session before Hydra issues tokens",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "TokenHook": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "type": "object",
+                      "properties": {
+                        "access_token": {
+                          "$ref": "#/components/schemas/IdentityClaims"
+                        },
+                        "id_token": {
+                          "$ref": "#/components/schemas/IdentityClaims"
+                        }
+                      },
+                      "required": [
+                        "access_token",
+                        "id_token"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "session"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "204": {
+            "description": "Client-credentials grant accepted; no account claims."
+          }
+        },
+        "description": "For authorization-code and refresh grants, requires an active account and a live correlated sign-in session. Refreshes identity claims from PostgreSQL. Refuses unsupported grants. A sole client_credentials grant returns 204 without account claims.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenHookRequest"
+              }
+            }
+          },
+          "description": "The handler reads at most 1 MiB. Additional Hydra fields are accepted."
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AdminRead": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "SHAUTH_ADMIN_API_READ_TOKEN: read-only administration."
+      },
+      "AdminWrite": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "SHAUTH_ADMIN_API_WRITE_TOKEN: administration mutations; distinct from all read credentials."
+      },
+      "CatalogRead": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "SHAUTH_VALIDATION_STATUS_TOKEN: application catalog and validation results only."
+      },
+      "SessionReset": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "SHAUTH_SESSION_RESET_TOKEN: account-wide session reset only."
+      },
+      "Validator": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "SHAUTH_VALIDATOR_TOKEN: real browser validation jobs and bootstrap links only."
+      },
+      "TokenHook": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "SHAUTH_TOKEN_HOOK_TOKEN: Ory Hydra token issuance hook only."
+      },
+      "BrowserSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "shauth_session",
+        "description": "Existing authenticated browser session. Self-service is limited to the signed-in account; these operations do not accept administration bearer tokens."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "description": "Caller-safe error; detailed dependency failures remain in server logs."
+      },
+      "Page": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "returned": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "limit",
+          "offset",
+          "returned",
+          "total",
+          "has_more"
+        ]
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "email_verified": {
+            "type": "boolean"
+          },
+          "identity_source": {
+            "type": "string",
+            "enum": [
+              "local",
+              "github",
+              "entra"
+            ]
+          },
+          "github_login": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "developer"
+            ]
+          },
+          "disabled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "email",
+          "email_verified",
+          "identity_source",
+          "role",
+          "disabled_at",
+          "created_at"
+        ]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user_agent": {
+            "type": "string"
+          },
+          "remote_address": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "last_seen_at",
+          "expires_at",
+          "user_agent",
+          "active"
+        ]
+      },
+      "OIDCClient": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_name": {
+            "type": "string"
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "post_logout_redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "frontchannel_logout_uri": {
+            "type": "string"
+          },
+          "backchannel_logout_uri": {
+            "type": "string"
+          },
+          "grant_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "response_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_endpoint_auth_method": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "client_name",
+          "redirect_uris",
+          "post_logout_redirect_uris",
+          "frontchannel_logout_uri",
+          "backchannel_logout_uri",
+          "grant_types",
+          "response_types",
+          "token_endpoint_auth_method"
+        ]
+      },
+      "GitHubMapping": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "user",
+              "organization",
+              "team"
+            ]
+          },
+          "target": {
+            "type": "string"
+          },
+          "github_user_id": {
+            "type": "integer"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "developer"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "target",
+          "role",
+          "created_at"
+        ]
+      },
+      "Invitation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "developer"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "revoked",
+              "expired"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "accepted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "invited_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "state",
+          "created_at",
+          "expires_at"
+        ]
+      },
+      "App": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "release_revision": {
+            "type": "string"
+          },
+          "launch_url": {
+            "type": "string"
+          },
+          "health_url": {
+            "type": "string"
+          },
+          "monitoring_url": {
+            "type": "string"
+          },
+          "validation_url": {
+            "type": "string"
+          },
+          "signed_out_url": {
+            "type": "string"
+          },
+          "oidc_client_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "health": {
+            "$ref": "#/components/schemas/AppHealth"
+          },
+          "validations": {
+            "type": "object",
+            "properties": {
+              "from_shauth": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Validation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "from_app": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Validation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "from_shauth",
+              "from_app"
+            ]
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "release_revision",
+          "launch_url",
+          "validation_url",
+          "signed_out_url",
+          "oidc_client_id",
+          "created_at",
+          "health",
+          "validations"
+        ]
+      },
+      "AppHealth": {
+        "type": "object",
+        "properties": {
+          "healthy": {
+            "type": "boolean"
+          },
+          "status_code": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "healthy"
+        ]
+      },
+      "Validation": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "release_revision": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "from_shauth",
+              "from_app"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "passed",
+              "failed"
+            ]
+          },
+          "requested_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validation_contract_hash": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": "integer"
+          },
+          "failure": {
+            "type": "string"
+          },
+          "witness": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "release_revision",
+          "direction",
+          "status",
+          "requested_at",
+          "validation_contract_hash"
+        ]
+      },
+      "AccountSession": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Session"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "user_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "username": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "admin",
+                  "developer"
+                ]
+              }
+            },
+            "required": [
+              "user_id",
+              "username",
+              "email",
+              "role"
+            ]
+          }
+        ]
+      },
+      "AuditEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "actor_user_id": {
+            "type": "string"
+          },
+          "subject_user_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "remote_address": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "id",
+          "event_type",
+          "created_at",
+          "details"
+        ]
+      },
+      "LogoutGrant": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "subject_user_id": {
+            "type": "string"
+          },
+          "managed_client_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "consumed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retry_after": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cleanup_attempts": {
+            "type": "integer"
+          },
+          "last_error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "subject_user_id",
+          "created_at",
+          "consumed_at",
+          "completed_at",
+          "retry_after",
+          "cleanup_attempts"
+        ]
+      },
+      "LogEntry": {
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "type": "integer"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warn",
+              "info",
+              "log"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sequence",
+          "at",
+          "level",
+          "message"
+        ]
+      },
+      "HealthCheck": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "latency_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "status"
+        ]
+      },
+      "TrafficRoute": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "integer"
+          },
+          "by_status_class": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "mean_ms": {
+            "type": "integer"
+          },
+          "max_ms": {
+            "type": "integer"
+          },
+          "p95_ms": {
+            "type": "integer"
+          },
+          "latency_buckets": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "last_status": {
+            "type": "integer"
+          },
+          "last_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "method",
+          "pattern",
+          "requests",
+          "by_status_class",
+          "mean_ms",
+          "max_ms",
+          "p95_ms",
+          "latency_buckets",
+          "last_status",
+          "last_at"
+        ]
+      },
+      "Traffic": {
+        "type": "object",
+        "properties": {
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrafficRoute"
+            }
+          },
+          "requests": {
+            "type": "integer"
+          },
+          "by_status_class": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "in_flight": {
+            "type": "integer"
+          },
+          "latency_bounds_ms": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "goroutines": {
+            "type": "integer"
+          },
+          "heap_bytes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "routes",
+          "requests",
+          "by_status_class",
+          "in_flight",
+          "latency_bounds_ms",
+          "goroutines",
+          "heap_bytes"
+        ]
+      },
+      "Snapshot": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Resource"
+            }
+          },
+          "cost_estimate": {
+            "$ref": "#/components/schemas/CostEstimate"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "resources"
+        ]
+      },
+      "Resource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "health": {
+            "type": "string"
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Metric"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "health",
+          "metrics"
+        ]
+      },
+      "Metric": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "unit",
+          "status"
+        ]
+      },
+      "CostEstimate": {
+        "type": "object",
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "basis": {
+            "type": "string"
+          },
+          "hours_per_month": {
+            "type": "number"
+          },
+          "hourly": {
+            "type": "number"
+          },
+          "daily": {
+            "type": "number"
+          },
+          "monthly": {
+            "type": "number"
+          },
+          "excludes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "line_items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CostLineItem"
+            }
+          }
+        },
+        "required": [
+          "currency",
+          "basis",
+          "hours_per_month",
+          "hourly",
+          "daily",
+          "monthly",
+          "excludes",
+          "limitations",
+          "line_items"
+        ]
+      },
+      "CostLineItem": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "hourly": {
+            "type": "number"
+          },
+          "monthly": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "hourly",
+          "monthly"
+        ]
+      },
+      "Build": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "uptime_seconds": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "started_at",
+          "uptime_seconds"
+        ]
+      },
+      "SessionPolicy": {
+        "type": "object",
+        "properties": {
+          "browser_absolute_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2160
+          },
+          "browser_idle_minutes": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 129600
+          },
+          "oidc_sso_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2160
+          },
+          "access_token_minutes": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 1440
+          },
+          "id_token_minutes": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 1440
+          },
+          "refresh_token_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2160
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "readOnly": true
+          }
+        },
+        "required": [
+          "browser_absolute_hours",
+          "browser_idle_minutes",
+          "oidc_sso_hours",
+          "access_token_minutes",
+          "id_token_minutes",
+          "refresh_token_hours"
+        ],
+        "description": "Idle and OIDC SSO lifetimes must not exceed the browser absolute lifetime. Refresh-token lifetime must cover both access and ID-token lifetimes. Durations are integral operator-facing units.",
+        "additionalProperties": false
+      },
+      "Connectors": {
+        "type": "object",
+        "properties": {
+          "github": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "admin_team": {
+                "type": "string"
+              },
+              "developer_team": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "entra": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "tenant_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "github",
+          "entra"
+        ]
+      },
+      "MonitoringSource": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/Snapshot"
+          }
+        },
+        "required": [
+          "source",
+          "stale"
+        ]
+      },
+      "IdentityClaims": {
+        "type": "object",
+        "properties": {
+          "sub": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string"
+          },
+          "email_verified": {
+            "type": "boolean"
+          },
+          "preferred_username": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "developer"
+            ]
+          }
+        },
+        "required": [
+          "sub",
+          "email",
+          "email_verified",
+          "preferred_username",
+          "role"
+        ],
+        "description": "Current identity claims, retaining additional claims supplied by Hydra, including the correlated sid."
+      },
+      "ValidatorWitness": {
+        "type": "object",
+        "properties": {
+          "managed_app_id": {
+            "type": "string"
+          },
+          "app_slug": {
+            "type": "string"
+          },
+          "app_name": {
+            "type": "string"
+          },
+          "oidc_client_id": {
+            "type": "string"
+          },
+          "launch_url": {
+            "type": "string"
+          },
+          "validation_url": {
+            "type": "string"
+          },
+          "signed_out_url": {
+            "type": "string"
+          },
+          "logout_bridge_url": {
+            "type": "string"
+          },
+          "release_revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "managed_app_id",
+          "app_slug",
+          "app_name",
+          "oidc_client_id",
+          "launch_url",
+          "validation_url",
+          "signed_out_url",
+          "logout_bridge_url",
+          "release_revision"
+        ]
+      },
+      "ValidatorJob": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "managed_app_id": {
+            "type": "string"
+          },
+          "app_slug": {
+            "type": "string"
+          },
+          "app_name": {
+            "type": "string"
+          },
+          "oidc_client_id": {
+            "type": "string"
+          },
+          "launch_url": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "validation_url": {
+            "type": "string"
+          },
+          "signed_out_url": {
+            "type": "string"
+          },
+          "logout_bridge_url": {
+            "type": "string"
+          },
+          "release_revision": {
+            "type": "string"
+          },
+          "shauth_url": {
+            "type": "string"
+          },
+          "validation_username": {
+            "type": "string"
+          },
+          "validation_email": {
+            "type": "string"
+          },
+          "witness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ValidatorWitness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "managed_app_id",
+          "app_slug",
+          "app_name",
+          "oidc_client_id",
+          "launch_url",
+          "direction",
+          "validation_url",
+          "signed_out_url",
+          "logout_bridge_url",
+          "release_revision",
+          "shauth_url",
+          "validation_username",
+          "validation_email",
+          "witness"
+        ],
+        "description": "A claimed real browser-validation job. Witness is null when no second application is available. Runtime coordinates are returned by the service."
+      },
+      "CreateUser": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 1
+          },
+          "email": {
+            "type": "string",
+            "minLength": 1
+          },
+          "password": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "14–72 UTF-8 bytes; bcrypt rejects longer input."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "developer"
+            ]
+          }
+        },
+        "required": [
+          "username",
+          "email",
+          "password",
+          "role"
+        ],
+        "additionalProperties": false
+      },
+      "CreateInvitation": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "developer"
+            ]
+          }
+        },
+        "required": [
+          "email",
+          "role"
+        ],
+        "additionalProperties": false
+      },
+      "CreateGitHubMapping": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "user",
+              "organization",
+              "team"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Login, organization, or organization/team. User logins are resolved to immutable numeric GitHub IDs."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "developer"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "target",
+          "role"
+        ],
+        "additionalProperties": false
+      },
+      "CreateOIDCClient": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{2,127}$"
+          },
+          "client_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "client_secret": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "At least 32 bytes, supplied only at creation."
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "post_logout_redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "frontchannel_logout_uri": {
+            "type": "string"
+          },
+          "backchannel_logout_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id",
+          "client_name",
+          "client_secret",
+          "redirect_uris",
+          "post_logout_redirect_uris"
+        ],
+        "description": "Provide a front-channel or back-channel logout URI. All coordinates must share an application origin; HTTPS is required except loopback.",
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "frontchannel_logout_uri"
+            ],
+            "properties": {
+              "frontchannel_logout_uri": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          {
+            "required": [
+              "backchannel_logout_uri"
+            ],
+            "properties": {
+              "backchannel_logout_uri": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ]
+      },
+      "CreateApp": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 63,
+            "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "launch_url": {
+            "type": "string"
+          },
+          "oidc_client_id": {
+            "type": "string"
+          },
+          "health_url": {
+            "type": "string"
+          },
+          "monitoring_url": {
+            "type": "string"
+          },
+          "validation_url": {
+            "type": "string"
+          },
+          "signed_out_url": {
+            "type": "string"
+          },
+          "release_revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "description",
+          "launch_url",
+          "oidc_client_id",
+          "health_url",
+          "validation_url",
+          "signed_out_url",
+          "release_revision"
+        ],
+        "description": "Register against an existing confidential OIDC client. URLs use one HTTPS origin (loopback HTTP allowed), with matching registered logout coordinates. release_revision is a 12–64 digit lowercase hexadecimal commit or sha256 digest.",
+        "additionalProperties": false
+      },
+      "SessionReset": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string"
+          }
+        },
+        "description": "Supply user_id or email; user_id takes precedence when both are supplied.",
+        "anyOf": [
+          {
+            "required": [
+              "user_id"
+            ]
+          },
+          {
+            "required": [
+              "email"
+            ]
+          }
+        ]
+      },
+      "ValidationEnqueue": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Omitted or null queues all apps. A present string must name an app; an empty string is rejected."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ValidatorBootstrapRequest": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "next": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "type": "string",
+              "description": "Strictly local relative destination beginning with one slash."
+            }
+          }
+        },
+        "required": [
+          "run_id",
+          "next"
+        ],
+        "additionalProperties": false
+      },
+      "ValidatorResult": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed"
+            ]
+          },
+          "failure": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "description": "Completion of an active claimed run. Failure text describes an unsuccessful validation.",
+        "additionalProperties": false
+      },
+      "TokenHookRequest": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "type": "object",
+            "properties": {
+              "id_token": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  },
+                  "id_token_claims": {
+                    "type": "object",
+                    "properties": {
+                      "sub": {
+                        "type": "string"
+                      },
+                      "ext": {
+                        "type": "object",
+                        "properties": {
+                          "sid": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "extra": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "request": {
+            "type": "object",
+            "properties": {
+              "grant_types": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "authorization_code",
+                    "refresh_token",
+                    "client_credentials"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "grant_types"
+            ]
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "description": "For account grants, provide a Shauth account UUID in id_token_claims.sub (or id_token.subject), plus ext.sid for a live correlated Hydra session. A sole client_credentials grant needs no account session."
+      },
+      "AppsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.apps/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "apps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/App"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "apps"
+        ]
+      },
+      "AppObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.app/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "app": {
+            "$ref": "#/components/schemas/App"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "app"
+        ]
+      },
+      "AppValidationsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.app-validations/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Validation"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "validations"
+        ]
+      },
+      "AppValidationHistoryObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.app-validation-history/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Validation"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "runs"
+        ]
+      },
+      "UsersObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.users/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "page",
+          "users"
+        ]
+      },
+      "UserObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.user/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "user"
+        ]
+      },
+      "UserSessionsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.user-sessions/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "user",
+          "sessions",
+          "page"
+        ]
+      },
+      "SessionPolicyObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.session-policy/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/SessionPolicy"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "policy"
+        ]
+      },
+      "OidcClientsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.oidc-clients/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "clients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OIDCClient"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "clients"
+        ]
+      },
+      "GithubRoleMappingsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.github-role-mappings/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mappings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GitHubMapping"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "mappings"
+        ]
+      },
+      "ConnectorsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.connectors/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "github": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "admin_team": {
+                "type": "string"
+              },
+              "developer_team": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "entra": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "tenant_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "github",
+          "entra"
+        ]
+      },
+      "InvitationsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.invitations/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "invitations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Invitation"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "page",
+          "invitations"
+        ]
+      },
+      "SessionsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.sessions/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountSession"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "page",
+          "sessions"
+        ]
+      },
+      "SessionObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.session/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "oauth_session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "user",
+          "session",
+          "oauth_session_ids"
+        ]
+      },
+      "LogoutGrantsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.logout-grants/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "outstanding": {
+            "type": "boolean"
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogoutGrant"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "page",
+          "outstanding",
+          "grants"
+        ]
+      },
+      "AuditEventsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.audit-events/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEvent"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "page",
+          "events"
+        ]
+      },
+      "MonitoringObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.monitoring/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "build": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "started_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "revision",
+              "started_at"
+            ]
+          },
+          "active_sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "postgresql_healthy": {
+            "type": "boolean"
+          },
+          "hydra_healthy": {
+            "type": "boolean"
+          },
+          "infrastructure": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MonitoringSource"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "build",
+          "active_sessions",
+          "postgresql_healthy",
+          "hydra_healthy",
+          "infrastructure"
+        ]
+      },
+      "MetricsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.metrics/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "build": {
+            "$ref": "#/components/schemas/Build"
+          },
+          "users": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "disabled": {
+                "type": "integer"
+              },
+              "by_role": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              },
+              "by_identity_source": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              }
+            },
+            "required": [
+              "total",
+              "disabled",
+              "by_role",
+              "by_identity_source"
+            ]
+          },
+          "sessions": {
+            "type": "object",
+            "properties": {
+              "active": {
+                "type": "integer"
+              },
+              "revoked": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "active",
+              "revoked",
+              "total"
+            ]
+          },
+          "invitations": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "apps": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "total"
+            ]
+          },
+          "app_validations": {
+            "type": "object",
+            "properties": {
+              "by_status": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              },
+              "queued": {
+                "type": "integer"
+              },
+              "running": {
+                "type": "integer"
+              },
+              "oldest_queued_seconds": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "by_status",
+              "queued",
+              "running",
+              "oldest_queued_seconds"
+            ]
+          },
+          "logout_correlation": {
+            "type": "object",
+            "properties": {
+              "outstanding": {
+                "type": "integer"
+              },
+              "retrying": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "outstanding",
+              "retrying"
+            ]
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "build",
+          "users",
+          "sessions",
+          "invitations",
+          "apps",
+          "app_validations",
+          "logout_correlation"
+        ]
+      },
+      "RequestMetricsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.request-metrics/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "build": {
+            "$ref": "#/components/schemas/Build"
+          },
+          "traffic": {
+            "$ref": "#/components/schemas/Traffic"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "build",
+          "traffic"
+        ]
+      },
+      "LogsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.logs/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "build": {
+            "$ref": "#/components/schemas/Build"
+          },
+          "buffer": {
+            "type": "object",
+            "properties": {
+              "held": {
+                "type": "integer"
+              },
+              "capacity": {
+                "type": "integer"
+              },
+              "by_level": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              }
+            },
+            "required": [
+              "held",
+              "capacity",
+              "by_level"
+            ]
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogEntry"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "build",
+          "buffer",
+          "entries"
+        ]
+      },
+      "DeepHealthObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.deep-health/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ]
+          },
+          "build": {
+            "$ref": "#/components/schemas/Build"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthCheck"
+            }
+          },
+          "failing_validations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "status",
+          "build",
+          "checks"
+        ]
+      },
+      "MySessionsObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.my-sessions/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "$ref": "#/components/schemas/Session"
+                },
+                "current": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "session",
+                "current"
+              ]
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "user",
+          "page",
+          "sessions"
+        ]
+      },
+      "SessionRevokeObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.session-revoke/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "session_id",
+          "user_id"
+        ]
+      },
+      "UserResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.user/v1"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "required": [
+          "schema_version",
+          "user"
+        ]
+      },
+      "InvitationResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.invitation/v1"
+          },
+          "invitation": {
+            "$ref": "#/components/schemas/Invitation"
+          }
+        },
+        "required": [
+          "schema_version",
+          "invitation"
+        ]
+      },
+      "InvitationRevokeResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.invitation-revoke/v1"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "schema_version",
+          "id"
+        ]
+      },
+      "SessionRevocationObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.session-revocation/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "scope": {
+            "type": "string",
+            "const": "account"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "user_id",
+          "scope"
+        ]
+      },
+      "OidcClientResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.oidc-client/v1"
+          },
+          "client": {
+            "$ref": "#/components/schemas/OIDCClient"
+          }
+        },
+        "required": [
+          "schema_version",
+          "client"
+        ]
+      },
+      "OidcClientDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.oidc-client-delete/v1"
+          },
+          "client_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "client_id"
+        ]
+      },
+      "GithubRoleMappingResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.github-role-mapping/v1"
+          },
+          "mapping": {
+            "$ref": "#/components/schemas/GitHubMapping"
+          }
+        },
+        "required": [
+          "schema_version",
+          "mapping"
+        ]
+      },
+      "GithubRoleMappingDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.github-role-mapping-delete/v1"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "schema_version",
+          "id"
+        ]
+      },
+      "AppDeleteObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.app-delete/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "slug"
+        ]
+      },
+      "AppValidationEnqueueObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.app-validation-enqueue/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enqueued": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "slug": {
+                  "type": "string"
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": [
+                    "from_shauth",
+                    "from_app"
+                  ]
+                }
+              },
+              "required": [
+                "slug",
+                "direction"
+              ]
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "enqueued"
+        ]
+      },
+      "SessionResetObservedResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "const": "shauth.session-reset/v1"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reset_user_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "reset_user_id"
+        ]
+      }
+    },
+    "responses": {
+      "400": {
+        "description": "Invalid input.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "401": {
+        "description": "Missing or invalid credential.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "Bearer challenge on bearer-authenticated endpoints.",
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        }
+      },
+      "403": {
+        "description": "Operation refused.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Record not found.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "409": {
+        "description": "Conflicts with current state.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "500": {
+        "description": "Internal operation failed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "502": {
+        "description": "A required external dependency failed.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "503": {
+        "description": "The endpoint credential is not configured.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

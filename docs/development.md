@@ -60,6 +60,35 @@ identity provider or of HTTP responses; see [AGENTS.md](../AGENTS.md).
 |---|---|---|
 | Pull request | `ci.yml` | The integration stack and unit tests; Terraform formatting, validation and tests; a Trivy scan of the Terraform for high and critical findings; the validator image on both architectures. |
 | Push to `main` | `publish.yml` | Builds, verifies, publishes and prunes the images. |
+| Pull request, push to `main`, daily | `image-pins.yml` | Compares every pinned image with Docker Hub (below). |
 
 Every job sets `timeout-minutes` of 15 or less, and
 `scripts/check-workflow-timeouts.sh` enforces it.
+
+### Image pins
+
+Every image is a copy of a Docker Hub image, pinned by tag and digest:
+`public.ecr.aws/docker/library/<name>` for official images and
+`mirror.gcr.io/<repository>` for the rest, because Docker Hub limits anonymous
+pulls and the shared CI runners exhaust that limit. `scripts/image-pins.mjs`
+finds every such pin in the tracked files and reads Docker Hub's tag API and the
+mirror's manifest for it:
+
+- **ok**: the pin is the digest Docker Hub serves for the tag, and the mirror
+  serves the same digest.
+- **HELD**: Docker Hub moved the tag, or published a newer release with the same
+  variant and major version, less than 24 hours ago.
+- **DRIFT** (fails): that newer digest or release is at least 24 hours old, or
+  the mirror serves a different digest than the pin.
+
+Dependabot's `docker` updates still propose new versions, but it applies no
+cooldown to public.ecr.aws, so this check is what holds image pins to the
+24-hour rule. To bump a pin, take the digest Docker Hub serves for the tag and
+confirm the mirror serves the same one, for example with
+`docker buildx imagetools inspect public.ecr.aws/docker/library/node:<tag>`.
+Run the check locally with:
+
+```sh
+node --test scripts/image-pins.test.mjs
+node scripts/image-pins.mjs
+```
